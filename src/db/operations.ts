@@ -1,0 +1,308 @@
+import { db } from './db'
+import type {
+  Bill,
+  BillItem,
+  Group,
+  GroupMember,
+  ItemSplit,
+  SplitType,
+} from '@/types'
+import { generateId, getDeviceId, now } from '@/lib/utils'
+import { computeSplits, type SplitInput } from '@/lib/splits'
+
+function syncFields(overrides?: Partial<{ id: string }>) {
+  const timestamp = now()
+  return {
+    id: overrides?.id ?? generateId(),
+    created_at: timestamp,
+    updated_at: timestamp,
+    synced_at: null as string | null,
+    is_deleted: false,
+    device_id: getDeviceId(),
+  }
+}
+
+// ── Bills ────────────────────────────────────────────
+
+export interface CreateBillInput {
+  title: string
+  currency: string
+  groupId: string | null
+  createdBy: string
+  note: string
+  items: {
+    name: string
+    amount: number
+    splits: {
+      userId: string
+      splitType: SplitType
+      splitValue: number
+    }[]
+  }[]
+}
+
+export async function createBill(input: CreateBillInput): Promise<string> {
+  const billId = generateId()
+  const totalAmount = input.items.reduce((sum, item) => sum + item.amount, 0)
+
+  await db.transaction('rw', [db.bills, db.bill_items, db.item_splits, db.activity_log], async () => {
+    const bill: Bill = {
+      ...syncFields({ id: billId }),
+      title: input.title,
+      group_id: input.groupId,
+      currency: input.currency,
+      created_by: input.createdBy,
+      total_amount: totalAmount,
+      note: input.note,
+    }
+    await db.bills.add(bill)
+
+    for (const item of input.items) {
+      const itemId = generateId()
+      const billItem: BillItem = {
+        ...syncFields({ id: itemId }),
+        bill_id: billId,
+        name: item.name,
+        amount: item.amount,
+      }
+      await db.bill_items.add(billItem)
+
+      if (item.splits.length > 0) {
+        const computed = computeSplits(item.amount, item.splits as SplitInput[])
+        for (let i = 0; i < item.splits.length; i++) {
+          const split: ItemSplit = {
+            ...syncFields(),
+            item_id: itemId,
+            user_id: item.splits[i].userId,
+            split_type: item.splits[i].splitType,
+            split_value: item.splits[i].splitValue,
+            computed_amount: computed[i].computedAmount,
+          }
+          await db.item_splits.add(split)
+        }
+      }
+    }
+
+    await db.activity_log.add({
+      ...syncFields(),
+      group_id: input.groupId,
+      user_id: input.createdBy,
+      action: 'created',
+      entity_type: 'bill',
+      entity_id: billId,
+      description: `Created bill "${input.title}"`,
+    })
+  })
+
+  return billId
+}
+
+export async function deleteBill(billId: string, userId: string) {
+  const timestamp = now()
+  await db.transaction('rw', [db.bills, db.bill_items, db.item_splits, db.activity_log], async () => {
+    const bill = await db.bills.get(billId)
+    if (!bill) return
+
+    await db.bills.update(billId, { is_deleted: true, updated_at: timestamp })
+
+    const items = await db.bill_items.where('bill_id').equals(billId).toArray()
+    for (const item of items) {
+      await db.bill_items.update(item.id, { is_deleted: true, updated_at: timestamp })
+      const splits = await db.item_splits.where('item_id').equals(item.id).toArray()
+      for (const split of splits) {
+        await db.item_splits.update(split.id, { is_deleted: true, updated_at: timestamp })
+      }
+    }
+
+    await db.activity_log.add({
+      ...syncFields(),
+      group_id: bill.group_id,
+      user_id: userId,
+      action: 'deleted',
+      entity_type: 'bill',
+      entity_id: billId,
+      description: `Deleted bill "${bill.title}"`,
+    })
+  })
+}
+
+// ── Groups ───────────────────────────────────────────
+
+export async function createGroup(
+  name: string,
+  currency: string,
+  createdBy: string,
+): Promise<string> {
+  const groupId = generateId()
+  const inviteCode = generateId().slice(0, 6).toUpperCase()
+
+  await db.transaction('rw', [db.groups, db.group_members, db.activity_log], async () => {
+    const group: Group = {
+      ...syncFields({ id: groupId }),
+      name,
+      currency,
+      created_by: createdBy,
+      invite_code: inviteCode,
+    }
+    await db.groups.add(group)
+
+    const member: GroupMember = {
+      ...syncFields(),
+      group_id: groupId,
+      user_id: createdBy,
+      display_name: 'You',
+      joined_at: now(),
+    }
+    await db.group_members.add(member)
+
+    await db.activity_log.add({
+      ...syncFields(),
+      group_id: groupId,
+      user_id: createdBy,
+      action: 'created',
+      entity_type: 'group',
+      entity_id: groupId,
+      description: `Created group "${name}"`,
+    })
+  })
+
+  return groupId
+}
+
+export async function addGroupMember(
+  groupId: string,
+  displayName: string,
+  addedBy: string,
+): Promise<string> {
+  const memberId = generateId()
+  const userId = generateId()
+
+  await db.transaction('rw', [db.profiles, db.group_members, db.activity_log], async () => {
+    await db.profiles.add({
+      ...syncFields({ id: userId }),
+      email: '',
+      display_name: displayName,
+      avatar_url: null,
+    })
+
+    const member: GroupMember = {
+      ...syncFields({ id: memberId }),
+      group_id: groupId,
+      user_id: userId,
+      display_name: displayName,
+      joined_at: now(),
+    }
+    await db.group_members.add(member)
+
+    await db.activity_log.add({
+      ...syncFields(),
+      group_id: groupId,
+      user_id: addedBy,
+      action: 'created',
+      entity_type: 'group',
+      entity_id: memberId,
+      description: `Added "${displayName}" to group`,
+    })
+  })
+
+  return userId
+}
+
+export async function deleteGroup(groupId: string, userId: string) {
+  const timestamp = now()
+  await db.transaction('rw', [db.groups, db.group_members, db.activity_log], async () => {
+    const group = await db.groups.get(groupId)
+    if (!group) return
+
+    await db.groups.update(groupId, { is_deleted: true, updated_at: timestamp })
+
+    const members = await db.group_members.where('group_id').equals(groupId).toArray()
+    for (const m of members) {
+      await db.group_members.update(m.id, { is_deleted: true, updated_at: timestamp })
+    }
+
+    await db.activity_log.add({
+      ...syncFields(),
+      group_id: groupId,
+      user_id: userId,
+      action: 'deleted',
+      entity_type: 'group',
+      entity_id: groupId,
+      description: `Deleted group "${group.name}"`,
+    })
+  })
+}
+
+// ── Settlements ─────────────────────────────────────
+
+export async function createSettlement(
+  groupId: string,
+  fromUserId: string,
+  toUserId: string,
+  amount: number,
+  currency: string,
+  markedBy: string,
+): Promise<string> {
+  const settlementId = generateId()
+
+  await db.transaction('rw', [db.settlements, db.activity_log], async () => {
+    await db.settlements.add({
+      ...syncFields({ id: settlementId }),
+      group_id: groupId,
+      from_user_id: fromUserId,
+      to_user_id: toUserId,
+      amount,
+      currency,
+      is_settled: true,
+    })
+
+    const fromProfile = await db.profiles.get(fromUserId)
+    const toProfile = await db.profiles.get(toUserId)
+
+    await db.activity_log.add({
+      ...syncFields(),
+      group_id: groupId,
+      user_id: markedBy,
+      action: 'settled',
+      entity_type: 'settlement',
+      entity_id: settlementId,
+      description: `${fromProfile?.display_name ?? 'Someone'} settled ${new Intl.NumberFormat('en-PH', { style: 'currency', currency, minimumFractionDigits: 0 }).format(amount)} with ${toProfile?.display_name ?? 'someone'}`,
+    })
+  })
+
+  return settlementId
+}
+
+// ── Queries ──────────────────────────────────────────
+
+export async function getBillWithDetails(billId: string) {
+  const bill = await db.bills.get(billId)
+  if (!bill || bill.is_deleted) return null
+
+  const items = await db.bill_items.where('bill_id').equals(billId).toArray()
+  const activeItems = items.filter((i) => !i.is_deleted)
+
+  const itemsWithSplits = await Promise.all(
+    activeItems.map(async (item) => {
+      const splits = await db.item_splits.where('item_id').equals(item.id).toArray()
+      const activeSplits = splits.filter((s) => !s.is_deleted)
+
+      const splitsWithNames = await Promise.all(
+        activeSplits.map(async (split) => {
+          const profile = await db.profiles.get(split.user_id)
+          return { ...split, displayName: profile?.display_name ?? 'Unknown' }
+        }),
+      )
+
+      return { ...item, splits: splitsWithNames }
+    }),
+  )
+
+  const creator = await db.profiles.get(bill.created_by)
+
+  return {
+    ...bill,
+    creatorName: creator?.display_name ?? 'Unknown',
+    items: itemsWithSplits,
+  }
+}

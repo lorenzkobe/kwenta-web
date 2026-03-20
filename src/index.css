@@ -1,9 +1,5 @@
 @import "tailwindcss";
 
-@plugin "daisyui" {
-  themes: corporate --default, business --prefersdark, winter, silk, retro, night;
-}
-
 :root {
   font-family:
     Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -37,4 +33,15 @@ body {
 body,
 #root {
   min-height: 100vh;
+}
+
+@keyframes slideUp {
+  from {
+    opacity: 0;
+    transform: translateY(1rem);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
