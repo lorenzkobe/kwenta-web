@@ -11,6 +11,7 @@ import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Input } from '@/components/ui/input'
 import { AddBillDialog } from '@/components/common/AddBillDialog'
+import { BillDetailModal } from '@/components/common/BillDetailModal'
 
 type MemberRow = {
   id: string
@@ -101,7 +102,7 @@ function ManageMembersDialog({
                   <span className="flex-1 text-sm font-medium text-slate-800">
                     {m.profileName}
                     {m.isCurrentUser && (
-                      <Badge className="ml-1.5 text-[0.65rem] px-1.5">you</Badge>
+                      <Badge className="ml-1.5 px-2.5 py-1 text-[0.65rem] leading-none">you</Badge>
                     )}
                   </span>
                   {!m.isCurrentUser && (
@@ -127,7 +128,7 @@ function ManageMembersDialog({
 
         {/* Add member */}
         <div className="border-t border-slate-100 px-5 py-4">
-          <p className="mb-2 text-xs font-medium text-slate-500">Add a member</p>
+          <p className="mb-3 text-xs font-medium text-slate-500">Add a member</p>
           <div className="flex gap-2">
             <Input
               ref={inputRef}
@@ -162,6 +163,8 @@ export function GroupDetailPage() {
   const [copied, setCopied] = useState(false)
   const [showManage, setShowManage] = useState(false)
   const [showAddBill, setShowAddBill] = useState(false)
+  const [detailBillId, setDetailBillId] = useState<string | null>(null)
+  const [editBillId, setEditBillId] = useState<string | null>(null)
   const [balanceSummary, setBalanceSummary] = useState<GroupBalanceSummary | null>(null)
   const [settling, setSettling] = useState<string | null>(null)
 
@@ -174,6 +177,12 @@ export function GroupDetailPage() {
     if (!groupId) return []
     const all = await db.group_members.where('group_id').equals(groupId).toArray()
     const active = all.filter((m) => !m.is_deleted)
+    active.sort((a, b) => {
+      const aMe = a.user_id === userId
+      const bMe = b.user_id === userId
+      if (aMe !== bMe) return aMe ? -1 : 1
+      return a.joined_at.localeCompare(b.joined_at)
+    })
     return Promise.all(
       active.map(async (m) => {
         const profile = await db.profiles.get(m.user_id)
@@ -325,12 +334,13 @@ export function GroupDetailPage() {
                 </div>
                 <span className="text-sm font-medium text-slate-700">{m.profileName}</span>
                 {m.isCurrentUser && (
-                  <Badge className="text-[0.6rem] px-1 py-0">you</Badge>
+                  <Badge className="px-2.5 py-1 text-[0.65rem] leading-none">you</Badge>
                 )}
               </div>
             ))}
 
             <button
+              type="button"
               onClick={() => setShowManage(true)}
               className="flex items-center gap-1.5 rounded-full border border-dashed border-slate-300 px-3 py-1.5 text-sm text-slate-400 transition-colors hover:border-blue-400 hover:text-blue-600"
             >
@@ -421,7 +431,14 @@ export function GroupDetailPage() {
               <ReceiptText className="size-4 text-blue-600" />
               <h2 className="text-lg font-semibold">Group bills</h2>
             </div>
-            <Button size="sm" className="rounded-full" onClick={() => setShowAddBill(true)}>
+            <Button
+              size="sm"
+              className="rounded-full"
+              onClick={() => {
+                setEditBillId(null)
+                setShowAddBill(true)
+              }}
+            >
               <Plus className="size-3.5" />
               Add bill
             </Button>
@@ -434,10 +451,11 @@ export function GroupDetailPage() {
           ) : (
             <div className="mt-4 space-y-2">
               {bills.map((bill) => (
-                <Link
+                <button
                   key={bill.id}
-                  to={`/app/bills/${bill.id}`}
-                  className="flex items-center justify-between rounded-xl border border-slate-200 bg-slate-100/60 px-4 py-3 transition-colors hover:bg-slate-100/80"
+                  type="button"
+                  onClick={() => setDetailBillId(bill.id)}
+                  className="flex w-full items-center justify-between rounded-xl border border-slate-200 bg-slate-100/60 px-4 py-3 text-left transition-colors hover:bg-slate-100/80"
                 >
                   <div>
                     <p className="text-sm font-medium text-slate-800">{bill.title}</p>
@@ -448,7 +466,7 @@ export function GroupDetailPage() {
                   <span className="text-sm font-semibold text-slate-800">
                     {formatCurrency(bill.total_amount, bill.currency)}
                   </span>
-                </Link>
+                </button>
               ))}
             </div>
           )}
@@ -466,7 +484,21 @@ export function GroupDetailPage() {
         />
       )}
 
-      {/* Add bill dialog */}
+      {detailBillId && userId && (
+        <BillDetailModal
+          billId={detailBillId}
+          currentUserId={userId}
+          onClose={() => setDetailBillId(null)}
+          onUpdated={refreshBalances}
+          onEdit={(id) => {
+            setDetailBillId(null)
+            setEditBillId(id)
+            setShowAddBill(true)
+          }}
+        />
+      )}
+
+      {/* Add / edit bill dialog */}
       {showAddBill && userId && groupId && group && (
         <AddBillDialog
           groupId={groupId}
@@ -477,7 +509,11 @@ export function GroupDetailPage() {
             isCurrentUser: m.isCurrentUser,
           }))}
           currentUserId={userId}
-          onClose={() => setShowAddBill(false)}
+          editBillId={editBillId}
+          onClose={() => {
+            setShowAddBill(false)
+            setEditBillId(null)
+          }}
           onSaved={refreshBalances}
         />
       )}

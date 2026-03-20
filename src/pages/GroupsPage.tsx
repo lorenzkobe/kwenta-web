@@ -65,26 +65,37 @@ export function GroupsPage() {
             </Button>
           </div>
           <div className="mt-4 space-y-3">
-            <Input
-              type="text"
-              placeholder="Group name (e.g. Baguio Food Trip)"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              autoFocus
-            />
-            <Select value={currency} onValueChange={setCurrency}>
-              <SelectTrigger>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="PHP">PHP — Philippine Peso</SelectItem>
-                <SelectItem value="USD">USD — US Dollar</SelectItem>
-                <SelectItem value="EUR">EUR — Euro</SelectItem>
-                <SelectItem value="JPY">JPY — Japanese Yen</SelectItem>
-                <SelectItem value="KRW">KRW — Korean Won</SelectItem>
-                <SelectItem value="GBP">GBP — British Pound</SelectItem>
-              </SelectContent>
-            </Select>
+            <div className="flex flex-col gap-2">
+              <label htmlFor="new-group-name" className="text-sm font-medium text-slate-800">
+                Group name
+              </label>
+              <Input
+                id="new-group-name"
+                type="text"
+                placeholder="e.g. Baguio Food Trip"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                autoFocus
+              />
+            </div>
+            <div className="flex flex-col gap-2">
+              <label htmlFor="new-group-currency" className="text-sm font-medium text-slate-800">
+                Currency
+              </label>
+              <Select value={currency} onValueChange={setCurrency}>
+                <SelectTrigger id="new-group-currency">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="PHP">PHP — Philippine Peso</SelectItem>
+                  <SelectItem value="USD">USD — US Dollar</SelectItem>
+                  <SelectItem value="EUR">EUR — Euro</SelectItem>
+                  <SelectItem value="JPY">JPY — Japanese Yen</SelectItem>
+                  <SelectItem value="KRW">KRW — Korean Won</SelectItem>
+                  <SelectItem value="GBP">GBP — British Pound</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
             <Button
               className="w-full rounded-xl"
               onClick={handleCreate}

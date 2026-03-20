@@ -25,7 +25,7 @@ export function JoinGroupPage() {
 
           <div className="mt-6 rounded-2xl border border-slate-200 bg-slate-100/80 p-4 text-center">
             <p className="text-xs font-medium text-slate-400">Invite code</p>
-            <p className="mt-1 text-lg font-mono font-semibold tracking-widest text-blue-600">
+            <p className="mt-2 text-lg font-mono font-semibold tracking-widest text-blue-600">
               {inviteCode}
             </p>
           </div>

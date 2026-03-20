@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { ArrowLeft, Loader2, ReceiptText, Trash2, Users } from 'lucide-react'
+import { ArrowLeft, Loader2, Pencil, ReceiptText, Trash2, Users } from 'lucide-react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { getBillWithDetails, deleteBill } from '@/db/operations'
 import { useCurrentUser } from '@/hooks/useCurrentUser'
@@ -62,15 +62,23 @@ export function BillDetailPage() {
             Back
           </Link>
         </Button>
-        <Button
-          variant="ghost"
-          size="sm"
-          className="rounded-full text-red-600"
-          onClick={handleDelete}
-        >
-          <Trash2 className="size-4" />
-          Delete
-        </Button>
+        <div className="flex items-center gap-1">
+          <Button asChild variant="ghost" size="sm" className="rounded-full">
+            <Link to={`/app/bills/new?edit=${billId}`}>
+              <Pencil className="size-4" />
+              Edit
+            </Link>
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="rounded-full text-red-600"
+            onClick={handleDelete}
+          >
+            <Trash2 className="size-4" />
+            Delete
+          </Button>
+        </div>
       </div>
 
       <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
@@ -123,7 +131,7 @@ export function BillDetailPage() {
                     <Users className="size-3.5" />
                     Split ({item.splits[0].split_type})
                   </div>
-                  <div className="mt-2 space-y-1.5">
+                  <div className="mt-3 space-y-1.5">
                     {item.splits.map((split) => (
                       <div
                         key={split.id}

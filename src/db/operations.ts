@@ -97,6 +97,84 @@ export async function createBill(input: CreateBillInput): Promise<string> {
   return billId
 }
 
+export type UpdateBillItemsInput = CreateBillInput['items']
+
+export async function updateBill(
+  billId: string,
+  editorUserId: string,
+  patch: {
+    title: string
+    note: string
+    currency: string
+    items: UpdateBillItemsInput
+  },
+): Promise<void> {
+  const timestamp = now()
+  const bill = await db.bills.get(billId)
+  if (!bill || bill.is_deleted) return
+
+  const totalAmount = patch.items.reduce((sum, item) => sum + item.amount, 0)
+
+  await db.transaction('rw', [db.bills, db.bill_items, db.item_splits, db.activity_log], async () => {
+    const existingItems = await db.bill_items.where('bill_id').equals(billId).toArray()
+    for (const item of existingItems) {
+      if (!item.is_deleted) {
+        await db.bill_items.update(item.id, { is_deleted: true, updated_at: timestamp })
+        const splits = await db.item_splits.where('item_id').equals(item.id).toArray()
+        for (const s of splits) {
+          if (!s.is_deleted) {
+            await db.item_splits.update(s.id, { is_deleted: true, updated_at: timestamp })
+          }
+        }
+      }
+    }
+
+    await db.bills.update(billId, {
+      title: patch.title,
+      note: patch.note,
+      currency: patch.currency,
+      total_amount: totalAmount,
+      updated_at: timestamp,
+      synced_at: null,
+    })
+
+    for (const item of patch.items) {
+      const itemId = generateId()
+      const billItem: BillItem = {
+        ...syncFields({ id: itemId }),
+        bill_id: billId,
+        name: item.name,
+        amount: item.amount,
+      }
+      await db.bill_items.add(billItem)
+
+      if (item.splits.length > 0) {
+        const computed = computeSplits(item.amount, item.splits as SplitInput[])
+        for (let i = 0; i < item.splits.length; i++) {
+          await db.item_splits.add({
+            ...syncFields(),
+            item_id: itemId,
+            user_id: item.splits[i].userId,
+            split_type: item.splits[i].splitType,
+            split_value: item.splits[i].splitValue,
+            computed_amount: computed[i].computedAmount,
+          })
+        }
+      }
+    }
+
+    await db.activity_log.add({
+      ...syncFields(),
+      group_id: bill.group_id,
+      user_id: editorUserId,
+      action: 'updated',
+      entity_type: 'bill',
+      entity_id: billId,
+      description: `Updated bill "${patch.title}"`,
+    })
+  })
+}
+
 export async function deleteBill(billId: string, userId: string) {
   const timestamp = now()
   await db.transaction('rw', [db.bills, db.bill_items, db.item_splits, db.activity_log], async () => {

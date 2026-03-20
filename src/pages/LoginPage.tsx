@@ -105,7 +105,7 @@ export function LoginPage() {
           )}
 
           <form onSubmit={handleSubmit} className="mt-6 space-y-4">
-            <div className="w-full space-y-1.5">
+            <div className="flex w-full flex-col gap-2">
               <label className="text-sm font-medium text-slate-800" htmlFor="email">
                 Email
               </label>
@@ -120,7 +120,7 @@ export function LoginPage() {
             </div>
 
             {mode !== 'forgot' && (
-              <div className="w-full space-y-1.5">
+              <div className="flex w-full flex-col gap-2">
                 <label className="text-sm font-medium text-slate-800" htmlFor="password">
                   Password
                 </label>

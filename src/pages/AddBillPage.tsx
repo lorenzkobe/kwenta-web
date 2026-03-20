@@ -1,16 +1,31 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { ArrowLeft, LayoutList, Plus, Save, SplitSquareHorizontal, Trash2, UserPlus, Users } from 'lucide-react'
 import { useLiveQuery } from 'dexie-react-hooks'
 import { db } from '@/db/db'
-import { createBill, type CreateBillInput } from '@/db/operations'
+import {
+  createBill,
+  getBillWithDetails,
+  updateBill,
+  type CreateBillInput,
+} from '@/db/operations'
 import { useCurrentUser } from '@/hooks/useCurrentUser'
 import type { SplitType } from '@/types'
+import {
+  applyClearedSplitField,
+  buildSplitPayload,
+  equalCustomMap,
+  equalPercentMap,
+  lineSplitsValid,
+  redistributeWithPinned,
+  type PinnedSplits,
+} from '@/lib/bill-split-form'
 import { cn, formatCurrency } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@/components/ui/select'
+import { SplitValueRows } from '@/components/common/SplitValueRows'
 
 type BillMode = 'simple' | 'itemized'
 
@@ -20,6 +35,8 @@ interface ItemDraft {
   amount: string
   splitType: SplitType
   selectedUserIds: string[]
+  splitValues: Record<string, string>
+  pinnedSplit: PinnedSplits
 }
 
 function newItem(): ItemDraft {
@@ -29,6 +46,8 @@ function newItem(): ItemDraft {
     amount: '',
     splitType: 'equal',
     selectedUserIds: [],
+    splitValues: {},
+    pinnedSplit: {},
   }
 }
 
@@ -45,23 +64,27 @@ export function AddBillPage() {
   const navigate = useNavigate()
   const [searchParams] = useSearchParams()
   const groupIdParam = searchParams.get('groupId')
+  const editBillId = searchParams.get('edit')
 
   const { userId } = useCurrentUser()
 
-  // Shared fields
   const [mode, setMode] = useState<BillMode>('simple')
   const [title, setTitle] = useState('')
   const [currency, setCurrency] = useState('PHP')
   const [groupId, setGroupId] = useState<string | null>(groupIdParam)
   const [note, setNote] = useState('')
   const [saving, setSaving] = useState(false)
+  const [loadingEdit, setLoadingEdit] = useState(false)
 
-  // Simple mode fields
   const [simpleAmount, setSimpleAmount] = useState('')
   const [simpleSplitType, setSimpleSplitType] = useState<SplitType>('equal')
   const [simpleSelectedUserIds, setSimpleSelectedUserIds] = useState<string[]>([])
+  const [simpleSplitMeta, setSimpleSplitMeta] = useState<{
+    values: Record<string, string>
+    pinned: PinnedSplits
+  }>({ values: {}, pinned: {} })
+  const simpleSplitValues = simpleSplitMeta.values
 
-  // Itemized mode fields
   const [items, setItems] = useState<ItemDraft[]>([newItem()])
 
   const groups = useLiveQuery(async () => {
@@ -90,11 +113,189 @@ export function AddBillPage() {
     return withProfiles
   }, [groupId, userId])
 
-  // Itemized helpers
   const itemizedTotal = items.reduce((sum, item) => {
     const val = parseFloat(item.amount)
     return sum + (isNaN(val) ? 0 : val)
   }, 0)
+
+  const simpleAmountNum = parseFloat(simpleAmount) || 0
+  const members = groupMembers ?? []
+  const isEdit = Boolean(editBillId)
+
+  const simpleSplitsOk =
+    members.length === 0 ||
+    simpleSelectedUserIds.length === 0 ||
+    lineSplitsValid(simpleSplitType, simpleAmountNum, simpleSelectedUserIds, simpleSplitValues)
+
+  const itemizedLinesOk =
+    members.length === 0 ||
+    items
+      .filter((i) => i.name.trim() && parseFloat(i.amount) > 0)
+      .every((item) => {
+        if (item.selectedUserIds.length === 0) return true
+        return lineSplitsValid(
+          item.splitType,
+          parseFloat(item.amount) || 0,
+          item.selectedUserIds,
+          item.splitValues,
+        )
+      })
+
+  const canSave =
+    Boolean(userId) &&
+    title.trim() &&
+    simpleSplitsOk &&
+    itemizedLinesOk &&
+    (mode === 'simple'
+      ? simpleAmountNum > 0
+      : items.some((i) => i.name.trim() && parseFloat(i.amount) > 0))
+
+  const selectedIdsRef = useRef(simpleSelectedUserIds)
+  selectedIdsRef.current = simpleSelectedUserIds
+  const simpleSplitTypeRef = useRef(simpleSplitType)
+  simpleSplitTypeRef.current = simpleSplitType
+  const simpleAmountStrRef = useRef(simpleAmount)
+  simpleAmountStrRef.current = simpleAmount
+
+  useEffect(() => {
+    if (!editBillId) return
+    let cancelled = false
+    setLoadingEdit(true)
+    getBillWithDetails(editBillId).then((d) => {
+      if (cancelled || !d) {
+        setLoadingEdit(false)
+        return
+      }
+      setTitle(d.title)
+      setNote(d.note)
+      setCurrency(d.currency)
+      setGroupId(d.group_id)
+      if (d.items.length === 1) {
+        setMode('simple')
+        const line = d.items[0]
+        setSimpleAmount(String(line.amount))
+        const splits = line.splits
+        if (splits.length) {
+          setSimpleSplitType(splits[0].split_type)
+          setSimpleSelectedUserIds(splits.map((s) => s.user_id))
+          setSimpleSplitMeta({
+            values: Object.fromEntries(splits.map((s) => [s.user_id, String(s.split_value)])),
+            pinned: {},
+          })
+        } else {
+          setSimpleSplitType('equal')
+          setSimpleSelectedUserIds([])
+          setSimpleSplitMeta({ values: {}, pinned: {} })
+        }
+      } else {
+        setMode('itemized')
+        setItems(
+          d.items.map((item) => ({
+            key: item.id,
+            name: item.name,
+            amount: String(item.amount),
+            splitType: item.splits[0]?.split_type ?? 'equal',
+            selectedUserIds: item.splits.map((s) => s.user_id),
+            splitValues: Object.fromEntries(
+              item.splits.map((s) => [s.user_id, String(s.split_value)]),
+            ),
+            pinnedSplit: {},
+          })),
+        )
+      }
+      setLoadingEdit(false)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [editBillId])
+
+  function setSimpleSplitTypeAndValues(t: SplitType) {
+    setSimpleSplitType(t)
+    const ids = selectedIdsRef.current
+    if (t === 'equal') {
+      setSimpleSplitMeta({ values: {}, pinned: {} })
+      return
+    }
+    if (ids.length === 0) {
+      setSimpleSplitMeta({ values: {}, pinned: {} })
+      return
+    }
+    if (t === 'percentage') {
+      setSimpleSplitMeta({ values: equalPercentMap(ids), pinned: {} })
+      return
+    }
+    const amt = parseFloat(simpleAmount) || 0
+    setSimpleSplitMeta({
+      values: amt > 0 ? equalCustomMap(ids, amt) : {},
+      pinned: {},
+    })
+  }
+
+  function onSimpleSplitInputChange(uid: string, raw: string) {
+    const ids = selectedIdsRef.current
+    const st = simpleSplitTypeRef.current
+    const amt = parseFloat(simpleAmountStrRef.current) || 0
+    setSimpleSplitMeta((meta) => {
+      let pinned = { ...meta.pinned }
+      if (raw.trim() === '') {
+        const target = st === 'percentage' ? 100 : amt
+        return applyClearedSplitField(ids, meta.values, meta.pinned, uid, st === 'percentage' ? 'percentage' : 'custom', target)
+      }
+      pinned[uid] = true
+      const values = { ...meta.values, [uid]: raw }
+      if (st === 'percentage') {
+        return {
+          pinned,
+          values: redistributeWithPinned(ids, values, pinned, 100),
+        }
+      }
+      if (amt <= 0) return { pinned, values }
+      return {
+        pinned,
+        values: redistributeWithPinned(ids, values, pinned, amt),
+      }
+    })
+  }
+
+  function toggleSimpleUser(uid: string) {
+    setSimpleSelectedUserIds((prev) => {
+      const adding = !prev.includes(uid)
+      const next = adding ? [...prev, uid] : prev.filter((x) => x !== uid)
+      const st = simpleSplitTypeRef.current
+      const amt = parseFloat(simpleAmountStrRef.current) || 0
+      setSimpleSplitMeta((meta) => {
+        let pinned = { ...meta.pinned }
+        if (!adding) delete pinned[uid]
+        let values = { ...meta.values }
+        if (!adding) delete values[uid]
+
+        if (st === 'equal') {
+          return { values: {}, pinned: {} }
+        }
+        if (st === 'percentage') {
+          if (Object.keys(pinned).length === 0) {
+            return { values: equalPercentMap(next), pinned: {} }
+          }
+          return {
+            pinned,
+            values: redistributeWithPinned(next, values, pinned, 100),
+          }
+        }
+        if (st === 'custom' && amt > 0) {
+          if (Object.keys(pinned).length === 0) {
+            return { values: equalCustomMap(next, amt), pinned: {} }
+          }
+          return {
+            pinned,
+            values: redistributeWithPinned(next, values, pinned, amt),
+          }
+        }
+        return { values, pinned }
+      })
+      return next
+    })
+  }
 
   function updateItem(key: string, patch: Partial<ItemDraft>) {
     setItems((prev) => prev.map((item) => (item.key === key ? { ...item, ...patch } : item)))
@@ -111,53 +312,145 @@ export function AddBillPage() {
     setItems((prev) =>
       prev.map((item) => {
         if (item.key !== itemKey) return item
-        const selected = item.selectedUserIds.includes(uid)
-          ? item.selectedUserIds.filter((id) => id !== uid)
-          : [...item.selectedUserIds, uid]
-        return { ...item, selectedUserIds: selected }
+        const adding = !item.selectedUserIds.includes(uid)
+        const nextIds = adding
+          ? [...item.selectedUserIds, uid]
+          : item.selectedUserIds.filter((x) => x !== uid)
+        let pinned = { ...item.pinnedSplit }
+        if (!adding) delete pinned[uid]
+        let values = { ...item.splitValues }
+        if (!adding) delete values[uid]
+
+        if (item.splitType === 'equal') {
+          return { ...item, selectedUserIds: nextIds, splitValues: {}, pinnedSplit: {} }
+        }
+        if (item.splitType === 'percentage') {
+          if (Object.keys(pinned).length === 0) {
+            return {
+              ...item,
+              selectedUserIds: nextIds,
+              splitValues: equalPercentMap(nextIds),
+              pinnedSplit: {},
+            }
+          }
+          return {
+            ...item,
+            selectedUserIds: nextIds,
+            splitValues: redistributeWithPinned(nextIds, values, pinned, 100),
+            pinnedSplit: pinned,
+          }
+        }
+        const amt = parseFloat(item.amount) || 0
+        if (item.splitType === 'custom' && amt > 0) {
+          if (Object.keys(pinned).length === 0) {
+            return {
+              ...item,
+              selectedUserIds: nextIds,
+              splitValues: equalCustomMap(nextIds, amt),
+              pinnedSplit: {},
+            }
+          }
+          return {
+            ...item,
+            selectedUserIds: nextIds,
+            splitValues: redistributeWithPinned(nextIds, values, pinned, amt),
+            pinnedSplit: pinned,
+          }
+        }
+        return { ...item, selectedUserIds: nextIds, splitValues: values, pinnedSplit: pinned }
       }),
     )
   }
 
-  function toggleSimpleUser(uid: string) {
-    setSimpleSelectedUserIds((prev) =>
-      prev.includes(uid) ? prev.filter((id) => id !== uid) : [...prev, uid],
+  function onItemSplitTypeChange(itemKey: string, t: SplitType) {
+    setItems((prev) =>
+      prev.map((item) => {
+        if (item.key !== itemKey) return item
+        if (t === 'equal') {
+          return { ...item, splitType: t, splitValues: {}, pinnedSplit: {} }
+        }
+        if (item.selectedUserIds.length === 0) {
+          return { ...item, splitType: t, splitValues: {}, pinnedSplit: {} }
+        }
+        if (t === 'percentage') {
+          return {
+            ...item,
+            splitType: t,
+            splitValues: equalPercentMap(item.selectedUserIds),
+            pinnedSplit: {},
+          }
+        }
+        const amt = parseFloat(item.amount) || 0
+        return {
+          ...item,
+          splitType: t,
+          splitValues: amt > 0 ? equalCustomMap(item.selectedUserIds, amt) : {},
+          pinnedSplit: {},
+        }
+      }),
     )
   }
 
-  function switchMode(next: BillMode) {
-    setMode(next)
+  function onItemSplitValueChange(itemKey: string, uid: string, raw: string) {
+    setItems((prev) =>
+      prev.map((item) => {
+        if (item.key !== itemKey) return item
+        const target = item.splitType === 'percentage' ? 100 : parseFloat(item.amount) || 0
+        let pinned = { ...item.pinnedSplit }
+        if (raw.trim() === '') {
+          const mode = item.splitType === 'percentage' ? 'percentage' : 'custom'
+          const { values, pinned: nextPinned } = applyClearedSplitField(
+            item.selectedUserIds,
+            item.splitValues,
+            item.pinnedSplit,
+            uid,
+            mode,
+            target,
+          )
+          return { ...item, splitValues: values, pinnedSplit: nextPinned }
+        }
+        pinned[uid] = true
+        const values = { ...item.splitValues, [uid]: raw }
+        if (item.splitType === 'percentage') {
+          return {
+            ...item,
+            pinnedSplit: pinned,
+            splitValues: redistributeWithPinned(item.selectedUserIds, values, pinned, 100),
+          }
+        }
+        if (target <= 0) return { ...item, pinnedSplit: pinned, splitValues: values }
+        return {
+          ...item,
+          pinnedSplit: pinned,
+          splitValues: redistributeWithPinned(item.selectedUserIds, values, pinned, target),
+        }
+      }),
+    )
   }
-
-  const canSave = title.trim() && (
-    mode === 'simple'
-      ? parseFloat(simpleAmount) > 0
-      : items.some((i) => i.name.trim() && parseFloat(i.amount) > 0)
-  )
 
   async function handleSave() {
     if (!userId || !canSave) return
     setSaving(true)
     try {
       let input: CreateBillInput
-
       if (mode === 'simple') {
-        const amount = parseFloat(simpleAmount)
         input = {
           title: title.trim(),
           currency,
           groupId,
           createdBy: userId,
           note: note.trim(),
-          items: [{
-            name: title.trim(),
-            amount,
-            splits: simpleSelectedUserIds.map((uid) => ({
-              userId: uid,
-              splitType: simpleSplitType,
-              splitValue: simpleSplitType === 'equal' ? 1 : 0,
-            })),
-          }],
+          items: [
+            {
+              name: title.trim(),
+              amount: simpleAmountNum,
+              splits: buildSplitPayload(
+                simpleSelectedUserIds,
+                simpleSplitType,
+                simpleSplitValues,
+              ),
+            },
+          ],
         }
       } else {
         const validItems = items.filter((i) => i.name.trim() && parseFloat(i.amount) > 0)
@@ -170,344 +463,480 @@ export function AddBillPage() {
           items: validItems.map((item) => ({
             name: item.name.trim(),
             amount: parseFloat(item.amount),
-            splits: item.selectedUserIds.map((uid) => ({
-              userId: uid,
-              splitType: item.splitType,
-              splitValue: item.splitType === 'equal' ? 1 : 0,
-            })),
+            splits: buildSplitPayload(
+              item.selectedUserIds,
+              item.splitType,
+              item.splitValues,
+            ),
           })),
         }
       }
-
-      await createBill(input)
-      navigate('/app/bills')
+      if (editBillId) {
+        await updateBill(editBillId, userId, {
+          title: input.title,
+          note: input.note,
+          currency: input.currency,
+          items: input.items,
+        })
+        navigate(`/app/bills/${editBillId}`)
+      } else {
+        await createBill(input)
+        navigate('/app/bills')
+      }
     } finally {
       setSaving(false)
     }
   }
 
-  const members = groupMembers ?? []
-  const simpleAmountNum = parseFloat(simpleAmount) || 0
-
   return (
     <div className="space-y-5">
-      {/* Top bar */}
       <div className="flex items-center justify-between">
         <Button asChild variant="ghost" size="sm" className="rounded-full gap-1">
-          <Link to="/app/bills">
+          <Link to={isEdit ? `/app/bills/${editBillId}` : '/app/bills'}>
             <ArrowLeft className="size-4" />
             Back
           </Link>
         </Button>
-        <Button onClick={handleSave} disabled={!canSave || saving} className="rounded-full">
+        <Button
+          onClick={handleSave}
+          disabled={!canSave || saving || loadingEdit}
+          className="rounded-full"
+        >
           <Save className="size-4" />
-          {saving ? 'Saving…' : 'Save bill'}
+          {saving ? 'Saving…' : isEdit ? 'Save changes' : 'Save bill'}
         </Button>
       </div>
 
-      {/* Mode selector */}
-      <div className="rounded-3xl border border-slate-200 bg-white p-1.5 shadow-sm">
-        <div className="grid grid-cols-2 gap-1">
-          <button
-            onClick={() => switchMode('simple')}
+      {loadingEdit && (
+        <p className="rounded-2xl border border-slate-200 bg-white p-5 text-center text-sm text-slate-500">
+          Loading bill…
+        </p>
+      )}
+
+      {!loadingEdit && (
+        <>
+          <div
             className={cn(
-              'flex items-center justify-center gap-2 rounded-2xl px-4 py-3 text-sm font-medium transition-colors',
-              mode === 'simple'
-                ? 'bg-slate-800 text-white shadow-sm'
-                : 'text-slate-500 hover:bg-slate-100 hover:text-slate-800',
+              'rounded-3xl border border-slate-200 bg-white p-1.5 shadow-sm',
+              isEdit && 'pointer-events-none opacity-60',
             )}
           >
-            <SplitSquareHorizontal className="size-4" />
-            Simple
-          </button>
-          <button
-            onClick={() => switchMode('itemized')}
-            className={cn(
-              'flex items-center justify-center gap-2 rounded-2xl px-4 py-3 text-sm font-medium transition-colors',
-              mode === 'itemized'
-                ? 'bg-slate-800 text-white shadow-sm'
-                : 'text-slate-500 hover:bg-slate-100 hover:text-slate-800',
-            )}
-          >
-            <LayoutList className="size-4" />
-            Itemized
-          </button>
-        </div>
-      </div>
-
-      {/* Shared details */}
-      <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
-        <h1 className="text-xl font-semibold tracking-tight">
-          {mode === 'simple' ? 'New bill' : 'New itemized bill'}
-        </h1>
-
-        <div className="mt-4 space-y-4">
-          <div className="space-y-1.5">
-            <label className="text-sm font-medium">Title</label>
-            <Input
-              type="text"
-              placeholder="e.g. Korean BBQ dinner"
-              value={title}
-              onChange={(e) => setTitle(e.target.value)}
-            />
-          </div>
-
-          <div className="grid gap-4 sm:grid-cols-2">
-            <div className="space-y-1.5">
-              <label className="text-sm font-medium">Currency</label>
-              <Select value={currency} onValueChange={setCurrency}>
-                <SelectTrigger><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  {CURRENCIES.map((c) => (
-                    <SelectItem key={c.value} value={c.value}>{c.label}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-
-            <div className="space-y-1.5">
-              <label className="text-sm font-medium">Group (optional)</label>
-              <Select
-                value={groupId ?? '_none'}
-                onValueChange={(val) => setGroupId(val === '_none' ? null : val)}
+            <div className="grid grid-cols-2 gap-1">
+              <button
+                type="button"
+                disabled={isEdit}
+                onClick={() => setMode('simple')}
+                className={cn(
+                  'flex items-center justify-center gap-2 rounded-2xl px-4 py-3 text-sm font-medium transition-colors',
+                  mode === 'simple'
+                    ? 'bg-slate-800 text-white shadow-sm'
+                    : 'text-slate-500 hover:bg-slate-100 hover:text-slate-800',
+                )}
               >
-                <SelectTrigger><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="_none">Personal (no group)</SelectItem>
-                  {(groups ?? []).map((g) => (
-                    <SelectItem key={g.id} value={g.id}>{g.name}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+                <SplitSquareHorizontal className="size-4" />
+                Simple
+              </button>
+              <button
+                type="button"
+                disabled={isEdit}
+                onClick={() => setMode('itemized')}
+                className={cn(
+                  'flex items-center justify-center gap-2 rounded-2xl px-4 py-3 text-sm font-medium transition-colors',
+                  mode === 'itemized'
+                    ? 'bg-slate-800 text-white shadow-sm'
+                    : 'text-slate-500 hover:bg-slate-100 hover:text-slate-800',
+                )}
+              >
+                <LayoutList className="size-4" />
+                Itemized
+              </button>
             </div>
           </div>
 
-          <div className="space-y-1.5">
-            <label className="text-sm font-medium">Note (optional)</label>
-            <Textarea
-              placeholder="Any extra details..."
-              rows={2}
-              value={note}
-              onChange={(e) => setNote(e.target.value)}
-            />
-          </div>
-        </div>
-      </div>
+          <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
+            <h1 className="text-xl font-semibold tracking-tight">
+              {isEdit
+                ? 'Edit bill'
+                : mode === 'simple'
+                  ? 'New bill'
+                  : 'New itemized bill'}
+            </h1>
 
-      {/* Simple mode */}
-      {mode === 'simple' && (
-        <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
-          <h2 className="text-lg font-semibold">Amount &amp; split</h2>
+            <div className="mt-4 space-y-3">
+              <div className="flex flex-col gap-2">
+                <label className="text-sm font-medium">Title</label>
+                <Input
+                  type="text"
+                  placeholder="e.g. Korean BBQ dinner"
+                  value={title}
+                  onChange={(e) => setTitle(e.target.value)}
+                />
+              </div>
 
-          <div className="mt-4 space-y-4">
-            <div className="space-y-1.5">
-              <label className="text-sm font-medium">Total amount</label>
-              <Input
-                type="number"
-                placeholder="0.00"
-                min="0"
-                step="0.01"
-                value={simpleAmount}
-                onChange={(e) => setSimpleAmount(e.target.value)}
-                className="text-lg font-semibold"
-              />
-            </div>
-
-            {groupId && members.length > 0 && (
-              <>
-                <div className="space-y-1.5">
-                  <label className="text-sm font-medium">Split type</label>
+              <div className="grid gap-4 sm:grid-cols-2">
+                <div className="flex flex-col gap-2">
+                  <label className="text-sm font-medium">Currency</label>
                   <Select
-                    value={simpleSplitType}
-                    onValueChange={(val) => setSimpleSplitType(val as SplitType)}
+                    value={currency}
+                    onValueChange={setCurrency}
+                    disabled={isEdit}
                   >
-                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="equal">Equal split</SelectItem>
-                      <SelectItem value="percentage">By percentage</SelectItem>
-                      <SelectItem value="custom">Custom amounts</SelectItem>
+                      {CURRENCIES.map((c) => (
+                        <SelectItem key={c.value} value={c.value}>
+                          {c.label}
+                        </SelectItem>
+                      ))}
                     </SelectContent>
                   </Select>
                 </div>
 
-                <div className="space-y-2">
-                  <div className="flex items-center gap-1.5 text-sm font-medium text-slate-600">
-                    <UserPlus className="size-3.5" />
-                    Split with
-                  </div>
-                  <div className="flex flex-wrap gap-1.5">
-                    {members.map((member) => {
-                      const isSelected = simpleSelectedUserIds.includes(member.userId)
-                      return (
-                        <button
-                          key={member.userId}
-                          onClick={() => toggleSimpleUser(member.userId)}
-                          className={cn(
-                            'inline-flex cursor-pointer items-center gap-1.5 rounded-full border px-3 py-2 text-sm font-medium transition-colors',
-                            isSelected
-                              ? 'border-transparent bg-blue-600 text-white'
-                              : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-100',
-                          )}
-                        >
-                          <Users className="size-3.5" />
-                          {member.isCurrentUser ? 'You' : member.displayName}
-                        </button>
-                      )
-                    })}
-                  </div>
-
-                  {simpleSelectedUserIds.length > 0 && simpleAmountNum > 0 && (
-                    <div className="rounded-2xl border border-blue-600/20 bg-blue-600/5 px-4 py-3">
-                      {simpleSplitType === 'equal' ? (
-                        <p className="text-sm text-slate-700">
-                          <span className="font-semibold text-blue-600">
-                            {formatCurrency(simpleAmountNum / simpleSelectedUserIds.length, currency)}
-                          </span>
-                          {' '}each across {simpleSelectedUserIds.length} {simpleSelectedUserIds.length === 1 ? 'person' : 'people'}
-                        </p>
-                      ) : (
-                        <p className="text-sm text-slate-500">
-                          Total: <span className="font-semibold text-slate-800">{formatCurrency(simpleAmountNum, currency)}</span>
-                          {' '}split among {simpleSelectedUserIds.length} {simpleSelectedUserIds.length === 1 ? 'person' : 'people'}
-                        </p>
-                      )}
-                    </div>
-                  )}
+                <div className="flex flex-col gap-2">
+                  <label className="text-sm font-medium">Group (optional)</label>
+                  <Select
+                    value={groupId ?? '_none'}
+                    onValueChange={(val) => setGroupId(val === '_none' ? null : val)}
+                    disabled={isEdit}
+                  >
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="_none">Personal (no group)</SelectItem>
+                      {(groups ?? []).map((g) => (
+                        <SelectItem key={g.id} value={g.id}>
+                          {g.name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
                 </div>
-              </>
-            )}
+              </div>
 
-            {!groupId && (
-              <p className="text-xs text-slate-400">
-                Select a group above to split this bill among members.
-              </p>
-            )}
-          </div>
-        </div>
-      )}
-
-      {/* Itemized mode */}
-      {mode === 'itemized' && (
-        <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
-          <div className="flex items-center justify-between">
-            <div>
-              <h2 className="text-lg font-semibold">Items</h2>
-              <p className="text-xs text-slate-500">
-                {items.filter((i) => parseFloat(i.amount) > 0).length} item{items.filter((i) => parseFloat(i.amount) > 0).length !== 1 ? 's' : ''}
-              </p>
+              <div className="flex flex-col gap-2">
+                <label className="text-sm font-medium">Note (optional)</label>
+                <Textarea
+                  placeholder="Any extra details..."
+                  rows={2}
+                  value={note}
+                  onChange={(e) => setNote(e.target.value)}
+                />
+              </div>
             </div>
-            <Button
-              variant="ghost"
-              size="sm"
-              className="rounded-full"
-              onClick={() => setItems((prev) => [...prev, newItem()])}
-            >
-              <Plus className="size-4" />
-              Add item
-            </Button>
           </div>
 
-          <div className="mt-4 space-y-3">
-            {items.map((item, index) => (
-              <div key={item.key} className="rounded-2xl border border-slate-200 bg-slate-100/60 p-4">
-                <div className="flex items-start gap-2">
-                  <span className="mt-2.5 flex size-6 shrink-0 items-center justify-center rounded-full bg-blue-600 text-[0.65rem] font-semibold text-white">
-                    {index + 1}
-                  </span>
-                  <div className="flex flex-1 flex-col gap-2 sm:flex-row">
-                    <Input
-                      type="text"
-                      placeholder="Item name"
-                      className="rounded-lg flex-1"
-                      value={item.name}
-                      onChange={(e) => updateItem(item.key, { name: e.target.value })}
-                    />
-                    <Input
-                      type="number"
-                      placeholder="0.00"
-                      className="rounded-lg sm:w-32"
-                      value={item.amount}
-                      min="0"
-                      step="0.01"
-                      onChange={(e) => updateItem(item.key, { amount: e.target.value })}
-                    />
-                  </div>
-                  {items.length > 1 && (
-                    <Button
-                      variant="ghost"
-                      size="icon-xs"
-                      className="mt-1.5 rounded-full text-red-600"
-                      onClick={() => removeItem(item.key)}
-                    >
-                      <Trash2 className="size-3.5" />
-                    </Button>
-                  )}
+          {mode === 'simple' && (
+            <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
+              <h2 className="text-lg font-semibold">Amount &amp; split</h2>
+
+              <div className="mt-4 space-y-3">
+                <div className="flex flex-col gap-2">
+                  <label className="text-sm font-medium">Total amount</label>
+                  <Input
+                    type="number"
+                    placeholder="0.00"
+                    min="0"
+                    step="0.01"
+                    value={simpleAmount}
+                    onChange={(e) => {
+                      const v = e.target.value
+                      setSimpleAmount(v)
+                      const amt = parseFloat(v) || 0
+                      const ids = selectedIdsRef.current
+                      if (simpleSplitType === 'custom' && ids.length > 0 && amt > 0) {
+                        setSimpleSplitMeta((meta) => {
+                          if (Object.keys(meta.pinned).length === 0) {
+                            return { values: equalCustomMap(ids, amt), pinned: {} }
+                          }
+                          return {
+                            pinned: meta.pinned,
+                            values: redistributeWithPinned(ids, meta.values, meta.pinned, amt),
+                          }
+                        })
+                      }
+                    }}
+                    className="text-lg font-semibold"
+                  />
                 </div>
 
                 {groupId && members.length > 0 && (
-                  <div className="mt-3 border-t border-slate-200 pt-3">
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-1.5 text-xs font-medium text-slate-500">
-                        <UserPlus className="size-3.5" />
-                        Split with
-                      </div>
+                  <>
+                    <div className="flex flex-col gap-2">
+                      <label className="text-sm font-medium">Split type</label>
                       <Select
-                        value={item.splitType}
-                        onValueChange={(val) => updateItem(item.key, { splitType: val as SplitType })}
+                        value={simpleSplitType}
+                        onValueChange={(val) => setSimpleSplitTypeAndValues(val as SplitType)}
                       >
-                        <SelectTrigger className="h-8 w-auto min-w-32 rounded-lg text-xs">
+                        <SelectTrigger>
                           <SelectValue />
                         </SelectTrigger>
                         <SelectContent>
-                          <SelectItem value="equal">Equal</SelectItem>
-                          <SelectItem value="percentage">Percentage</SelectItem>
-                          <SelectItem value="custom">Custom</SelectItem>
+                          <SelectItem value="equal">Equal split</SelectItem>
+                          <SelectItem value="percentage">By percentage</SelectItem>
+                          <SelectItem value="custom">Custom amounts</SelectItem>
                         </SelectContent>
                       </Select>
                     </div>
 
-                    <div className="mt-2 flex flex-wrap gap-1.5">
-                      {members.map((member) => {
-                        const isSelected = item.selectedUserIds.includes(member.userId)
-                        return (
-                          <button
-                            key={member.userId}
-                            onClick={() => toggleUserForItem(item.key, member.userId)}
-                            className={cn(
-                              'inline-flex cursor-pointer items-center gap-1 rounded-full border px-3 py-1.5 text-xs font-medium transition-colors',
-                              isSelected
-                                ? 'border-transparent bg-blue-600 text-white'
-                                : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-100',
-                            )}
-                          >
-                            <Users className="size-3" />
-                            {member.isCurrentUser ? 'You' : member.displayName}
-                          </button>
-                        )
-                      })}
-                    </div>
+                    <div className="flex flex-col gap-2">
+                      <div className="flex items-center gap-1.5 text-sm font-medium text-slate-600">
+                        <UserPlus className="size-3.5" />
+                        Split with
+                      </div>
+                      <div className="flex flex-wrap gap-1.5">
+                        {members.map((member) => {
+                          const isSelected = simpleSelectedUserIds.includes(member.userId)
+                          return (
+                            <button
+                              key={member.userId}
+                              type="button"
+                              onClick={() => toggleSimpleUser(member.userId)}
+                              className={cn(
+                                'inline-flex cursor-pointer items-center gap-1.5 rounded-full border px-3 py-2 text-sm font-medium transition-colors',
+                                isSelected
+                                  ? 'border-transparent bg-blue-600 text-white'
+                                  : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-100',
+                              )}
+                            >
+                              <Users className="size-3.5" />
+                              {member.isCurrentUser ? 'You' : member.displayName}
+                            </button>
+                          )
+                        })}
+                      </div>
 
-                    {item.selectedUserIds.length > 0 && item.splitType === 'equal' && parseFloat(item.amount) > 0 && (
-                      <p className="mt-1.5 text-xs text-slate-400">
-                        {formatCurrency(parseFloat(item.amount) / item.selectedUserIds.length, currency)} each
-                      </p>
-                    )}
-                  </div>
+                      <SplitValueRows
+                        splitType={simpleSplitType}
+                        currency={currency}
+                        selectedUserIds={simpleSelectedUserIds}
+                        members={members}
+                        values={simpleSplitValues}
+                        pinnedUserIds={simpleSplitMeta.pinned}
+                        lineAmount={simpleAmountNum}
+                        onChange={onSimpleSplitInputChange}
+                      />
+
+                      {simpleSelectedUserIds.length > 0 && simpleAmountNum > 0 && (
+                        <div className="rounded-2xl border border-blue-600/20 bg-blue-600/5 px-4 py-3">
+                          {simpleSplitType === 'equal' ? (
+                            <p className="text-sm text-slate-700">
+                              <span className="font-semibold text-blue-600">
+                                {formatCurrency(
+                                  simpleAmountNum / simpleSelectedUserIds.length,
+                                  currency,
+                                )}
+                              </span>{' '}
+                              each across {simpleSelectedUserIds.length}{' '}
+                              {simpleSelectedUserIds.length === 1 ? 'person' : 'people'}
+                            </p>
+                          ) : (
+                            <p className="text-sm text-slate-500">
+                              Total:{' '}
+                              <span className="font-semibold text-slate-800">
+                                {formatCurrency(simpleAmountNum, currency)}
+                              </span>{' '}
+                              among {simpleSelectedUserIds.length}{' '}
+                              {simpleSelectedUserIds.length === 1 ? 'person' : 'people'}
+                            </p>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  </>
+                )}
+
+                {!groupId && (
+                  <p className="text-xs text-slate-400">
+                    Select a group above to split this bill among members.
+                  </p>
                 )}
               </div>
-            ))}
-          </div>
-
-          {/* Running total */}
-          {itemizedTotal > 0 && (
-            <div className="mt-4 flex items-center justify-between rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
-              <span className="text-sm font-medium text-slate-600">Running total</span>
-              <span className="text-lg font-semibold text-slate-800">
-                {formatCurrency(itemizedTotal, currency)}
-              </span>
             </div>
           )}
-        </div>
+
+          {mode === 'itemized' && (
+            <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h2 className="text-lg font-semibold">Items</h2>
+                  <p className="text-xs text-slate-500">
+                    {items.filter((i) => parseFloat(i.amount) > 0).length} item
+                    {items.filter((i) => parseFloat(i.amount) > 0).length !== 1 ? 's' : ''}
+                  </p>
+                </div>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="rounded-full"
+                  type="button"
+                  onClick={() => setItems((prev) => [...prev, newItem()])}
+                >
+                  <Plus className="size-4" />
+                  Add item
+                </Button>
+              </div>
+
+              <div className="mt-4 space-y-3">
+                {items.map((item, index) => (
+                  <div
+                    key={item.key}
+                    className="rounded-2xl border border-slate-200 bg-slate-100/60 p-4"
+                  >
+                    <div className="flex items-start gap-2">
+                      <span className="mt-2.5 flex size-6 shrink-0 items-center justify-center rounded-full bg-blue-600 text-[0.65rem] font-semibold text-white">
+                        {index + 1}
+                      </span>
+                      <div className="flex flex-1 flex-col gap-2 sm:flex-row">
+                        <Input
+                          type="text"
+                          placeholder="Item name"
+                          className="flex-1 rounded-lg"
+                          value={item.name}
+                          onChange={(e) => updateItem(item.key, { name: e.target.value })}
+                        />
+                        <Input
+                          type="number"
+                          placeholder="0.00"
+                          className="rounded-lg sm:w-32"
+                          value={item.amount}
+                          min="0"
+                          step="0.01"
+                          onChange={(e) => {
+                            const v = e.target.value
+                            const amt = parseFloat(v) || 0
+                            const key = item.key
+                            setItems((prev) =>
+                              prev.map((i) => {
+                                if (i.key !== key) return i
+                                if (
+                                  i.splitType !== 'custom' ||
+                                  i.selectedUserIds.length === 0 ||
+                                  amt <= 0
+                                ) {
+                                  return { ...i, amount: v }
+                                }
+                                if (Object.keys(i.pinnedSplit).length === 0) {
+                                  return {
+                                    ...i,
+                                    amount: v,
+                                    splitValues: equalCustomMap(i.selectedUserIds, amt),
+                                    pinnedSplit: {},
+                                  }
+                                }
+                                return {
+                                  ...i,
+                                  amount: v,
+                                  splitValues: redistributeWithPinned(
+                                    i.selectedUserIds,
+                                    i.splitValues,
+                                    i.pinnedSplit,
+                                    amt,
+                                  ),
+                                }
+                              }),
+                            )
+                          }}
+                        />
+                      </div>
+                      {items.length > 1 && (
+                        <Button
+                          variant="ghost"
+                          size="icon-xs"
+                          type="button"
+                          className="mt-1.5 rounded-full text-red-600"
+                          onClick={() => removeItem(item.key)}
+                        >
+                          <Trash2 className="size-3.5" />
+                        </Button>
+                      )}
+                    </div>
+
+                    {groupId && members.length > 0 && (
+                      <div className="mt-3 border-t border-slate-200 pt-3">
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-1.5 text-xs font-medium text-slate-500">
+                            <UserPlus className="size-3.5" />
+                            Split with
+                          </div>
+                          <Select
+                            value={item.splitType}
+                            onValueChange={(val) => onItemSplitTypeChange(item.key, val as SplitType)}
+                          >
+                            <SelectTrigger className="h-8 w-auto min-w-32 rounded-lg text-xs">
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="equal">Equal</SelectItem>
+                              <SelectItem value="percentage">Percentage</SelectItem>
+                              <SelectItem value="custom">Custom</SelectItem>
+                            </SelectContent>
+                          </Select>
+                        </div>
+
+                        <div className="mt-3 flex flex-wrap gap-1.5">
+                          {members.map((member) => {
+                            const isSelected = item.selectedUserIds.includes(member.userId)
+                            return (
+                              <button
+                                key={member.userId}
+                                type="button"
+                                onClick={() => toggleUserForItem(item.key, member.userId)}
+                                className={cn(
+                                  'inline-flex cursor-pointer items-center gap-1 rounded-full border px-3 py-1.5 text-xs font-medium transition-colors',
+                                  isSelected
+                                    ? 'border-transparent bg-blue-600 text-white'
+                                    : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-100',
+                                )}
+                              >
+                                <Users className="size-3" />
+                                {member.isCurrentUser ? 'You' : member.displayName}
+                              </button>
+                            )
+                          })}
+                        </div>
+
+                        <SplitValueRows
+                          splitType={item.splitType}
+                          currency={currency}
+                          selectedUserIds={item.selectedUserIds}
+                          members={members}
+                          values={item.splitValues}
+                          pinnedUserIds={item.pinnedSplit}
+                          lineAmount={parseFloat(item.amount) || 0}
+                          onChange={(uid, raw) => onItemSplitValueChange(item.key, uid, raw)}
+                        />
+
+                        {item.selectedUserIds.length > 0 &&
+                          item.splitType === 'equal' &&
+                          parseFloat(item.amount) > 0 && (
+                            <p className="mt-1.5 text-xs text-slate-400">
+                              {formatCurrency(
+                                parseFloat(item.amount) / item.selectedUserIds.length,
+                                currency,
+                              )}{' '}
+                              each
+                            </p>
+                          )}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+
+              {itemizedTotal > 0 && (
+                <div className="mt-4 flex items-center justify-between rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+                  <span className="text-sm font-medium text-slate-600">Running total</span>
+                  <span className="text-lg font-semibold text-slate-800">
+                    {formatCurrency(itemizedTotal, currency)}
+                  </span>
+                </div>
+              )}
+            </div>
+          )}
+        </>
       )}
     </div>
   )
