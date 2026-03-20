@@ -1,73 +1,115 @@
-# React + TypeScript + Vite
+# Kwenta
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+Offline-first bill splitting for real-life groups.
 
-Currently, two official plugins are available:
+Kwenta is a mobile-first PWA for tracking shared expenses, itemized bills, groups, balances, and settlements. It works locally without an account, then syncs to Supabase when the user signs in and has an internet connection.
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+## Features
 
-## React Compiler
+- Add a bill as a total amount or as itemized entries
+- Split each item by equal share, percentage, or custom logic
+- Create groups and add members for shared expenses
+- Use the app without an account through local browser storage
+- Sync and back up data to Supabase when signed in
+- Install as a PWA and continue using it offline
+- Review balances and settlement suggestions
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+## Tech Stack
 
-## Expanding the ESLint configuration
+- `React 19`
+- `TypeScript`
+- `Vite`
+- `React Router`
+- `Tailwind CSS v4`
+- `Radix UI` primitives with local shadcn-style components
+- `Dexie` for IndexedDB local persistence
+- `Zustand` for app state
+- `Supabase` for auth and cloud sync
+- `vite-plugin-pwa` for installability and offline support
 
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
+## Getting Started
 
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
+### 1. Install dependencies
 
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
-
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```bash
+npm install
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+### 2. Create environment variables
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
+Copy `.env.example` to `.env` and fill in your Supabase values:
 
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```bash
+cp .env.example .env
 ```
+
+Required variables:
+
+```env
+VITE_SUPABASE_URL=https://your-project.supabase.co
+VITE_SUPABASE_ANON_KEY=your-anon-key-here
+```
+
+### 3. Run the app
+
+```bash
+npm run dev
+```
+
+### 4. Build for production
+
+```bash
+npm run build
+```
+
+### 5. Lint
+
+```bash
+npm run lint
+```
+
+## Supabase Setup
+
+Apply the SQL migration in `supabase/migrations/001_initial_schema.sql` to your Supabase project before testing auth and sync.
+
+This project expects:
+
+- Supabase Auth for account sign-in
+- Postgres tables for profiles, groups, bills, items, splits, settlements, and activity logs
+- Row Level Security policies defined by the included migration
+
+## Offline-First Behavior
+
+- Guests can use the app immediately with local IndexedDB storage
+- Bills and groups remain available after refreshes and offline periods
+- When a user signs in, the app can sync local and cloud data
+- The app shows offline state and install prompts inside the app shell
+
+## Project Structure
+
+```text
+src/
+  components/    Shared UI, layout, and app shell pieces
+  db/            Dexie schema, hooks, and local write operations
+  hooks/         Auth, sync, online status, and current user hooks
+  lib/           Utilities, split logic, settlement logic, Supabase client
+  pages/         Route-level screens
+  store/         Zustand app state
+  sync/          Push/pull sync manager and service
+  types/         Shared TypeScript types
+supabase/
+  migrations/    Database schema and RLS policies
+```
+
+## Deployment
+
+This app is set up for static deployment on Vercel.
+
+- `vercel.json` rewrites all routes to `index.html` for SPA routing
+- PWA assets are generated during `npm run build`
+
+## Notes
+
+- The landing page is public, while the app itself is available under `/app`
+- Sign-in is optional for first use, but recommended for backup and multi-device sync
+- If you clear local browser data, guest-only data will be removed unless it has already been synced
