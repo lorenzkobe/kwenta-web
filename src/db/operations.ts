@@ -208,6 +208,74 @@ export async function addGroupMember(
   return userId
 }
 
+export async function removeGroupMember(
+  groupId: string,
+  memberUserId: string,
+  removedBy: string,
+): Promise<void> {
+  const timestamp = now()
+
+  await db.transaction(
+    'rw',
+    [db.group_members, db.bills, db.bill_items, db.item_splits, db.activity_log],
+    async () => {
+      // Soft-delete the membership record
+      const allMembers = await db.group_members.where('group_id').equals(groupId).toArray()
+      const membership = allMembers.find((m) => m.user_id === memberUserId && !m.is_deleted)
+      if (!membership) return
+
+      const profile = await db.profiles.get(memberUserId)
+      const displayName = profile?.display_name ?? membership.display_name
+
+      await db.group_members.update(membership.id, { is_deleted: true, updated_at: timestamp })
+
+      // Remove the member's splits from all bills in this group and recompute equal splits
+      const bills = await db.bills.where('group_id').equals(groupId).toArray()
+      const activeBills = bills.filter((b) => !b.is_deleted)
+
+      for (const bill of activeBills) {
+        const items = await db.bill_items.where('bill_id').equals(bill.id).toArray()
+        const activeItems = items.filter((i) => !i.is_deleted)
+
+        for (const item of activeItems) {
+          const splits = await db.item_splits.where('item_id').equals(item.id).toArray()
+          const activeSplits = splits.filter((s) => !s.is_deleted)
+          const memberSplit = activeSplits.find((s) => s.user_id === memberUserId)
+          if (!memberSplit) continue
+
+          await db.item_splits.update(memberSplit.id, {
+            is_deleted: true,
+            updated_at: timestamp,
+          })
+
+          // For equal splits: redistribute amount evenly across remaining members
+          const remaining = activeSplits.filter((s) => s.user_id !== memberUserId)
+          if (memberSplit.split_type === 'equal' && remaining.length > 0) {
+            const newAmount = item.amount / remaining.length
+            for (const s of remaining) {
+              await db.item_splits.update(s.id, {
+                computed_amount: newAmount,
+                updated_at: timestamp,
+                synced_at: null,
+              })
+            }
+          }
+        }
+      }
+
+      await db.activity_log.add({
+        ...syncFields(),
+        group_id: groupId,
+        user_id: removedBy,
+        action: 'deleted',
+        entity_type: 'group',
+        entity_id: membership.id,
+        description: `Removed "${displayName}" from group`,
+      })
+    },
+  )
+}
+
 export async function deleteGroup(groupId: string, userId: string) {
   const timestamp = now()
   await db.transaction('rw', [db.groups, db.group_members, db.activity_log], async () => {
