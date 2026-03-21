@@ -47,7 +47,7 @@ Required variables:
 
 ```env
 VITE_SUPABASE_URL=https://your-project.supabase.co
-VITE_SUPABASE_ANON_KEY=your-anon-key-here
+VITE_SUPABASE_PUBLISHABLE_DEFAULT_KEY=your-publishable-key
 ```
 
 ### 3. Run the app

@@ -1,9 +1,16 @@
-import { useState, useEffect } from 'react'
-import { ArrowRight, Check, Loader2, Scale, Users } from 'lucide-react'
+import { useState, useEffect, useCallback } from 'react'
+import { ArrowRight, Check, History, Loader2, Scale, Users } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { useCurrentUser } from '@/hooks/useCurrentUser'
-import { computeAllGroupBalances, type GroupBalanceSummary } from '@/lib/settlement'
-import { createSettlement } from '@/db/operations'
+import {
+  computeAllGroupBalances,
+  type GroupBalanceSummary,
+  type SettlementHistoryItem,
+} from '@/lib/settlement'
+import { useUserSettlementHistory } from '@/db/hooks'
+import { SettlementHistoryList } from '@/components/common/SettlementHistoryList'
+import { EditSettlementDialog } from '@/components/common/EditSettlementDialog'
+import { RecordSettlementDialog } from '@/components/common/RecordSettlementDialog'
 import { formatCurrency, cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 
@@ -11,34 +18,29 @@ export function BalancesPage() {
   const { userId } = useCurrentUser()
   const [summaries, setSummaries] = useState<GroupBalanceSummary[]>([])
   const [loading, setLoading] = useState(true)
-  const [settling, setSettling] = useState<string | null>(null)
+  const [editingSettlement, setEditingSettlement] = useState<SettlementHistoryItem | null>(null)
+  const [recordSettlement, setRecordSettlement] = useState<{
+    groupId: string
+    currency: string
+    fromUserId: string
+    toUserId: string
+    amount: number
+    fromName: string
+    toName: string
+  } | null>(null)
+  const userSettlementHistory = useUserSettlementHistory(userId ?? undefined)
+
+  const reloadSummaries = useCallback(async () => {
+    if (!userId) return
+    const data = await computeAllGroupBalances(userId)
+    setSummaries(data)
+  }, [userId])
 
   useEffect(() => {
     if (!userId) return
-    computeAllGroupBalances(userId).then((data) => {
-      setSummaries(data)
-      setLoading(false)
-    })
-  }, [userId])
-
-  async function handleSettle(
-    groupId: string,
-    fromUserId: string,
-    toUserId: string,
-    amount: number,
-    currency: string,
-  ) {
-    if (!userId) return
-    const key = `${fromUserId}-${toUserId}`
-    setSettling(key)
-    try {
-      await createSettlement(groupId, fromUserId, toUserId, amount, currency, userId)
-      const updated = await computeAllGroupBalances(userId)
-      setSummaries(updated)
-    } finally {
-      setSettling(null)
-    }
-  }
+    setLoading(true)
+    reloadSummaries().finally(() => setLoading(false))
+  }, [userId, reloadSummaries])
 
   const overallOwed = summaries.reduce((sum, s) => sum + s.totalOwed, 0)
   const overallOwing = summaries.reduce((sum, s) => sum + s.totalOwing, 0)
@@ -56,7 +58,7 @@ export function BalancesPage() {
       <div>
         <h1 className="text-2xl font-semibold tracking-tight">Balances</h1>
         <p className="mt-1 text-sm text-slate-600">
-          See who should collect and who should settle
+          See who should collect and who should pay
         </p>
       </div>
 
@@ -68,7 +70,7 @@ export function BalancesPage() {
           </p>
         </div>
         <div className="rounded-2xl border border-amber-500/20 bg-amber-500/8 p-4">
-          <p className="text-xs font-medium text-amber-600/70">To settle</p>
+          <p className="text-xs font-medium text-amber-600/70">To pay</p>
           <p className="mt-1 text-2xl font-semibold text-amber-600">
             {formatCurrency(overallOwing)}
           </p>
@@ -94,7 +96,10 @@ export function BalancesPage() {
           </div>
         </div>
       ) : (
-        summaries.map((summary) => (
+        summaries.map((summary) => {
+          const groupPaymentHistory =
+            userSettlementHistory?.filter((h) => h.groupId === summary.groupId) ?? []
+          return (
           <div
             key={summary.groupId}
             className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm"
@@ -147,7 +152,7 @@ export function BalancesPage() {
                 {summary.balances.every((b) => Math.abs(b.amount) <= 0.01) && (
                   <div className="flex items-center justify-center gap-2 rounded-xl bg-emerald-500/10 px-4 py-3">
                     <Check className="size-4 text-emerald-600" />
-                    <span className="text-sm font-medium text-emerald-600">All settled</span>
+                    <span className="text-sm font-medium text-emerald-600">All paid up</span>
                   </div>
                 )}
               </div>
@@ -156,7 +161,7 @@ export function BalancesPage() {
             {summary.suggestions.length > 0 && (
               <div className="mt-4">
                 <p className="text-xs font-medium text-slate-400">
-                  Settlement suggestions
+                  Suggested payments
                 </p>
                 <div className="mt-2 space-y-2">
                   {summary.suggestions.map((s) => {
@@ -178,19 +183,21 @@ export function BalancesPage() {
                           variant="success"
                           size="xs"
                           className="rounded-lg"
+                          type="button"
                           onClick={() =>
-                            handleSettle(
-                              summary.groupId,
-                              s.fromUserId,
-                              s.toUserId,
-                              s.amount,
-                              summary.currency,
-                            )
+                            setRecordSettlement({
+                              groupId: summary.groupId,
+                              currency: summary.currency,
+                              fromUserId: s.fromUserId,
+                              toUserId: s.toUserId,
+                              amount: s.amount,
+                              fromName: s.fromName,
+                              toName: s.toName,
+                            })
                           }
-                          disabled={settling === key}
                         >
                           <Check className="size-3" />
-                          {settling === key ? '...' : 'Settle'}
+                          Pay
                         </Button>
                       </div>
                     )
@@ -198,8 +205,52 @@ export function BalancesPage() {
                 </div>
               </div>
             )}
+
+            {groupPaymentHistory.length > 0 && (
+              <div className="mt-4 border-t border-slate-100 pt-4">
+                <div className="flex items-center gap-2">
+                  <History className="size-3.5 text-slate-400" />
+                  <p className="text-xs font-medium text-slate-500">Payment history</p>
+                </div>
+                <SettlementHistoryList
+                  className="mt-2"
+                  items={groupPaymentHistory}
+                  currentUserId={userId}
+                  onEdit={(item) => setEditingSettlement(item)}
+                />
+              </div>
+            )}
           </div>
-        ))
+          )
+        })
+      )}
+
+      {editingSettlement && (
+        <EditSettlementDialog
+          item={editingSettlement}
+          onClose={() => setEditingSettlement(null)}
+          onSaved={() => {
+            void reloadSummaries()
+          }}
+        />
+      )}
+
+      {recordSettlement && userId && (
+        <RecordSettlementDialog
+          open
+          onOpenChange={(o) => {
+            if (!o) setRecordSettlement(null)
+          }}
+          groupId={recordSettlement.groupId}
+          currency={recordSettlement.currency}
+          fromUserId={recordSettlement.fromUserId}
+          toUserId={recordSettlement.toUserId}
+          amount={recordSettlement.amount}
+          fromName={recordSettlement.fromName}
+          toName={recordSettlement.toName}
+          markedBy={userId}
+          onRecorded={() => void reloadSummaries()}
+        />
       )}
     </div>
   )

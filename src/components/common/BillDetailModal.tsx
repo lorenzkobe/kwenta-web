@@ -3,6 +3,7 @@ import { Loader2, Pencil, ReceiptText, Trash2, Users, X } from 'lucide-react'
 import { deleteBill, getBillWithDetails } from '@/db/operations'
 import { formatCurrency } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
+import { ConfirmDialog } from '@/components/common/ConfirmDialog'
 
 type BillDetails = NonNullable<Awaited<ReturnType<typeof getBillWithDetails>>>
 
@@ -22,6 +23,7 @@ export function BillDetailModal({
   const [bill, setBill] = useState<BillDetails | null>(null)
   const [loading, setLoading] = useState(true)
   const [deleting, setDeleting] = useState(false)
+  const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false)
 
   useEffect(() => {
     setLoading(true)
@@ -31,8 +33,7 @@ export function BillDetailModal({
     })
   }, [billId])
 
-  async function handleDelete() {
-    if (!bill || !confirm(`Delete bill "${bill.title}"?`)) return
+  async function executeDelete() {
     setDeleting(true)
     try {
       await deleteBill(billId, currentUserId)
@@ -44,6 +45,7 @@ export function BillDetailModal({
   }
 
   return (
+    <>
     <div className="fixed inset-0 z-50 flex items-end justify-center p-4 sm:items-center">
       <div className="fixed inset-0 bg-black/30 backdrop-blur-sm" onClick={onClose} />
 
@@ -149,7 +151,8 @@ export function BillDetailModal({
               variant="ghost"
               className="w-full rounded-xl text-red-600 hover:bg-red-500/5 hover:text-red-700"
               disabled={deleting}
-              onClick={handleDelete}
+              type="button"
+              onClick={() => setDeleteConfirmOpen(true)}
             >
               <Trash2 className="size-4" />
               {deleting ? 'Deleting…' : 'Delete bill'}
@@ -158,5 +161,20 @@ export function BillDetailModal({
         )}
       </div>
     </div>
+
+    <ConfirmDialog
+      open={deleteConfirmOpen}
+      onOpenChange={setDeleteConfirmOpen}
+      title="Delete this bill?"
+      description={
+        bill
+          ? `“${bill.title}” will be removed. This cannot be undone on this device.`
+          : 'This bill will be removed. This cannot be undone on this device.'
+      }
+      confirmLabel="Delete bill"
+      variant="danger"
+      onConfirm={executeDelete}
+    />
+    </>
   )
 }

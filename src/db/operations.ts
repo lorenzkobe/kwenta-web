@@ -247,6 +247,38 @@ export async function createGroup(
   return groupId
 }
 
+export async function updateGroup(
+  groupId: string,
+  patch: { name?: string; currency?: string },
+  userId: string,
+): Promise<void> {
+  const group = await db.groups.get(groupId)
+  if (!group || group.is_deleted) return
+
+  const timestamp = now()
+  const nextName = patch.name?.trim() ?? group.name
+  const nextCurrency = patch.currency ?? group.currency
+
+  await db.transaction('rw', [db.groups, db.activity_log], async () => {
+    await db.groups.update(groupId, {
+      name: nextName,
+      currency: nextCurrency,
+      updated_at: timestamp,
+      synced_at: null,
+    })
+
+    await db.activity_log.add({
+      ...syncFields(),
+      group_id: groupId,
+      user_id: userId,
+      action: 'updated',
+      entity_type: 'group',
+      entity_id: groupId,
+      description: `Updated group "${nextName}"`,
+    })
+  })
+}
+
 export async function addGroupMember(
   groupId: string,
   displayName: string,
@@ -295,7 +327,7 @@ export async function removeGroupMember(
 
   await db.transaction(
     'rw',
-    [db.group_members, db.bills, db.bill_items, db.item_splits, db.activity_log],
+    [db.profiles, db.group_members, db.bills, db.bill_items, db.item_splits, db.activity_log],
     async () => {
       // Soft-delete the membership record
       const allMembers = await db.group_members.where('group_id').equals(groupId).toArray()
@@ -388,10 +420,12 @@ export async function createSettlement(
   amount: number,
   currency: string,
   markedBy: string,
+  label?: string,
 ): Promise<string> {
   const settlementId = generateId()
+  const labelTrim = (label ?? '').trim()
 
-  await db.transaction('rw', [db.settlements, db.activity_log], async () => {
+  await db.transaction('rw', [db.settlements, db.activity_log, db.profiles], async () => {
     await db.settlements.add({
       ...syncFields({ id: settlementId }),
       group_id: groupId,
@@ -399,11 +433,13 @@ export async function createSettlement(
       to_user_id: toUserId,
       amount,
       currency,
+      label: labelTrim,
       is_settled: true,
     })
 
     const fromProfile = await db.profiles.get(fromUserId)
     const toProfile = await db.profiles.get(toUserId)
+    const labelSuffix = labelTrim ? ` · ${labelTrim}` : ''
 
     await db.activity_log.add({
       ...syncFields(),
@@ -412,11 +448,83 @@ export async function createSettlement(
       action: 'settled',
       entity_type: 'settlement',
       entity_id: settlementId,
-      description: `${fromProfile?.display_name ?? 'Someone'} settled ${new Intl.NumberFormat('en-PH', { style: 'currency', currency, minimumFractionDigits: 0 }).format(amount)} with ${toProfile?.display_name ?? 'someone'}`,
+      description: `${fromProfile?.display_name ?? 'Someone'} settled ${new Intl.NumberFormat('en-PH', { style: 'currency', currency, minimumFractionDigits: 0 }).format(amount)} with ${toProfile?.display_name ?? 'someone'}${labelSuffix}`,
     })
   })
 
   return settlementId
+}
+
+export async function updateSettlement(
+  settlementId: string,
+  patch: {
+    fromUserId: string
+    toUserId: string
+    amount: number
+    currency: string
+    label: string
+  },
+  editorUserId: string,
+): Promise<void> {
+  const s = await db.settlements.get(settlementId)
+  if (!s || s.is_deleted) return
+
+  const timestamp = now()
+  const labelTrim = patch.label.trim()
+
+  await db.transaction('rw', [db.settlements, db.activity_log, db.profiles], async () => {
+    await db.settlements.update(settlementId, {
+      from_user_id: patch.fromUserId,
+      to_user_id: patch.toUserId,
+      amount: patch.amount,
+      currency: patch.currency,
+      label: labelTrim,
+      updated_at: timestamp,
+      synced_at: null,
+    })
+
+    const fromProfile = await db.profiles.get(patch.fromUserId)
+    const toProfile = await db.profiles.get(patch.toUserId)
+    const labelSuffix = labelTrim ? ` · ${labelTrim}` : ''
+
+    await db.activity_log.add({
+      ...syncFields(),
+      group_id: s.group_id,
+      user_id: editorUserId,
+      action: 'updated',
+      entity_type: 'settlement',
+      entity_id: settlementId,
+      description: `${fromProfile?.display_name ?? 'Someone'} → ${toProfile?.display_name ?? 'someone'} · ${new Intl.NumberFormat('en-PH', { style: 'currency', currency: patch.currency, minimumFractionDigits: 0 }).format(patch.amount)} (updated)${labelSuffix}`,
+    })
+  })
+}
+
+export async function deleteSettlement(settlementId: string, editorUserId: string): Promise<void> {
+  const s = await db.settlements.get(settlementId)
+  if (!s || s.is_deleted) return
+
+  const timestamp = now()
+
+  await db.transaction('rw', [db.settlements, db.activity_log, db.profiles], async () => {
+    await db.settlements.update(settlementId, {
+      is_deleted: true,
+      updated_at: timestamp,
+      synced_at: null,
+    })
+
+    const fromProfile = await db.profiles.get(s.from_user_id)
+    const toProfile = await db.profiles.get(s.to_user_id)
+
+    await db.activity_log.add({
+      ...syncFields(),
+      group_id: s.group_id,
+      user_id: editorUserId,
+      action: 'deleted',
+      entity_type: 'settlement',
+      entity_id: settlementId,
+      description: `Removed payment ${fromProfile?.display_name ?? '?'} → ${toProfile?.display_name ?? '?'}`,
+    })
+  })
 }
 
 // ── Queries ──────────────────────────────────────────

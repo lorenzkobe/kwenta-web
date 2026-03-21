@@ -1,4 +1,5 @@
 import { useLiveQuery } from 'dexie-react-hooks'
+import { listSettlementHistoryForGroup, listSettlementHistoryForUser } from '@/lib/settlement'
 import { db } from './db'
 
 function activeOnly<T extends { is_deleted: boolean }>(items: T[] | undefined) {
@@ -78,6 +79,20 @@ export function useSettlements(groupId: string | undefined) {
       .toArray()
     return activeOnly(settlements)
   }, [groupId])
+}
+
+export function useGroupSettlementHistory(groupId: string | undefined) {
+  return useLiveQuery(async () => {
+    if (!groupId) return []
+    return listSettlementHistoryForGroup(groupId)
+  }, [groupId])
+}
+
+export function useUserSettlementHistory(userId: string | undefined) {
+  return useLiveQuery(async () => {
+    if (!userId) return []
+    return listSettlementHistoryForUser(userId)
+  }, [userId])
 }
 
 export function useActivityLog(groupId?: string | null, limit = 20) {

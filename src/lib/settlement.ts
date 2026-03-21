@@ -177,3 +177,69 @@ export async function computeAllGroupBalances(
 
   return summaries
 }
+
+/** Recorded cash/settle events for display (already applied in balance math). */
+export interface SettlementHistoryItem {
+  id: string
+  groupId: string
+  /** Set when listing across groups (e.g. home / balances). */
+  groupName?: string
+  fromUserId: string
+  toUserId: string
+  fromName: string
+  toName: string
+  amount: number
+  currency: string
+  /** Optional note (e.g. "Cash", "Dinner") — scoped to the group but shown in global lists too */
+  label: string
+  createdAt: string
+}
+
+export async function listSettlementHistoryForGroup(
+  groupId: string,
+): Promise<SettlementHistoryItem[]> {
+  const settlements = await db.settlements.where('group_id').equals(groupId).toArray()
+  const active = settlements.filter((s) => !s.is_deleted && s.is_settled)
+  active.sort((a, b) => b.created_at.localeCompare(a.created_at))
+
+  const items: SettlementHistoryItem[] = []
+  for (const s of active) {
+    const [fromP, toP] = await Promise.all([
+      db.profiles.get(s.from_user_id),
+      db.profiles.get(s.to_user_id),
+    ])
+    items.push({
+      id: s.id,
+      groupId: s.group_id,
+      fromUserId: s.from_user_id,
+      toUserId: s.to_user_id,
+      fromName: fromP?.display_name ?? 'Someone',
+      toName: toP?.display_name ?? 'Someone',
+      amount: s.amount,
+      currency: s.currency,
+      label: s.label ?? '',
+      createdAt: s.created_at,
+    })
+  }
+  return items
+}
+
+/** All recorded settlements in groups the user belongs to (newest first). */
+export async function listSettlementHistoryForUser(
+  userId: string,
+): Promise<SettlementHistoryItem[]> {
+  const memberships = await db.group_members.where('user_id').equals(userId).toArray()
+  const groupIds = [...new Set(memberships.filter((m) => !m.is_deleted).map((m) => m.group_id))]
+
+  const out: SettlementHistoryItem[] = []
+  for (const gid of groupIds) {
+    const group = await db.groups.get(gid)
+    if (!group || group.is_deleted) continue
+    const rows = await listSettlementHistoryForGroup(gid)
+    for (const r of rows) {
+      out.push({ ...r, groupName: group.name })
+    }
+  }
+  out.sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+  return out
+}

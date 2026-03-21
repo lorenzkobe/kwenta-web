@@ -1,7 +1,9 @@
+import { useMemo, useState } from 'react'
 import {
   ArrowUpRight,
   ChevronRight,
   CreditCard,
+  History,
   Plus,
   ReceiptText,
   Sparkles,
@@ -9,7 +11,11 @@ import {
 } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { useLiveQuery } from 'dexie-react-hooks'
+import { SettlementHistoryList } from '@/components/common/SettlementHistoryList'
+import { EditSettlementDialog } from '@/components/common/EditSettlementDialog'
 import { db } from '@/db/db'
+import { useUserSettlementHistory } from '@/db/hooks'
+import type { SettlementHistoryItem } from '@/lib/settlement'
 import { useCurrentUser } from '@/hooks/useCurrentUser'
 import { formatCurrency, timeAgo } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
@@ -17,6 +23,15 @@ import { Badge } from '@/components/ui/badge'
 
 export function HomePage() {
   const { userId, profile } = useCurrentUser()
+
+  const settlementHistory = useUserSettlementHistory(userId ?? undefined)
+  const [editingSettlement, setEditingSettlement] = useState<SettlementHistoryItem | null>(null)
+  const paymentsInvolvingYou = useMemo(() => {
+    if (!userId || !settlementHistory?.length) return []
+    return settlementHistory
+      .filter((h) => h.fromUserId === userId || h.toUserId === userId)
+      .slice(0, 6)
+  }, [userId, settlementHistory])
 
   const stats = useLiveQuery(async () => {
     if (!userId) return { billCount: 0, totalSpent: 0, groupCount: 0 }
@@ -33,9 +48,24 @@ export function HomePage() {
     const bills = await db.bills.where('created_by').equals(userId).toArray()
     const active = bills.filter((b) => !b.is_deleted)
     active.sort((a, b) => b.created_at.localeCompare(a.created_at))
-    return active.slice(0, 5).map((b) => ({
-      id: b.id, title: b.title, amount: b.total_amount, currency: b.currency, createdAt: b.created_at,
-    }))
+    const slice = active.slice(0, 5)
+    return Promise.all(
+      slice.map(async (b) => {
+        let groupName: string | undefined
+        if (b.group_id) {
+          const g = await db.groups.get(b.group_id)
+          if (g && !g.is_deleted) groupName = g.name
+        }
+        return {
+          id: b.id,
+          title: b.title,
+          amount: b.total_amount,
+          currency: b.currency,
+          createdAt: b.created_at,
+          groupName,
+        }
+      }),
+    )
   }, [userId])
 
   const recentActivity = useLiveQuery(async () => {
@@ -94,7 +124,7 @@ export function HomePage() {
           {[
             { title: 'Add bill', detail: 'Restaurant, utilities, or debt', icon: ReceiptText, to: '/app/bills/new' },
             { title: 'New group', detail: 'Invite housemates or friends', icon: Users, to: '/app/groups' },
-            { title: 'Balances', detail: 'See who should collect or settle', icon: CreditCard, to: '/app/balances' },
+            { title: 'Balances', detail: 'See who should collect or pay', icon: CreditCard, to: '/app/balances' },
           ].map((action) => (
             <Link
               key={action.title}
@@ -155,7 +185,15 @@ export function HomePage() {
               >
                 <div>
                   <p className="text-sm font-medium text-slate-800">{bill.title}</p>
-                  <p className="text-xs text-slate-400">{timeAgo(bill.createdAt)}</p>
+                  <p className="text-xs text-slate-400">
+                    {bill.groupName ? (
+                      <>
+                        <span className="font-medium text-slate-500">{bill.groupName}</span>
+                        <span> · </span>
+                      </>
+                    ) : null}
+                    {timeAgo(bill.createdAt)}
+                  </p>
                 </div>
                 <span className="text-sm font-semibold text-slate-800">
                   {formatCurrency(bill.amount, bill.currency)}
@@ -165,6 +203,39 @@ export function HomePage() {
           </div>
         )}
       </section>
+
+      {paymentsInvolvingYou.length > 0 && (
+        <section className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <History className="size-4 text-blue-600" />
+              <h3 className="text-base font-semibold">Your payments</h3>
+            </div>
+            <Button asChild variant="ghost" size="xs" className="rounded-full text-blue-600">
+              <Link to="/app/balances">Balances</Link>
+            </Button>
+          </div>
+          <p className="mt-1 text-xs text-slate-500">
+            Recorded settlements across your groups (you paid or were paid).
+          </p>
+          <div className="mt-4">
+            <SettlementHistoryList
+              items={paymentsInvolvingYou}
+              currentUserId={userId}
+              showGroupName
+              onEdit={(item) => setEditingSettlement(item)}
+            />
+          </div>
+        </section>
+      )}
+
+      {editingSettlement && (
+        <EditSettlementDialog
+          item={editingSettlement}
+          onClose={() => setEditingSettlement(null)}
+          onSaved={() => setEditingSettlement(null)}
+        />
+      )}
 
       {(recentActivity?.length ?? 0) > 0 && (
         <section className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">

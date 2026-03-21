@@ -7,6 +7,7 @@ import { useAppStore } from '@/store/app-store'
 import { db } from '@/db/db'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { ConfirmDialog } from '@/components/common/ConfirmDialog'
 
 export function SettingsPage() {
   const navigate = useNavigate()
@@ -18,6 +19,7 @@ export function SettingsPage() {
   const [editing, setEditing] = useState(false)
   const [displayName, setDisplayName] = useState('')
   const [clearing, setClearing] = useState(false)
+  const [clearConfirmOpen, setClearConfirmOpen] = useState(false)
 
   function startEditing() {
     setDisplayName(profile?.display_name ?? '')
@@ -35,8 +37,7 @@ export function SettingsPage() {
     navigate('/login')
   }
 
-  async function handleClearData() {
-    if (!confirm('This will remove all local data from this device. Are you sure?')) return
+  async function executeClearData() {
     setClearing(true)
     try {
       await db.delete()
@@ -48,6 +49,7 @@ export function SettingsPage() {
   }
 
   return (
+    <>
     <div className="space-y-5">
       <div>
         <h1 className="text-2xl font-semibold tracking-tight">Settings</h1>
@@ -135,7 +137,8 @@ export function SettingsPage() {
           </div>
 
           <button
-            onClick={handleClearData}
+            type="button"
+            onClick={() => setClearConfirmOpen(true)}
             disabled={clearing}
             className="flex w-full items-center gap-3 px-5 py-4 text-left transition-colors hover:bg-slate-100"
           >
@@ -160,5 +163,16 @@ export function SettingsPage() {
         </div>
       </div>
     </div>
+
+    <ConfirmDialog
+      open={clearConfirmOpen}
+      onOpenChange={setClearConfirmOpen}
+      title="Clear all local data?"
+      description="This will remove all Kwenta data stored in this browser on this device. You cannot undo this here."
+      confirmLabel="Clear data"
+      variant="danger"
+      onConfirm={executeClearData}
+    />
+    </>
   )
 }

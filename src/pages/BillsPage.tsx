@@ -1,4 +1,4 @@
-import { Plus, ReceiptText, Trash2 } from 'lucide-react'
+import { Plus, ReceiptText, Trash2, Users } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { useLiveQuery } from 'dexie-react-hooks'
 import { db } from '@/db/db'
@@ -6,7 +6,6 @@ import { deleteBill } from '@/db/operations'
 import { useCurrentUser } from '@/hooks/useCurrentUser'
 import { formatCurrency, timeAgo } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
-import { Badge } from '@/components/ui/badge'
 
 export function BillsPage() {
   const { userId } = useCurrentUser()
@@ -14,18 +13,13 @@ export function BillsPage() {
   const bills = useLiveQuery(async () => {
     if (!userId) return []
     const all = await db.bills.where('created_by').equals(userId).toArray()
-    const active = all.filter((b) => !b.is_deleted)
+    const active = all.filter((b) => !b.is_deleted && b.group_id == null)
     active.sort((a, b) => b.created_at.localeCompare(a.created_at))
     return Promise.all(
       active.map(async (bill) => {
         const items = await db.bill_items.where('bill_id').equals(bill.id).toArray()
         const activeItems = items.filter((i) => !i.is_deleted)
-        let groupName: string | null = null
-        if (bill.group_id) {
-          const group = await db.groups.get(bill.group_id)
-          groupName = group?.name ?? null
-        }
-        return { ...bill, itemCount: activeItems.length, groupName }
+        return { ...bill, itemCount: activeItems.length }
       }),
     )
   }, [userId])
@@ -39,9 +33,10 @@ export function BillsPage() {
     <div className="space-y-5">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight">Bills</h1>
+          <h1 className="text-2xl font-semibold tracking-tight">Personal bills</h1>
           <p className="mt-1 text-sm text-slate-600">
-            {bills?.length ?? 0} bill{(bills?.length ?? 0) !== 1 ? 's' : ''} total
+            {bills?.length ?? 0} bill{(bills?.length ?? 0) !== 1 ? 's' : ''} · Group bills stay in each
+            group
           </p>
         </div>
         <Button asChild className="rounded-full">
@@ -52,15 +47,30 @@ export function BillsPage() {
         </Button>
       </div>
 
+      <div className="flex flex-col gap-3 rounded-2xl border border-blue-600/20 bg-blue-600/5 p-4 sm:flex-row sm:items-center sm:justify-between">
+        <div className="min-w-0">
+          <p className="text-sm font-medium text-slate-800">Looking for group bills?</p>
+          <p className="mt-1 text-xs text-slate-600">
+            Shared expenses live inside each group. Open a group to add or view bills there.
+          </p>
+        </div>
+        <Button asChild variant="secondary" className="shrink-0 rounded-full">
+          <Link to="/app/groups">
+            <Users className="size-4" />
+            Go to groups
+          </Link>
+        </Button>
+      </div>
+
       {(!bills || bills.length === 0) ? (
         <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
           <div className="flex flex-col items-center py-12 text-center">
             <div className="rounded-2xl bg-slate-100 p-4">
               <ReceiptText className="size-6 text-slate-400" />
             </div>
-            <p className="mt-3 text-sm font-medium text-slate-500">No bills yet</p>
+            <p className="mt-3 text-sm font-medium text-slate-500">No personal bills yet</p>
             <p className="mt-1 text-xs text-slate-400">
-              Start by adding your first bill or expense
+              Bills you add without a group show up here. Open a group for shared group expenses.
             </p>
             <Button asChild size="sm" className="mt-4 rounded-full">
               <Link to="/app/bills/new">
@@ -84,14 +94,6 @@ export function BillsPage() {
                     <span>{timeAgo(bill.created_at)}</span>
                     <span>·</span>
                     <span>{bill.itemCount} item{bill.itemCount !== 1 ? 's' : ''}</span>
-                    {bill.groupName && (
-                      <>
-                        <span>·</span>
-                        <Badge variant="ghost" className="text-[0.65rem] px-1.5">
-                          {bill.groupName}
-                        </Badge>
-                      </>
-                    )}
                   </div>
                 </Link>
                 <div className="flex items-center gap-2">

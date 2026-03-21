@@ -11,8 +11,8 @@ import { useSync } from '@/hooks/useSync'
 
 export function AppShell() {
   useOnlineStatus()
-  const { loading } = useAuth()
-  useSync()
+  const { loading, user } = useAuth()
+  useSync(Boolean(user))
 
   if (loading) {
     return (

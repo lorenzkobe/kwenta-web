@@ -58,6 +58,8 @@ export interface Settlement extends SyncFields {
   to_user_id: string
   amount: number
   currency: string
+  /** Short note (e.g. "Cash", "Dinner") — shown in group & global payment history */
+  label: string
   is_settled: boolean
 }
 

@@ -2,14 +2,17 @@ import { useEffect } from 'react'
 import { useAppStore } from '@/store/app-store'
 import { startSyncManager } from '@/sync/sync-manager'
 
-export function useSync() {
-  const currentUserId = useAppStore((s) => s.currentUserId)
+/**
+ * @param cloudSyncActive — pass `true` only when the user has a Supabase session (see `useAuth().user`).
+ * Local-only mode should keep this `false` so we do not poll the server.
+ */
+export function useSync(cloudSyncActive: boolean) {
   const isOnline = useAppStore((s) => s.isOnline)
 
   useEffect(() => {
-    if (!currentUserId || !isOnline) return
+    if (!cloudSyncActive || !isOnline) return
 
     const cleanup = startSyncManager()
     return cleanup
-  }, [currentUserId, isOnline])
+  }, [cloudSyncActive, isOnline])
 }
