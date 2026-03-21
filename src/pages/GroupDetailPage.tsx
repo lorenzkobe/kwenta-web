@@ -20,6 +20,7 @@ import { useLiveQuery } from 'dexie-react-hooks'
 import { db } from '@/db/db'
 import {
   addGroupMember,
+  addExistingGroupMember,
   removeGroupMember,
   deleteGroup,
   updateGroup,
@@ -42,6 +43,7 @@ import { EditSettlementDialog } from '@/components/common/EditSettlementDialog'
 import { RecordSettlementDialog } from '@/components/common/RecordSettlementDialog'
 import { ConfirmDialog } from '@/components/common/ConfirmDialog'
 import { useGroupSettlementHistory } from '@/db/hooks'
+import { getMemberSuggestions } from '@/lib/people'
 
 const CURRENCY_OPTIONS = [
   ['PHP', 'PHP — Philippine Peso'],
@@ -85,11 +87,31 @@ function ManageMembersDialog({
   const [newName, setNewName] = useState('')
   const [adding, setAdding] = useState(false)
   const [removing, setRemoving] = useState<string | null>(null)
+  const [suggestions, setSuggestions] = useState<
+    Awaited<ReturnType<typeof getMemberSuggestions>>
+  >([])
   const inputRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
     inputRef.current?.focus()
   }, [])
+
+  useEffect(() => {
+    let cancelled = false
+    async function run() {
+      const q = newName.trim()
+      if (q.length < 1) {
+        setSuggestions([])
+        return
+      }
+      const s = await getMemberSuggestions(currentUserId, q)
+      if (!cancelled) setSuggestions(s)
+    }
+    void run()
+    return () => {
+      cancelled = true
+    }
+  }, [newName, currentUserId])
 
   async function handleAdd() {
     if (!newName.trim()) return
@@ -110,6 +132,18 @@ function ManageMembersDialog({
       onChanged()
     } finally {
       setRemoving(null)
+    }
+  }
+
+  async function handlePickSuggestion(profileId: string) {
+    setAdding(true)
+    try {
+      await addExistingGroupMember(groupId, profileId, currentUserId)
+      setNewName('')
+      setSuggestions([])
+      onChanged()
+    } finally {
+      setAdding(false)
     }
   }
 
@@ -169,6 +203,31 @@ function ManageMembersDialog({
 
         <div className="border-t border-slate-100 px-5 py-4">
           <p className="mb-3 text-xs font-medium text-slate-500">Add a member</p>
+          {suggestions.filter((s) => !members.some((m) => m.userId === s.id)).length > 0 && (
+            <div className="mb-3 flex flex-wrap gap-1.5">
+              {suggestions
+                .filter((s) => !members.some((m) => m.userId === s.id))
+                .map((s) => (
+                <button
+                  key={s.id}
+                  type="button"
+                  disabled={adding}
+                  onClick={() => void handlePickSuggestion(s.id)}
+                  className={cn(
+                    'rounded-full border px-2.5 py-1 text-xs font-medium transition-colors',
+                    s.kind === 'local'
+                      ? 'border-blue-200 bg-blue-50 text-blue-800 hover:bg-blue-100'
+                      : 'border-slate-200 bg-slate-100 text-slate-700 hover:bg-slate-200',
+                  )}
+                >
+                  {s.displayName}
+                  <span className="ml-1 text-[0.65rem] opacity-70">
+                    {s.kind === 'local' ? 'Saved' : 'Group'}
+                  </span>
+                </button>
+              ))}
+            </div>
+          )}
           <div className="flex gap-2">
             <Input
               ref={inputRef}
@@ -189,6 +248,10 @@ function ManageMembersDialog({
               {adding ? '…' : 'Add'}
             </Button>
           </div>
+          <p className="mt-2 text-[0.65rem] text-slate-400">
+            New names are saved to your phonebook (unique per name). Tap a suggestion to add someone
+            you already know.
+          </p>
         </div>
       </div>
     </div>
@@ -371,17 +434,17 @@ function GroupOptionsMenu({
         <p className="px-3 pb-2 pt-1 text-center text-xs font-medium uppercase tracking-wide text-slate-400">
           Group options
         </p>
-        <button type="button" className={itemClass} onClick={onEdit}>
-          <Pencil className="size-4 text-blue-600" />
-          Edit group
+        <button type="button" className={itemClass} onClick={onPaymentHistory}>
+          <History className="size-4 text-blue-600" />
+          Payment history
         </button>
         <button type="button" className={itemClass} onClick={onMembers}>
           <Users className="size-4 text-blue-600" />
           Members
         </button>
-        <button type="button" className={itemClass} onClick={onPaymentHistory}>
-          <History className="size-4 text-blue-600" />
-          Payment history
+        <button type="button" className={itemClass} onClick={onEdit}>
+          <Pencil className="size-4 text-blue-600" />
+          Edit group
         </button>
         <button
           type="button"
@@ -397,23 +460,6 @@ function GroupOptionsMenu({
       </div>
     </div>
   )
-}
-
-function memberBalanceLabel(amount: number, currency: string) {
-  const rounded = Math.round(amount * 100) / 100
-  if (Math.abs(rounded) <= 0.01) {
-    return { text: 'Balanced', className: 'text-slate-400' }
-  }
-  if (rounded > 0) {
-    return {
-      text: `Collects ${formatCurrency(rounded, currency)}`,
-      className: 'text-emerald-600',
-    }
-  }
-  return {
-    text: `Pays ${formatCurrency(Math.abs(rounded), currency)}`,
-    className: 'text-amber-600',
-  }
 }
 
 export function GroupDetailPage() {
@@ -561,14 +607,20 @@ export function GroupDetailPage() {
             <h2 className="text-lg font-semibold">Members</h2>
           </div>
           <p className="mt-1 text-xs text-slate-500">
-            Net balance from shared bills: positive means others net-pay them; negative means they net-pay
-            the group.
+            Net amount in this group: positive = credit, negative = owes, 0 = even.
           </p>
 
           <ul className="mt-4 space-y-2">
             {(members ?? []).map((m) => {
               const raw = balanceByUser.get(m.userId) ?? 0
-              const { text, className } = memberBalanceLabel(raw, group.currency)
+              const rounded = Math.round(raw * 100) / 100
+              const amount = Math.abs(rounded) <= 0.01 ? 0 : rounded
+              const amountClass =
+                amount === 0
+                  ? 'text-slate-500'
+                  : amount > 0
+                    ? 'text-emerald-600'
+                    : 'text-amber-600'
               return (
                 <li
                   key={m.id}
@@ -587,7 +639,9 @@ export function GroupDetailPage() {
                       </p>
                     </div>
                   </div>
-                  <p className={cn('shrink-0 text-right text-sm font-semibold', className)}>{text}</p>
+                  <p className={cn('shrink-0 text-right text-sm font-semibold tabular-nums', amountClass)}>
+                    {formatCurrency(amount, group.currency)}
+                  </p>
                 </li>
               )
             })}
@@ -756,7 +810,7 @@ export function GroupDetailPage() {
           currency={group.currency}
           fromUserId={recordSettlement.fromUserId}
           toUserId={recordSettlement.toUserId}
-          amount={recordSettlement.amount}
+          defaultAmount={recordSettlement.amount}
           fromName={recordSettlement.fromName}
           toName={recordSettlement.toName}
           markedBy={userId}

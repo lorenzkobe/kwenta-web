@@ -181,7 +181,8 @@ export async function computeAllGroupBalances(
 /** Recorded cash/settle events for display (already applied in balance math). */
 export interface SettlementHistoryItem {
   id: string
-  groupId: string
+  /** Null for personal (non-group) payments */
+  groupId: string | null
   /** Set when listing across groups (e.g. home / balances). */
   groupName?: string
   fromUserId: string
@@ -210,7 +211,7 @@ export async function listSettlementHistoryForGroup(
     ])
     items.push({
       id: s.id,
-      groupId: s.group_id,
+      groupId: groupId,
       fromUserId: s.from_user_id,
       toUserId: s.to_user_id,
       fromName: fromP?.display_name ?? 'Someone',
@@ -240,6 +241,33 @@ export async function listSettlementHistoryForUser(
       out.push({ ...r, groupName: group.name })
     }
   }
+
+  const allSettlements = await db.settlements.filter((s) => !s.is_deleted && s.is_settled).toArray()
+  const personal = allSettlements.filter(
+    (s) =>
+      s.group_id === null &&
+      (s.from_user_id === userId || s.to_user_id === userId),
+  )
+  for (const s of personal) {
+    const [fromP, toP] = await Promise.all([
+      db.profiles.get(s.from_user_id),
+      db.profiles.get(s.to_user_id),
+    ])
+    out.push({
+      id: s.id,
+      groupId: null,
+      groupName: 'Personal',
+      fromUserId: s.from_user_id,
+      toUserId: s.to_user_id,
+      fromName: fromP?.display_name ?? 'Someone',
+      toName: toP?.display_name ?? 'Someone',
+      amount: s.amount,
+      currency: s.currency,
+      label: s.label ?? '',
+      createdAt: s.created_at,
+    })
+  }
+
   out.sort((a, b) => b.createdAt.localeCompare(a.createdAt))
   return out
 }

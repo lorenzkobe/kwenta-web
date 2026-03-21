@@ -245,7 +245,7 @@ export function BalancesPage() {
           currency={recordSettlement.currency}
           fromUserId={recordSettlement.fromUserId}
           toUserId={recordSettlement.toUserId}
-          amount={recordSettlement.amount}
+          defaultAmount={recordSettlement.amount}
           fromName={recordSettlement.fromName}
           toName={recordSettlement.toName}
           markedBy={userId}

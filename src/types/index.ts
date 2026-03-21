@@ -11,6 +11,12 @@ export interface Profile extends SyncFields {
   email: string
   display_name: string
   avatar_url: string | null
+  /** Created offline / phonebook — not a signed-in account */
+  is_local: boolean
+  /** When set, this local profile is linked to another profile (usually a synced account) */
+  linked_profile_id: string | null
+  /** Profile id of the user who created this local profile (for unique names per phonebook) */
+  owner_id: string | null
 }
 
 export interface Group extends SyncFields {
@@ -53,7 +59,8 @@ export interface ItemSplit extends SyncFields {
 }
 
 export interface Settlement extends SyncFields {
-  group_id: string
+  /** Null = personal payment between two people (no group) */
+  group_id: string | null
   from_user_id: string
   to_user_id: string
   amount: number

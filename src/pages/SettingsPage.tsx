@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Check, LogOut, Pencil, RefreshCcw, Shield, Trash2, User } from 'lucide-react'
+import { Check, Copy, LogOut, Pencil, RefreshCcw, Shield, Trash2, User } from 'lucide-react'
 import { useAuth } from '@/hooks/useAuth'
 import { useCurrentUser } from '@/hooks/useCurrentUser'
 import { useAppStore } from '@/store/app-store'
@@ -12,7 +12,7 @@ import { ConfirmDialog } from '@/components/common/ConfirmDialog'
 export function SettingsPage() {
   const navigate = useNavigate()
   const { user, isAuthenticated, signOut, updateDisplayName } = useAuth()
-  const { profile } = useCurrentUser()
+  const { profile, userId } = useCurrentUser()
   const isOnline = useAppStore((s) => s.isOnline)
   const syncStatus = useAppStore((s) => s.syncStatus)
 
@@ -104,6 +104,26 @@ export function SettingsPage() {
           >
             Sign in to sync your data
           </Button>
+        )}
+
+        {isAuthenticated && userId && (
+          <div className="mt-4 rounded-xl border border-slate-200 bg-slate-50 px-3 py-3">
+            <p className="text-xs font-medium text-slate-600">Profile ID</p>
+            <p className="mt-1 break-all font-mono text-[0.7rem] leading-snug text-slate-800">{userId}</p>
+            <p className="mt-1.5 text-[0.65rem] text-slate-500">
+              Your signed-in account id. Share it so others can link their local contact to you in People.
+            </p>
+            <Button
+              type="button"
+              variant="outline"
+              size="xs"
+              className="mt-2 rounded-lg"
+              onClick={() => void navigator.clipboard.writeText(userId)}
+            >
+              <Copy className="size-3" />
+              Copy ID
+            </Button>
+          </div>
         )}
       </div>
 

@@ -2,7 +2,17 @@ import { type Table } from 'dexie'
 import { db } from '@/db/db'
 import { supabase } from '@/lib/supabase'
 import { now } from '@/lib/utils'
-import type { SyncFields } from '@/types'
+import type {
+  ActivityLog,
+  Bill,
+  BillItem,
+  Group,
+  GroupMember,
+  ItemSplit,
+  Profile,
+  Settlement,
+  SyncFields,
+} from '@/types'
 
 const LAST_PULL_KEY = 'kwenta_last_pull'
 
@@ -19,27 +29,124 @@ const TABLE_NAMES = [
 
 type TableName = (typeof TABLE_NAMES)[number]
 
+type PushFilterContext = {
+  groupsICreated: Set<string>
+  memberGroupIds: Set<string>
+  allowedBillIds: Set<string>
+  allowedItemIds: Set<string>
+}
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function getLocalTable(name: TableName): Table<any, string> {
   return db[name]
 }
 
+/** Rows the current user is allowed to upsert per Supabase RLS (not every local row). */
+async function buildPushFilterContext(userId: string): Promise<PushFilterContext> {
+  const allGroups = await db.groups.toArray()
+  const groupsICreated = new Set(
+    allGroups.filter((g) => !g.is_deleted && g.created_by === userId).map((g) => g.id),
+  )
+
+  const allMemberships = await db.group_members.where('user_id').equals(userId).toArray()
+  const memberGroupIds = new Set(
+    allMemberships.filter((m) => !m.is_deleted).map((m) => m.group_id),
+  )
+
+  const allBills = await db.bills.toArray()
+  const allowedBillIds = new Set<string>()
+  for (const b of allBills) {
+    if (b.created_by === userId) {
+      allowedBillIds.add(b.id)
+      continue
+    }
+    if (b.group_id && memberGroupIds.has(b.group_id)) {
+      allowedBillIds.add(b.id)
+    }
+  }
+
+  const allBillItems = await db.bill_items.toArray()
+  const allowedItemIds = new Set<string>()
+  for (const bi of allBillItems) {
+    if (allowedBillIds.has(bi.bill_id)) {
+      allowedItemIds.add(bi.id)
+    }
+  }
+
+  return { groupsICreated, memberGroupIds, allowedBillIds, allowedItemIds }
+}
+
+function filterUnsyncedForPush(
+  tableName: TableName,
+  unsynced: SyncFields[],
+  userId: string,
+  ctx: PushFilterContext,
+): SyncFields[] {
+  switch (tableName) {
+    case 'profiles':
+      return unsynced.filter((r) => (r as Profile).id === userId)
+    case 'groups':
+      return unsynced.filter((r) => (r as Group).created_by === userId)
+    case 'group_members': {
+      return unsynced.filter((r) => {
+        const gm = r as GroupMember
+        return ctx.groupsICreated.has(gm.group_id) || gm.user_id === userId
+      })
+    }
+    case 'bills':
+      return unsynced.filter((r) => ctx.allowedBillIds.has((r as Bill).id))
+    case 'bill_items':
+      return unsynced.filter((r) => ctx.allowedBillIds.has((r as BillItem).bill_id))
+    case 'item_splits':
+      return unsynced.filter((r) => ctx.allowedItemIds.has((r as ItemSplit).item_id))
+    case 'settlements':
+      return unsynced.filter((r) => {
+        const s = r as Settlement
+        if (s.group_id) {
+          return ctx.memberGroupIds.has(s.group_id)
+        }
+        return s.from_user_id === userId || s.to_user_id === userId
+      })
+    case 'activity_log':
+      return unsynced.filter((r) => {
+        const a = r as ActivityLog
+        if (a.user_id === userId) return true
+        if (a.group_id && ctx.memberGroupIds.has(a.group_id)) return true
+        return false
+      })
+    default:
+      return unsynced
+  }
+}
+
 /**
- * Push all locally unsynced records to Supabase.
+ * Push locally unsynced records the current user may write under RLS.
  * A record is unsynced if synced_at is null OR updated_at > synced_at.
  */
 export async function pushChanges(): Promise<{ pushed: number; errors: string[] }> {
   let pushed = 0
   const errors: string[] = []
 
+  const {
+    data: { session },
+  } = await supabase.auth.getSession()
+  const userId = session?.user?.id
+  if (!userId) {
+    return { pushed: 0, errors: ['Push skipped: not signed in'] }
+  }
+
+  const ctx = await buildPushFilterContext(userId)
+
   for (const tableName of TABLE_NAMES) {
     const table = getLocalTable(tableName)
     const allRecords = await table.toArray()
 
-    const unsynced = allRecords.filter((r: SyncFields) => {
+    const unsyncedRaw = allRecords.filter((r: SyncFields) => {
       if (r.synced_at === null) return true
       return r.updated_at > r.synced_at
     })
+
+    const unsynced = filterUnsyncedForPush(tableName, unsyncedRaw, userId, ctx)
 
     if (unsynced.length === 0) continue
 
@@ -104,6 +211,40 @@ export async function pullChanges(userId: string): Promise<{ pulled: number; err
   return { pulled, errors }
 }
 
+async function fetchSettlementRows(
+  since: string,
+  userId: string,
+  groupIds: string[],
+): Promise<SyncFields[]> {
+  const rows: SyncFields[] = []
+  if (groupIds.length > 0) {
+    const { data: g, error: e1 } = await supabase
+      .from('settlements')
+      .select('*')
+      .gt('updated_at', since)
+      .in('group_id', groupIds)
+    if (e1) throw e1
+    if (g) rows.push(...(g as SyncFields[]))
+  }
+  const { data: p, error: e2 } = await supabase
+    .from('settlements')
+    .select('*')
+    .gt('updated_at', since)
+    .is('group_id', null)
+    .or(`from_user_id.eq.${userId},to_user_id.eq.${userId}`)
+  if (e2) throw e2
+  if (p) rows.push(...(p as SyncFields[]))
+  const dedup = new Map<string, SyncFields>()
+  for (const r of rows) {
+    const id = (r as SyncFields).id
+    const prev = dedup.get(id)
+    if (!prev || (r as SyncFields).updated_at > prev.updated_at) {
+      dedup.set(id, r as SyncFields)
+    }
+  }
+  return [...dedup.values()]
+}
+
 async function getGroupIdsForUser(userId: string): Promise<string[]> {
   const { data } = await supabase
     .from('group_members')
@@ -154,9 +295,7 @@ async function fetchRemoteRows(
       break
     }
     case 'settlements':
-      if (groupIds.length === 0) return []
-      query = query.in('group_id', groupIds)
-      break
+      return await fetchSettlementRows(since, userId, groupIds)
     case 'activity_log':
       if (groupIds.length === 0) {
         query = query.eq('user_id', userId)

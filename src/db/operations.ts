@@ -284,22 +284,60 @@ export async function addGroupMember(
   displayName: string,
   addedBy: string,
 ): Promise<string> {
+  const trimmed = displayName.trim()
+  const normalized = trimmed.toLowerCase()
+
+  const existingMembership = await db.group_members
+    .where('group_id')
+    .equals(groupId)
+    .filter((m) => !m.is_deleted)
+    .toArray()
+  for (const m of existingMembership) {
+    const p = await db.profiles.get(m.user_id)
+    if (p && !p.is_deleted && p.display_name.trim().toLowerCase() === normalized) {
+      return m.user_id
+    }
+  }
+
+  let userId: string | undefined
+  const existingProfile = await db.profiles
+    .where('owner_id')
+    .equals(addedBy)
+    .filter((p) => !p.is_deleted && p.display_name.trim().toLowerCase() === normalized)
+    .first()
+  if (existingProfile) {
+    userId = existingProfile.id
+  }
+
+  if (userId) {
+    const already = await db.group_members.where('[group_id+user_id]').equals([groupId, userId]).first()
+    if (already && !already.is_deleted) {
+      return userId
+    }
+  }
+
   const memberId = generateId()
-  const userId = generateId()
 
   await db.transaction('rw', [db.profiles, db.group_members, db.activity_log], async () => {
-    await db.profiles.add({
-      ...syncFields({ id: userId }),
-      email: '',
-      display_name: displayName,
-      avatar_url: null,
-    })
+    if (!userId) {
+      userId = generateId()
+      await db.profiles.add({
+        ...syncFields({ id: userId }),
+        email: '',
+        display_name: trimmed,
+        avatar_url: null,
+        is_local: true,
+        linked_profile_id: null,
+        owner_id: addedBy,
+      })
+    }
 
+    const p = await db.profiles.get(userId)
     const member: GroupMember = {
       ...syncFields({ id: memberId }),
       group_id: groupId,
       user_id: userId,
-      display_name: displayName,
+      display_name: p?.display_name ?? trimmed,
       joined_at: now(),
     }
     await db.group_members.add(member)
@@ -311,11 +349,99 @@ export async function addGroupMember(
       action: 'created',
       entity_type: 'group',
       entity_id: memberId,
-      description: `Added "${displayName}" to group`,
+      description: `Added "${p?.display_name ?? trimmed}" to group`,
     })
   })
 
-  return userId
+  return userId!
+}
+
+export type CreateLocalProfileResult =
+  | { outcome: 'created'; id: string }
+  | { outcome: 'already_exists'; id: string }
+
+/** Local phonebook contact (unique name per owner). */
+export async function createLocalProfile(
+  displayName: string,
+  ownerUserId: string,
+): Promise<CreateLocalProfileResult> {
+  const trimmed = displayName.trim()
+  const normalized = trimmed.toLowerCase()
+  if (!trimmed) throw new Error('Name required')
+
+  const existing = await db.profiles
+    .where('owner_id')
+    .equals(ownerUserId)
+    .filter((p) => !p.is_deleted && p.display_name.trim().toLowerCase() === normalized)
+    .first()
+  if (existing) return { outcome: 'already_exists', id: existing.id }
+
+  const userId = generateId()
+  await db.profiles.add({
+    ...syncFields({ id: userId }),
+    email: '',
+    display_name: trimmed,
+    avatar_url: null,
+    is_local: true,
+    linked_profile_id: null,
+    owner_id: ownerUserId,
+  })
+  return { outcome: 'created', id: userId }
+}
+
+/** Add someone who already exists in your phonebook or groups (by profile id). */
+export async function addExistingGroupMember(
+  groupId: string,
+  memberUserId: string,
+  addedBy: string,
+): Promise<void> {
+  const existing = await db.group_members.where('[group_id+user_id]').equals([groupId, memberUserId]).first()
+  if (existing && !existing.is_deleted) return
+
+  const p = await db.profiles.get(memberUserId)
+  if (!p || p.is_deleted) return
+
+  const memberId = generateId()
+  await db.transaction('rw', [db.group_members, db.activity_log], async () => {
+    await db.group_members.add({
+      ...syncFields({ id: memberId }),
+      group_id: groupId,
+      user_id: memberUserId,
+      display_name: p.display_name,
+      joined_at: now(),
+    })
+
+    await db.activity_log.add({
+      ...syncFields(),
+      group_id: groupId,
+      user_id: addedBy,
+      action: 'created',
+      entity_type: 'group',
+      entity_id: memberId,
+      description: `Added "${p.display_name}" to group`,
+    })
+  })
+}
+
+/** Point a local contact at a synced account (for display & future migration). */
+export async function linkProfileToRemote(
+  localProfileId: string,
+  remoteProfileId: string,
+  actorUserId: string,
+): Promise<void> {
+  const local = await db.profiles.get(localProfileId)
+  const remote = await db.profiles.get(remoteProfileId)
+  if (!local || local.is_deleted || !remote || remote.is_deleted) return
+  if (local.id === remote.id) return
+  if (local.owner_id !== actorUserId || !local.is_local) return
+  if (!remote.email?.trim()) return
+
+  const timestamp = now()
+  await db.profiles.update(localProfileId, {
+    linked_profile_id: remoteProfileId,
+    updated_at: timestamp,
+    synced_at: null,
+  })
 }
 
 export async function removeGroupMember(
@@ -386,6 +512,103 @@ export async function removeGroupMember(
   )
 }
 
+/**
+ * Remove a person from all personal (non-group) bill splits — same rules as removeGroupMember
+ * (equal splits redistributed across remaining members).
+ */
+async function removePersonFromPersonalBills(memberUserId: string, removedBy: string): Promise<void> {
+  const timestamp = now()
+  const allBills = await db.bills
+    .filter((b) => !b.is_deleted && (b.group_id === null || b.group_id === undefined))
+    .toArray()
+
+  await db.transaction('rw', [db.bill_items, db.item_splits, db.activity_log], async () => {
+    for (const bill of allBills) {
+      const items = await db.bill_items.where('bill_id').equals(bill.id).toArray()
+      const activeItems = items.filter((i) => !i.is_deleted)
+
+      for (const item of activeItems) {
+        const splits = await db.item_splits.where('item_id').equals(item.id).toArray()
+        const activeSplits = splits.filter((s) => !s.is_deleted)
+        const memberSplit = activeSplits.find((s) => s.user_id === memberUserId)
+        if (!memberSplit) continue
+
+        await db.item_splits.update(memberSplit.id, {
+          is_deleted: true,
+          updated_at: timestamp,
+        })
+
+        const remaining = activeSplits.filter((s) => s.user_id !== memberUserId)
+        if (memberSplit.split_type === 'equal' && remaining.length > 0) {
+          const newAmount = item.amount / remaining.length
+          for (const s of remaining) {
+            await db.item_splits.update(s.id, {
+              computed_amount: newAmount,
+              updated_at: timestamp,
+              synced_at: null,
+            })
+          }
+        }
+      }
+    }
+
+    await db.activity_log.add({
+      ...syncFields(),
+      group_id: null,
+      user_id: removedBy,
+      action: 'deleted',
+      entity_type: 'bill',
+      entity_id: memberUserId,
+      description: 'Removed person from personal bill splits',
+    })
+  })
+}
+
+/**
+ * Remove someone from all groups (splits recomputed per group), personal bills, payments, then soft-delete their profile.
+ */
+export async function deletePerson(personId: string, actorUserId: string): Promise<void> {
+  if (personId === actorUserId) return
+
+  const p = await db.profiles.get(personId)
+  if (!p || p.is_deleted) return
+
+  const displayName = p.display_name
+
+  const memberships = await db.group_members.where('user_id').equals(personId).toArray()
+  const groupIds = [...new Set(memberships.filter((m) => !m.is_deleted).map((m) => m.group_id))]
+
+  for (const gid of groupIds) {
+    await removeGroupMember(gid, personId, actorUserId)
+  }
+
+  await removePersonFromPersonalBills(personId, actorUserId)
+
+  const settlements = await db.settlements
+    .filter((s) => !s.is_deleted && (s.from_user_id === personId || s.to_user_id === personId))
+    .toArray()
+  for (const s of settlements) {
+    await deleteSettlement(s.id, actorUserId)
+  }
+
+  const timestamp = now()
+  await db.profiles.update(personId, {
+    is_deleted: true,
+    updated_at: timestamp,
+    synced_at: null,
+  })
+
+  await db.activity_log.add({
+    ...syncFields(),
+    group_id: null,
+    user_id: actorUserId,
+    action: 'deleted',
+    entity_type: 'group',
+    entity_id: personId,
+    description: `Removed contact "${displayName}"`,
+  })
+}
+
 export async function deleteGroup(groupId: string, userId: string) {
   const timestamp = now()
   await db.transaction('rw', [db.groups, db.group_members, db.activity_log], async () => {
@@ -414,7 +637,7 @@ export async function deleteGroup(groupId: string, userId: string) {
 // ── Settlements ─────────────────────────────────────
 
 export async function createSettlement(
-  groupId: string,
+  groupId: string | null,
   fromUserId: string,
   toUserId: string,
   amount: number,

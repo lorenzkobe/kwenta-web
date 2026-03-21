@@ -36,6 +36,16 @@ export function EditSettlementDialog({
   }, [item])
 
   const members = useLiveQuery(async () => {
+    if (item.groupId == null) {
+      const [fromP, toP] = await Promise.all([
+        db.profiles.get(item.fromUserId),
+        db.profiles.get(item.toUserId),
+      ])
+      return [
+        { userId: item.fromUserId, name: fromP?.display_name ?? '?' },
+        { userId: item.toUserId, name: toP?.display_name ?? '?' },
+      ]
+    }
     const all = await db.group_members.where('group_id').equals(item.groupId).toArray()
     const active = all.filter((m) => !m.is_deleted)
     return Promise.all(
@@ -44,7 +54,7 @@ export function EditSettlementDialog({
         return { userId: m.user_id, name: p?.display_name ?? m.display_name }
       }),
     )
-  }, [item.groupId])
+  }, [item.groupId, item.fromUserId, item.toUserId])
 
   async function handleSave() {
     if (!userId) return

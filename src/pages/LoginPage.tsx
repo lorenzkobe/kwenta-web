@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { ArrowRight, Eye, EyeOff, Loader2, Wallet } from 'lucide-react'
 import { useAuth } from '@/hooks/useAuth'
@@ -18,8 +18,13 @@ export function LoginPage() {
   const [success, setSuccess] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
 
+  useEffect(() => {
+    if (isAuthenticated) {
+      navigate('/app', { replace: true })
+    }
+  }, [isAuthenticated, navigate])
+
   if (isAuthenticated) {
-    navigate('/app', { replace: true })
     return null
   }
 

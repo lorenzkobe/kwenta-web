@@ -48,6 +48,23 @@ export class KwentaDB extends Dexie {
         if (s.label === undefined) s.label = ''
       })
     })
+
+    this.version(3).stores({
+      profiles: 'id, email, owner_id, linked_profile_id, synced_at, is_deleted',
+      groups: 'id, created_by, invite_code, synced_at, is_deleted',
+      group_members: 'id, group_id, user_id, [group_id+user_id], synced_at, is_deleted',
+      bills: 'id, group_id, created_by, created_at, synced_at, is_deleted',
+      bill_items: 'id, bill_id, synced_at, is_deleted',
+      item_splits: 'id, item_id, user_id, synced_at, is_deleted',
+      settlements: 'id, group_id, from_user_id, to_user_id, is_settled, synced_at, is_deleted',
+      activity_log: 'id, group_id, user_id, entity_type, entity_id, created_at, synced_at, is_deleted',
+    }).upgrade(async (tx) => {
+      await tx.table('profiles').toCollection().modify((p: Record<string, unknown>) => {
+        if (p.is_local === undefined) p.is_local = false
+        if (p.linked_profile_id === undefined) p.linked_profile_id = null
+        if (p.owner_id === undefined) p.owner_id = null
+      })
+    })
   }
 }
 

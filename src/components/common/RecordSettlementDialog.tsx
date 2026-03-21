@@ -12,7 +12,8 @@ export function RecordSettlementDialog({
   currency,
   fromUserId,
   toUserId,
-  amount,
+  defaultAmount,
+  amountEditable = false,
   fromName,
   toName,
   markedBy,
@@ -20,26 +21,33 @@ export function RecordSettlementDialog({
 }: {
   open: boolean
   onOpenChange: (open: boolean) => void
-  groupId: string
+  groupId: string | null
   currency: string
   fromUserId: string
   toUserId: string
-  amount: number
+  defaultAmount: number
+  amountEditable?: boolean
   fromName: string
   toName: string
   markedBy: string
   onRecorded: () => void
 }) {
   const [label, setLabel] = useState('')
+  const [amountStr, setAmountStr] = useState(() => String(defaultAmount))
   const [saving, setSaving] = useState(false)
 
   useEffect(() => {
-    if (open) setLabel('')
-  }, [open, groupId, fromUserId, toUserId, amount])
+    if (open) {
+      setLabel('')
+      setAmountStr(String(defaultAmount))
+    }
+  }, [open, groupId, fromUserId, toUserId, defaultAmount])
 
   if (!open) return null
 
   async function handleSubmit() {
+    const amount = parseFloat(amountStr.replace(',', '.'))
+    if (!Number.isFinite(amount) || amount <= 0) return
     setSaving(true)
     try {
       await createSettlement(
@@ -57,6 +65,9 @@ export function RecordSettlementDialog({
       setSaving(false)
     }
   }
+
+  const amount = parseFloat(amountStr.replace(',', '.'))
+  const invalidAmount = !Number.isFinite(amount) || amount <= 0
 
   return (
     <div className="fixed inset-0 z-[60] flex items-end justify-center p-4 sm:items-center">
@@ -87,9 +98,25 @@ export function RecordSettlementDialog({
               <ArrowRight className="size-3.5 text-slate-400" />
               <span className="font-medium text-slate-800">{toName}</span>
             </div>
-            <p className="mt-2 text-lg font-semibold text-blue-600">
-              {formatCurrency(amount, currency)}
-            </p>
+            {amountEditable ? (
+              <div className="mt-3">
+                <label htmlFor="settlement-amt" className="text-xs font-medium text-slate-500">
+                  Amount
+                </label>
+                <Input
+                  id="settlement-amt"
+                  type="text"
+                  inputMode="decimal"
+                  value={amountStr}
+                  onChange={(e) => setAmountStr(e.target.value)}
+                  className="mt-1 rounded-lg"
+                />
+              </div>
+            ) : (
+              <p className="mt-2 text-lg font-semibold text-blue-600">
+                {formatCurrency(amount, currency)}
+              </p>
+            )}
           </div>
 
           <div className="flex flex-col gap-2">
@@ -106,7 +133,9 @@ export function RecordSettlementDialog({
               className="rounded-lg"
             />
             <p className="text-xs text-slate-500">
-              Shown in this group&apos;s history and in your global payment list with the group name.
+              {groupId
+                ? "Shown in this group's history and in your global payment list with the group name."
+                : 'Shown in your payment history and on this person.'}
             </p>
           </div>
 
@@ -120,7 +149,12 @@ export function RecordSettlementDialog({
             >
               Cancel
             </Button>
-            <Button type="button" className="rounded-xl" disabled={saving} onClick={handleSubmit}>
+            <Button
+              type="button"
+              className="rounded-xl"
+              disabled={saving || (amountEditable && invalidAmount)}
+              onClick={handleSubmit}
+            >
               {saving ? 'Saving…' : 'Record payment'}
             </Button>
           </div>

@@ -13,6 +13,10 @@ const AddBillPage = lazy(() => import('@/pages/AddBillPage').then((m) => ({ defa
 const GroupsPage = lazy(() => import('@/pages/GroupsPage').then((m) => ({ default: m.GroupsPage })))
 const GroupDetailPage = lazy(() => import('@/pages/GroupDetailPage').then((m) => ({ default: m.GroupDetailPage })))
 const BalancesPage = lazy(() => import('@/pages/BalancesPage').then((m) => ({ default: m.BalancesPage })))
+const PeoplePage = lazy(() => import('@/pages/PeoplePage').then((m) => ({ default: m.PeoplePage })))
+const PersonDetailPage = lazy(() =>
+  import('@/pages/PersonDetailPage').then((m) => ({ default: m.PersonDetailPage })),
+)
 const SettingsPage = lazy(() => import('@/pages/SettingsPage').then((m) => ({ default: m.SettingsPage })))
 
 function PageLoader() {
@@ -39,6 +43,8 @@ function App() {
             <Route path="bills/:billId" element={<BillDetailPage />} />
             <Route path="groups" element={<GroupsPage />} />
             <Route path="groups/:groupId" element={<GroupDetailPage />} />
+            <Route path="people" element={<PeoplePage />} />
+            <Route path="people/:personId" element={<PersonDetailPage />} />
             <Route path="balances" element={<BalancesPage />} />
             <Route path="settings" element={<SettingsPage />} />
           </Route>

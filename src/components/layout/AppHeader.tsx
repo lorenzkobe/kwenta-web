@@ -1,4 +1,15 @@
-import { BellRing, Home, Layers3, ReceiptText, Scale, UserRound, Wallet, WifiOff, Wifi } from 'lucide-react'
+import {
+  BellRing,
+  BookUser,
+  Home,
+  Layers3,
+  ReceiptText,
+  Scale,
+  UserRound,
+  Wallet,
+  WifiOff,
+  Wifi,
+} from 'lucide-react'
 import { Link, NavLink } from 'react-router-dom'
 import { useAppStore } from '@/store/app-store'
 import { cn } from '@/lib/utils'
@@ -9,6 +20,7 @@ const navItems = [
   { to: '/app', icon: Home, label: 'Home', end: true },
   { to: '/app/bills', icon: ReceiptText, label: 'Bills', end: false },
   { to: '/app/groups', icon: Layers3, label: 'Groups', end: false },
+  { to: '/app/people', icon: BookUser, label: 'People', end: false },
   { to: '/app/balances', icon: Scale, label: 'Balances', end: false },
 ] as const
 
