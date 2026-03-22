@@ -1,9 +1,17 @@
 import { supabase } from '@/lib/supabase'
 import { useAppStore } from '@/store/app-store'
-import { fullSync } from './sync-service'
+import {
+  fullSync,
+  getMillisecondsSinceLastPull,
+  hasUnsyncedLocalDataForUser,
+} from './sync-service'
 
 /** Slow backup in case a CRUD-triggered sync was missed */
 const SYNC_BACKUP_INTERVAL_MS = 5 * 60 * 1000
+/** When there is nothing to upload, still pull at most this often from the backup timer (avoids empty RPCs every tick). */
+const BACKUP_PULL_STALE_AFTER_MS = 15 * 60 * 1000
+
+type SyncRunReason = 'initial' | 'explicit' | 'backup' | 'online'
 const BACKOFF_INITIAL_MS = 30_000
 const BACKOFF_MAX_MS = 5 * 60 * 1000
 const TRIGGER_DEBOUNCE_MS = 400
@@ -25,7 +33,7 @@ function scheduleRetry() {
   clearRetryTimer()
   retryTimer = setTimeout(() => {
     retryTimer = null
-    void runSync()
+    void runSync('explicit')
   }, backoffMs)
   backoffMs = Math.min(backoffMs * 2, BACKOFF_MAX_MS)
 }
@@ -37,10 +45,10 @@ function resetBackoff() {
 
 function onBrowserOnline() {
   resetBackoff()
-  void runSync()
+  void runSync('online')
 }
 
-async function runSync() {
+async function runSync(reason: SyncRunReason) {
   if (isSyncing) return
 
   const { isOnline } = useAppStore.getState()
@@ -52,6 +60,12 @@ async function runSync() {
   if (!session?.user) return
 
   const userId = session.user.id
+
+  if (reason === 'backup') {
+    const needsPush = await hasUnsyncedLocalDataForUser(userId)
+    const needsPull = getMillisecondsSinceLastPull() >= BACKUP_PULL_STALE_AFTER_MS
+    if (!needsPush && !needsPull) return
+  }
 
   isSyncing = true
   useAppStore.getState().setSyncStatus('syncing')
@@ -76,10 +90,10 @@ async function runSync() {
 }
 
 export function startSyncManager() {
-  void runSync()
+  void runSync('initial')
 
   if (backupTimer) clearInterval(backupTimer)
-  backupTimer = setInterval(() => void runSync(), SYNC_BACKUP_INTERVAL_MS)
+  backupTimer = setInterval(() => void runSync('backup'), SYNC_BACKUP_INTERVAL_MS)
 
   window.addEventListener('online', onBrowserOnline)
 
@@ -105,6 +119,6 @@ export function triggerSync() {
   debounceTimer = setTimeout(() => {
     debounceTimer = null
     resetBackoff()
-    void runSync()
+    void runSync('explicit')
   }, TRIGGER_DEBOUNCE_MS)
 }

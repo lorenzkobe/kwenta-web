@@ -28,6 +28,15 @@ async function resolveSplitUserIdForPush(localUserId: string): Promise<string> {
 
 export const KWENTA_LAST_PULL_STORAGE_KEY = 'kwenta_last_pull'
 
+/** Time since we last advanced `KWENTA_LAST_PULL_STORAGE_KEY` after a successful sync. */
+export function getMillisecondsSinceLastPull(): number {
+  const v = localStorage.getItem(KWENTA_LAST_PULL_STORAGE_KEY)
+  if (!v) return Number.POSITIVE_INFINITY
+  const t = Date.parse(v)
+  if (Number.isNaN(t)) return Number.POSITIVE_INFINITY
+  return Math.max(0, Date.now() - t)
+}
+
 const TABLE_NAMES = [
   'profiles',
   'groups',

@@ -1,7 +1,8 @@
 import { useState, useEffect } from 'react'
 import { ArrowLeft, Loader2, Pencil, ReceiptText, Trash2, Users } from 'lucide-react'
-import { Link, useNavigate, useParams } from 'react-router-dom'
+import { Link, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { getBillWithDetails, deleteBill } from '@/db/operations'
+import { BILL_BACK_QUERY, billDetailBackPath, withBillBackQuery } from '@/lib/bill-navigation'
 import { useCurrentUser } from '@/hooks/useCurrentUser'
 import { formatCurrency } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
@@ -11,7 +12,13 @@ type BillDetails = Awaited<ReturnType<typeof getBillWithDetails>>
 export function BillDetailPage() {
   const { billId } = useParams<{ billId: string }>()
   const navigate = useNavigate()
+  const location = useLocation()
+  const [searchParams] = useSearchParams()
   const { userId } = useCurrentUser()
+  const backPath = billDetailBackPath({
+    backSearchParam: searchParams.get(BILL_BACK_QUERY),
+    locationState: location.state,
+  })
   const [bill, setBill] = useState<BillDetails>(null)
   const [loading, setLoading] = useState(true)
 
@@ -26,7 +33,7 @@ export function BillDetailPage() {
   async function handleDelete() {
     if (!billId || !userId) return
     await deleteBill(billId, userId)
-    navigate('/app/bills')
+    navigate(backPath)
   }
 
   if (loading) {
@@ -41,9 +48,9 @@ export function BillDetailPage() {
     return (
       <div className="space-y-5">
         <Button asChild variant="ghost" size="sm" className="rounded-full gap-1">
-          <Link to="/app/bills">
+          <Link to={backPath}>
             <ArrowLeft className="size-4" />
-            Back to bills
+            Back
           </Link>
         </Button>
         <div className="rounded-3xl border border-stone-200 bg-white p-5 shadow-sm">
@@ -57,14 +64,14 @@ export function BillDetailPage() {
     <div className="space-y-5">
       <div className="flex items-center justify-between">
         <Button asChild variant="ghost" size="sm" className="rounded-full gap-1">
-          <Link to="/app/bills">
+          <Link to={backPath}>
             <ArrowLeft className="size-4" />
             Back
           </Link>
         </Button>
         <div className="flex items-center gap-1">
           <Button asChild variant="ghost" size="sm" className="rounded-full">
-            <Link to={`/app/bills/new?edit=${billId}`}>
+            <Link to={withBillBackQuery(`/app/bills/new?edit=${billId}`, backPath)}>
               <Pencil className="size-4" />
               Edit
             </Link>

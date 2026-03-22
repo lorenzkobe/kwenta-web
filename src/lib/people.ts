@@ -224,19 +224,27 @@ export async function expandProfileIdsForSplitMatching(profileId: string): Promi
   return ids
 }
 
-function setsOverlapItemSplits(
-  uids: Set<string>,
-  meIds: Set<string>,
-  otherIds: Set<string>,
-): boolean {
-  let meHit = false
-  let otherHit = false
-  for (const u of uids) {
-    if (meIds.has(u)) meHit = true
-    if (otherIds.has(u)) otherHit = true
-    if (meHit && otherHit) return true
+/** Everyone selected on any line of the bill (active splits only). */
+async function participantUnionForBill(billId: string): Promise<Set<string>> {
+  const union = new Set<string>()
+  const items = await db.bill_items.where('bill_id').equals(billId).toArray()
+  for (const item of items) {
+    if (item.is_deleted) continue
+    const splits = await db.item_splits.where('item_id').equals(item.id).toArray()
+    for (const s of splits) {
+      if (!s.is_deleted) union.add(s.user_id)
+    }
   }
-  return false
+  return union
+}
+
+function profileSetTouchesBill(
+  profileIds: Set<string>,
+  bill: Bill,
+  participantUnion: Set<string>,
+): boolean {
+  if ([...profileIds].some((id) => participantUnion.has(id))) return true
+  return profileIds.has(bill.created_by)
 }
 
 export interface BillWithContext extends Bill {
@@ -244,6 +252,7 @@ export interface BillWithContext extends Bill {
   creatorName: string
 }
 
+/** Bills where you and this person both belong: selected on any line and/or recorded as payer (`created_by`). They do not need to share the same line item. */
 export async function listBillsInvolvingPair(meId: string, otherId: string): Promise<BillWithContext[]> {
   const meIds = await expandProfileIdsForSplitMatching(meId)
   const otherIds = await expandProfileIdsForSplitMatching(otherId)
@@ -252,19 +261,10 @@ export async function listBillsInvolvingPair(meId: string, otherId: string): Pro
   const out: BillWithContext[] = []
 
   for (const bill of bills) {
-    const items = await db.bill_items.where('bill_id').equals(bill.id).toArray()
-    let both = false
-    for (const item of items) {
-      if (item.is_deleted) continue
-      const splits = await db.item_splits.where('item_id').equals(item.id).toArray()
-      const active = splits.filter((s) => !s.is_deleted)
-      const uids = new Set(active.map((s) => s.user_id))
-      if (setsOverlapItemSplits(uids, meIds, otherIds)) {
-        both = true
-        break
-      }
-    }
-    if (!both) continue
+    const participantUnion = await participantUnionForBill(bill.id)
+    const meOnBill = profileSetTouchesBill(meIds, bill, participantUnion)
+    const otherOnBill = profileSetTouchesBill(otherIds, bill, participantUnion)
+    if (!meOnBill || !otherOnBill) continue
 
     const creator = await db.profiles.get(bill.created_by)
     let groupName: string | null = null

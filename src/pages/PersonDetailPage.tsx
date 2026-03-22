@@ -25,6 +25,7 @@ import {
 import { deletePerson, linkProfileToRemote } from '@/db/operations'
 import { ConfirmDialog } from '@/components/common/ConfirmDialog'
 import { useCurrentUser } from '@/hooks/useCurrentUser'
+import { withBillBackQuery } from '@/lib/bill-navigation'
 import { cn, formatCurrency } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -237,7 +238,7 @@ export function PersonDetailPage() {
     for (const gid of groupIds) {
       const members = await db.group_members.where('group_id').equals(gid).toArray()
       for (const m of members) {
-        if (m.is_deleted || m.user_id === personId) continue
+        if (m.is_deleted || m.user_id === personId || m.user_id === userId) continue
         const p = await db.profiles.get(m.user_id)
         if (!p || p.is_deleted || !p.email?.trim()) continue
         if (seen.has(p.id)) continue
@@ -324,6 +325,7 @@ export function PersonDetailPage() {
 
   async function handleLink(remoteId: string) {
     if (!userId || !personId) return
+    if (remoteId === userId) return
     setLinkByIdError(null)
     await linkProfileToRemote(personId, remoteId, userId)
     const updated = await db.profiles.get(personId)
@@ -351,6 +353,10 @@ export function PersonDetailPage() {
       }
       if (remoteId === personId) {
         setLinkByIdError('That’s this contact — use the other person’s email or ID.')
+        return
+      }
+      if (remoteId === userId) {
+        setLinkByIdError('You can’t link a contact to your own Kwenta account.')
         return
       }
       const remote = await db.profiles.get(remoteId)
@@ -504,15 +510,15 @@ export function PersonDetailPage() {
           <>
             {personalBills.length === 0 ? (
               <p className="mt-3 text-sm text-stone-500">
-                No personal bills yet where you both appear on a split. (Group trips are under{' '}
-                <strong>Groups</strong>.)
+                No personal bills yet where you’re both on the bill (selected on a line and/or as payer).
+                Group trips are under <strong>Groups</strong>.
               </p>
             ) : (
               <ul className="mt-3 space-y-2">
                 {personalBills.map((bill) => (
                   <li key={bill.id}>
                     <Link
-                      to={`/app/bills/${bill.id}`}
+                      to={withBillBackQuery(`/app/bills/${bill.id}`, `/app/people/${personId}`)}
                       className="flex items-center justify-between rounded-xl border border-stone-200 bg-stone-100/60 px-4 py-3 transition-colors hover:bg-stone-100"
                     >
                       <div className="min-w-0">

@@ -20,6 +20,7 @@ import {
   redistributeWithPinned,
   type PinnedSplits,
 } from '@/lib/bill-split-form'
+import { BILL_BACK_QUERY, parseSafeAppPath, withBillBackQuery } from '@/lib/bill-navigation'
 import { collectRelatedProfileIds } from '@/lib/people'
 import { cn, formatCurrency } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
@@ -66,6 +67,7 @@ export function AddBillPage() {
   const [searchParams] = useSearchParams()
   const groupIdParam = searchParams.get('groupId')
   const editBillId = searchParams.get('edit')
+  const returnBack = parseSafeAppPath(searchParams.get(BILL_BACK_QUERY))
 
   const { userId } = useCurrentUser()
 
@@ -500,7 +502,11 @@ export function AddBillPage() {
           currency: input.currency,
           items: input.items,
         })
-        navigate(`/app/bills/${editBillId}`)
+        navigate(
+          returnBack
+            ? withBillBackQuery(`/app/bills/${editBillId}`, returnBack)
+            : `/app/bills/${editBillId}`,
+        )
       } else {
         await createBill(input)
         navigate('/app/bills')
@@ -514,7 +520,15 @@ export function AddBillPage() {
     <div className="space-y-5">
       <div className="flex items-center justify-between">
         <Button asChild variant="ghost" size="sm" className="rounded-full gap-1">
-          <Link to={isEdit ? `/app/bills/${editBillId}` : '/app/bills'}>
+          <Link
+            to={
+              isEdit && editBillId
+                ? returnBack
+                  ? withBillBackQuery(`/app/bills/${editBillId}`, returnBack)
+                  : `/app/bills/${editBillId}`
+                : '/app/bills'
+            }
+          >
             <ArrowLeft className="size-4" />
             Back
           </Link>

@@ -1,5 +1,4 @@
 import {
-  BellRing,
   BookUser,
   CloudUpload,
   Home,
@@ -17,6 +16,7 @@ import { useCurrentUser } from '@/hooks/useCurrentUser'
 import { hasUnsyncedLocalDataForUser } from '@/sync/sync-service'
 import { useAppStore } from '@/store/app-store'
 import { cn } from '@/lib/utils'
+import { NotificationsBell } from '@/components/notifications/NotificationsBell'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 
@@ -99,9 +99,7 @@ export function AppHeader() {
               </>
             )}
           </Badge>
-          <Button variant="ghost" size="icon-sm" className="rounded-full">
-            <BellRing className="size-4" />
-          </Button>
+          {userId ? <NotificationsBell userId={userId} /> : null}
           <Button asChild size="icon-sm" className="rounded-full">
             <Link to="/app/settings">
               <UserRound className="size-4" />

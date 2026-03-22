@@ -9,6 +9,11 @@ import type {
   SplitType,
 } from '@/types'
 import { generateId, getDeviceId, now } from '@/lib/utils'
+import {
+  notifyBillParticipantsCreated,
+  notifyProfileLinked,
+  resolveRecipientProfileIdForNotify,
+} from '@/lib/kwenta-notifications'
 import { computeSplits, type SplitInput } from '@/lib/splits'
 
 function notifySyncAfterMutation() {
@@ -97,6 +102,29 @@ export async function createBill(input: CreateBillInput): Promise<string> {
       entity_id: billId,
       description: `Created bill "${input.title}"`,
     })
+  })
+
+  const recipientIds = new Set<string>()
+  for (const item of input.items) {
+    for (const sp of item.splits) {
+      const resolved = await resolveRecipientProfileIdForNotify(sp.userId)
+      if (resolved && resolved !== input.createdBy) recipientIds.add(resolved)
+    }
+  }
+  let groupName: string | null = null
+  if (input.groupId) {
+    const g = await db.groups.get(input.groupId)
+    if (g && !g.is_deleted) groupName = g.name
+  }
+  const actor = await db.profiles.get(input.createdBy)
+  void notifyBillParticipantsCreated({
+    actorId: input.createdBy,
+    actorName: actor?.display_name?.trim() || 'Someone',
+    recipientIds: [...recipientIds],
+    billId,
+    billTitle: input.title,
+    groupId: input.groupId,
+    groupName,
   })
 
   notifySyncAfterMutation()
@@ -451,6 +479,7 @@ export async function linkProfileToRemote(
   const remote = await db.profiles.get(remoteProfileId)
   if (!local || local.is_deleted || !remote || remote.is_deleted) return
   if (local.id === remote.id) return
+  if (remoteProfileId === actorUserId) return
   if (local.owner_id !== actorUserId || !local.is_local) return
   if (!remote.email?.trim()) return
 
@@ -459,6 +488,13 @@ export async function linkProfileToRemote(
     linked_profile_id: remoteProfileId,
     updated_at: timestamp,
     synced_at: null,
+  })
+  const actor = await db.profiles.get(actorUserId)
+  void notifyProfileLinked({
+    actorId: actorUserId,
+    actorName: actor?.display_name?.trim() || 'Someone',
+    recipientId: remoteProfileId,
+    linkedAsName: local.display_name,
   })
   notifySyncAfterMutation()
 }
