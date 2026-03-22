@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { ArrowRight, Eye, EyeOff, Loader2, Wallet } from 'lucide-react'
+import { SESSION_EXPIRED_MESSAGE_KEY } from '@/lib/auth-session-flags'
 import { useAuth } from '@/hooks/useAuth'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -9,8 +10,11 @@ type Mode = 'login' | 'signup' | 'forgot'
 
 export function LoginPage() {
   const navigate = useNavigate()
+  const location = useLocation()
+  const from = (location.state as { from?: string } | null)?.from ?? '/app'
   const { signIn, signUp, resetPassword, isAuthenticated } = useAuth()
   const [mode, setMode] = useState<Mode>('login')
+  const [sessionExpiredNotice, setSessionExpiredNotice] = useState(false)
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [showPassword, setShowPassword] = useState(false)
@@ -19,10 +23,17 @@ export function LoginPage() {
   const [submitting, setSubmitting] = useState(false)
 
   useEffect(() => {
-    if (isAuthenticated) {
-      navigate('/app', { replace: true })
+    if (sessionStorage.getItem(SESSION_EXPIRED_MESSAGE_KEY)) {
+      sessionStorage.removeItem(SESSION_EXPIRED_MESSAGE_KEY)
+      setSessionExpiredNotice(true)
     }
-  }, [isAuthenticated, navigate])
+  }, [])
+
+  useEffect(() => {
+    if (isAuthenticated) {
+      navigate(from.startsWith('/') ? from : `/${from}`, { replace: true })
+    }
+  }, [isAuthenticated, navigate, from])
 
   if (isAuthenticated) {
     return null
@@ -51,8 +62,6 @@ export function LoginPage() {
         const { error } = await signIn(email, password)
         if (error) {
           setError(error.message)
-        } else {
-          navigate('/app', { replace: true })
         }
       } else if (mode === 'signup') {
         const { error } = await signUp(email, password)
@@ -82,20 +91,30 @@ export function LoginPage() {
   }
 
   return (
-    <div className="flex min-h-dvh items-center justify-center bg-[radial-gradient(circle_at_top,rgba(191,219,254,0.75),transparent_28%),linear-gradient(180deg,#f7fbff_0%,#eef6fb_100%)] px-4">
+    <div className="flex min-h-dvh items-center justify-center bg-[radial-gradient(circle_at_top,rgba(17,94,89,0.09),transparent_42%),linear-gradient(180deg,#faf8f5_0%,#f0ebe3_55%,#ebe4da_100%)] px-4">
       <div className="w-full max-w-md">
         <Link to="/" className="mb-8 flex items-center justify-center gap-2.5">
-          <div className="rounded-xl bg-blue-600/15 p-2.5 text-blue-600">
+          <div className="rounded-xl bg-teal-800/15 p-2.5 text-teal-800">
             <Wallet className="size-5" />
           </div>
-          <span className="text-lg font-semibold tracking-tight text-slate-800">Kwenta</span>
+          <span className="text-lg font-semibold tracking-tight text-stone-800">Kwenta</span>
         </Link>
 
-        <div className="rounded-[2rem] border border-slate-200 bg-white p-6 shadow-[0_14px_40px_rgba(15,23,42,0.06)] sm:p-8">
+        <div className="rounded-[2rem] border border-stone-200 bg-white p-6 shadow-[0_14px_40px_rgba(28,25,23,0.06)] sm:p-8">
           <div className="text-center">
-            <h1 className="text-2xl font-semibold tracking-tight text-slate-800">{title}</h1>
-            <p className="mt-2 text-sm text-slate-600">{subtitle}</p>
+            <h1 className="text-2xl font-semibold tracking-tight text-stone-800">{title}</h1>
+            <p className="mt-2 text-sm text-stone-600">{subtitle}</p>
           </div>
+
+          {sessionExpiredNotice && (
+            <div
+              role="status"
+              className="mt-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-950"
+            >
+              Your session ended. Your data is still saved on this device — sign in again to open the app
+              and sync to the cloud.
+            </div>
+          )}
 
           {error && (
             <div className="mt-4 rounded-xl bg-red-500/10 px-4 py-3 text-sm text-red-600">
@@ -111,7 +130,7 @@ export function LoginPage() {
 
           <form onSubmit={handleSubmit} className="mt-6 space-y-4">
             <div className="flex w-full flex-col gap-2">
-              <label className="text-sm font-medium text-slate-800" htmlFor="email">
+              <label className="text-sm font-medium text-stone-800" htmlFor="email">
                 Email
               </label>
               <Input
@@ -126,7 +145,7 @@ export function LoginPage() {
 
             {mode !== 'forgot' && (
               <div className="flex w-full flex-col gap-2">
-                <label className="text-sm font-medium text-slate-800" htmlFor="password">
+                <label className="text-sm font-medium text-stone-800" htmlFor="password">
                   Password
                 </label>
                 <div className="relative">
@@ -142,7 +161,7 @@ export function LoginPage() {
                   />
                   <button
                     type="button"
-                    className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-800"
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-stone-400 hover:text-stone-800"
                     onClick={() => setShowPassword(!showPassword)}
                   >
                     {showPassword ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
@@ -155,7 +174,7 @@ export function LoginPage() {
               <div className="flex justify-end">
                 <button
                   type="button"
-                  className="text-xs text-blue-600 underline-offset-4 hover:underline"
+                  className="text-xs text-teal-800 underline-offset-4 hover:underline"
                   onClick={() => switchMode('forgot')}
                 >
                   Forgot password?
@@ -177,35 +196,22 @@ export function LoginPage() {
             </Button>
           </form>
 
-          <div className="relative my-6">
-            <div className="absolute inset-0 flex items-center">
-              <span className="w-full border-t border-slate-200" />
-            </div>
-            <div className="relative flex justify-center text-xs">
-              <span className="bg-white px-2 text-slate-400">or</span>
-            </div>
-          </div>
-
-          <Button asChild variant="ghost" className="w-full rounded-xl text-slate-600">
-            <Link to="/app">Continue without an account</Link>
-          </Button>
-
           <div className="mt-4">
             {mode === 'login' ? (
-              <p className="text-center text-sm text-slate-600">
+              <p className="text-center text-sm text-stone-600">
                 Don&apos;t have an account?{' '}
                 <button
-                  className="font-medium text-blue-600 underline-offset-4 hover:underline"
+                  className="font-medium text-teal-800 underline-offset-4 hover:underline"
                   onClick={() => switchMode('signup')}
                 >
                   Sign up
                 </button>
               </p>
             ) : (
-              <p className="text-center text-sm text-slate-600">
+              <p className="text-center text-sm text-stone-600">
                 Already have an account?{' '}
                 <button
-                  className="font-medium text-blue-600 underline-offset-4 hover:underline"
+                  className="font-medium text-teal-800 underline-offset-4 hover:underline"
                   onClick={() => switchMode('login')}
                 >
                   Sign in

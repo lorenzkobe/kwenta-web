@@ -44,14 +44,14 @@ export function InstallPrompt() {
   if (!visible) return null
 
   return (
-    <div className="fixed inset-x-4 bottom-20 z-50 mx-auto max-w-md animate-[slideUp_0.3s_ease-out] rounded-2xl border border-slate-200 bg-white p-4 shadow-[0_20px_60px_rgba(15,23,42,0.15)] lg:bottom-6">
+    <div className="fixed inset-x-4 bottom-20 z-50 mx-auto max-w-md animate-[slideUp_0.3s_ease-out] rounded-2xl border border-stone-200 bg-white p-4 shadow-[0_20px_60px_rgba(28,25,23,0.15)] lg:bottom-6">
       <div className="flex items-start gap-3">
-        <div className="rounded-xl bg-blue-600/15 p-2.5 text-blue-600">
+        <div className="rounded-xl bg-teal-800/15 p-2.5 text-teal-800">
           <Download className="size-5" />
         </div>
         <div className="min-w-0 flex-1">
-          <p className="font-semibold text-slate-800">Install Kwenta</p>
-          <p className="mt-0.5 text-xs text-slate-500">
+          <p className="font-semibold text-stone-800">Install Kwenta</p>
+          <p className="mt-0.5 text-xs text-stone-500">
             Add to your home screen for the full offline experience
           </p>
           <div className="mt-3 flex gap-2">

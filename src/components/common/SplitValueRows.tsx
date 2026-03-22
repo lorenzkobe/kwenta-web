@@ -36,8 +36,8 @@ export function SplitValueRows({
   const customOk = splitType === 'custom' && lineAmount > 0 && Math.abs(sum - lineAmount) <= 0.06
 
   return (
-    <div className="mt-2 space-y-2 rounded-xl border border-slate-200 bg-white px-3 py-2">
-      <p className="text-xs font-medium text-slate-500">
+    <div className="mt-2 space-y-2 rounded-xl border border-stone-200 bg-white px-3 py-2">
+      <p className="text-xs font-medium text-stone-500">
         {splitType === 'percentage'
           ? 'Percent per person (total must be 100%). Edited fields stay fixed; the rest update.'
           : `Amount per person (${currency}, must total the line amount). Edited fields stay fixed.`}
@@ -48,10 +48,10 @@ export function SplitValueRows({
         return (
           <div key={uid} className="flex items-center gap-2">
             <span
-              className="flex w-24 shrink-0 items-center gap-1 truncate text-sm text-slate-700"
+              className="flex w-24 shrink-0 items-center gap-1 truncate text-sm text-stone-700"
               title={locked ? 'You set this — not auto-changed when others edit' : undefined}
             >
-              {locked && <Lock className="size-3 shrink-0 text-slate-400" aria-hidden />}
+              {locked && <Lock className="size-3 shrink-0 text-stone-400" aria-hidden />}
               {m?.isCurrentUser ? 'You' : m?.displayName}
             </span>
             <Input

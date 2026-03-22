@@ -34,7 +34,7 @@ export function BillsPage() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Personal bills</h1>
-          <p className="mt-1 text-sm text-slate-600">
+          <p className="mt-1 text-sm text-stone-600">
             {bills?.length ?? 0} bill{(bills?.length ?? 0) !== 1 ? 's' : ''} · Group bills stay in each
             group
           </p>
@@ -47,10 +47,10 @@ export function BillsPage() {
         </Button>
       </div>
 
-      <div className="flex flex-col gap-3 rounded-2xl border border-blue-600/20 bg-blue-600/5 p-4 sm:flex-row sm:items-center sm:justify-between">
+      <div className="flex flex-col gap-3 rounded-2xl border border-teal-800/20 bg-teal-800/5 p-4 sm:flex-row sm:items-center sm:justify-between">
         <div className="min-w-0">
-          <p className="text-sm font-medium text-slate-800">Looking for group bills?</p>
-          <p className="mt-1 text-xs text-slate-600">
+          <p className="text-sm font-medium text-stone-800">Looking for group bills?</p>
+          <p className="mt-1 text-xs text-stone-600">
             Shared expenses live inside each group. Open a group to add or view bills there.
           </p>
         </div>
@@ -63,13 +63,13 @@ export function BillsPage() {
       </div>
 
       {(!bills || bills.length === 0) ? (
-        <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
+        <div className="rounded-3xl border border-stone-200 bg-white p-5 shadow-sm">
           <div className="flex flex-col items-center py-12 text-center">
-            <div className="rounded-2xl bg-slate-100 p-4">
-              <ReceiptText className="size-6 text-slate-400" />
+            <div className="rounded-2xl bg-stone-100 p-4">
+              <ReceiptText className="size-6 text-stone-400" />
             </div>
-            <p className="mt-3 text-sm font-medium text-slate-500">No personal bills yet</p>
-            <p className="mt-1 text-xs text-slate-400">
+            <p className="mt-3 text-sm font-medium text-stone-500">No personal bills yet</p>
+            <p className="mt-1 text-xs text-stone-400">
               Bills you add without a group show up here. Open a group for shared group expenses.
             </p>
             <Button asChild size="sm" className="mt-4 rounded-full">
@@ -85,25 +85,25 @@ export function BillsPage() {
           {bills.map((bill) => (
             <div
               key={bill.id}
-              className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm transition-colors hover:bg-slate-50"
+              className="rounded-2xl border border-stone-200 bg-white p-4 shadow-sm transition-colors hover:bg-stone-50"
             >
               <div className="flex items-start justify-between gap-3">
                 <Link to={`/app/bills/${bill.id}`} className="min-w-0 flex-1">
-                  <p className="font-semibold text-slate-800">{bill.title}</p>
-                  <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-slate-500">
+                  <p className="font-semibold text-stone-800">{bill.title}</p>
+                  <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-stone-500">
                     <span>{timeAgo(bill.created_at)}</span>
                     <span>·</span>
                     <span>{bill.itemCount} item{bill.itemCount !== 1 ? 's' : ''}</span>
                   </div>
                 </Link>
                 <div className="flex items-center gap-2">
-                  <span className="text-sm font-semibold text-slate-800">
+                  <span className="text-sm font-semibold text-stone-800">
                     {formatCurrency(bill.total_amount, bill.currency)}
                   </span>
                   <Button
                     variant="ghost"
                     size="icon-xs"
-                    className="rounded-full text-slate-400 hover:text-red-600"
+                    className="rounded-full text-stone-400 hover:text-red-600"
                     onClick={() => handleDelete(bill.id)}
                   >
                     <Trash2 className="size-3.5" />

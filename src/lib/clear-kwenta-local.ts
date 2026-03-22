@@ -1,0 +1,16 @@
+import { db } from '@/db/db'
+import { KWENTA_LAST_PULL_STORAGE_KEY } from '@/sync/sync-service'
+
+export const KWENTA_LOCAL_USER_KEY = 'kwenta_local_user_id'
+
+const EXTRA_KEYS = ['kwenta_account_banner_dismissed'] as const
+
+/** Wipes IndexedDB and Kwenta-specific localStorage keys (after sign-out). */
+export async function clearKwentaLocalData(): Promise<void> {
+  await db.delete()
+  localStorage.removeItem(KWENTA_LOCAL_USER_KEY)
+  localStorage.removeItem(KWENTA_LAST_PULL_STORAGE_KEY)
+  for (const k of EXTRA_KEYS) {
+    localStorage.removeItem(k)
+  }
+}

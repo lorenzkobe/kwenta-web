@@ -508,7 +508,7 @@ export function AddBillPage() {
       </div>
 
       {loadingEdit && (
-        <p className="rounded-2xl border border-slate-200 bg-white p-5 text-center text-sm text-slate-500">
+        <p className="rounded-2xl border border-stone-200 bg-white p-5 text-center text-sm text-stone-500">
           Loading bill…
         </p>
       )}
@@ -517,7 +517,7 @@ export function AddBillPage() {
         <>
           <div
             className={cn(
-              'rounded-3xl border border-slate-200 bg-white p-1.5 shadow-sm',
+              'rounded-3xl border border-stone-200 bg-white p-1.5 shadow-sm',
               isEdit && 'pointer-events-none opacity-60',
             )}
           >
@@ -529,8 +529,8 @@ export function AddBillPage() {
                 className={cn(
                   'flex items-center justify-center gap-2 rounded-2xl px-4 py-3 text-sm font-medium transition-colors',
                   mode === 'simple'
-                    ? 'bg-slate-800 text-white shadow-sm'
-                    : 'text-slate-500 hover:bg-slate-100 hover:text-slate-800',
+                    ? 'bg-stone-800 text-white shadow-sm'
+                    : 'text-stone-500 hover:bg-stone-100 hover:text-stone-800',
                 )}
               >
                 <SplitSquareHorizontal className="size-4" />
@@ -543,8 +543,8 @@ export function AddBillPage() {
                 className={cn(
                   'flex items-center justify-center gap-2 rounded-2xl px-4 py-3 text-sm font-medium transition-colors',
                   mode === 'itemized'
-                    ? 'bg-slate-800 text-white shadow-sm'
-                    : 'text-slate-500 hover:bg-slate-100 hover:text-slate-800',
+                    ? 'bg-stone-800 text-white shadow-sm'
+                    : 'text-stone-500 hover:bg-stone-100 hover:text-stone-800',
                 )}
               >
                 <LayoutList className="size-4" />
@@ -553,7 +553,7 @@ export function AddBillPage() {
             </div>
           </div>
 
-          <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
+          <div className="rounded-3xl border border-stone-200 bg-white p-5 shadow-sm">
             <h1 className="text-xl font-semibold tracking-tight">
               {isEdit
                 ? 'Edit bill'
@@ -629,7 +629,7 @@ export function AddBillPage() {
           </div>
 
           {mode === 'simple' && (
-            <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
+            <div className="rounded-3xl border border-stone-200 bg-white p-5 shadow-sm">
               <h2 className="text-lg font-semibold">Amount &amp; split</h2>
 
               <div className="mt-4 space-y-3">
@@ -682,7 +682,7 @@ export function AddBillPage() {
                     </div>
 
                     <div className="flex flex-col gap-2">
-                      <div className="flex items-center gap-1.5 text-sm font-medium text-slate-600">
+                      <div className="flex items-center gap-1.5 text-sm font-medium text-stone-600">
                         <UserPlus className="size-3.5" />
                         Split with
                       </div>
@@ -697,8 +697,8 @@ export function AddBillPage() {
                               className={cn(
                                 'inline-flex cursor-pointer items-center gap-1.5 rounded-full border px-3 py-2 text-sm font-medium transition-colors',
                                 isSelected
-                                  ? 'border-transparent bg-blue-600 text-white'
-                                  : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-100',
+                                  ? 'border-transparent bg-teal-800 text-white'
+                                  : 'border-stone-200 bg-white text-stone-600 hover:bg-stone-100',
                               )}
                             >
                               <Users className="size-3.5" />
@@ -720,10 +720,10 @@ export function AddBillPage() {
                       />
 
                       {simpleSelectedUserIds.length > 0 && simpleAmountNum > 0 && (
-                        <div className="rounded-2xl border border-blue-600/20 bg-blue-600/5 px-4 py-3">
+                        <div className="rounded-2xl border border-teal-800/20 bg-teal-800/5 px-4 py-3">
                           {simpleSplitType === 'equal' ? (
-                            <p className="text-sm text-slate-700">
-                              <span className="font-semibold text-blue-600">
+                            <p className="text-sm text-stone-700">
+                              <span className="font-semibold text-teal-800">
                                 {formatCurrency(
                                   simpleAmountNum / simpleSelectedUserIds.length,
                                   currency,
@@ -733,9 +733,9 @@ export function AddBillPage() {
                               {simpleSelectedUserIds.length === 1 ? 'person' : 'people'}
                             </p>
                           ) : (
-                            <p className="text-sm text-slate-500">
+                            <p className="text-sm text-stone-500">
                               Total:{' '}
-                              <span className="font-semibold text-slate-800">
+                              <span className="font-semibold text-stone-800">
                                 {formatCurrency(simpleAmountNum, currency)}
                               </span>{' '}
                               among {simpleSelectedUserIds.length}{' '}
@@ -749,7 +749,7 @@ export function AddBillPage() {
                 )}
 
                 {!groupId && (
-                  <p className="text-xs text-slate-400">
+                  <p className="text-xs text-stone-400">
                     Select a group above to split this bill among members.
                   </p>
                 )}
@@ -758,11 +758,11 @@ export function AddBillPage() {
           )}
 
           {mode === 'itemized' && (
-            <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
+            <div className="rounded-3xl border border-stone-200 bg-white p-5 shadow-sm">
               <div className="flex items-center justify-between">
                 <div>
                   <h2 className="text-lg font-semibold">Items</h2>
-                  <p className="text-xs text-slate-500">
+                  <p className="text-xs text-stone-500">
                     {items.filter((i) => parseFloat(i.amount) > 0).length} item
                     {items.filter((i) => parseFloat(i.amount) > 0).length !== 1 ? 's' : ''}
                   </p>
@@ -783,10 +783,10 @@ export function AddBillPage() {
                 {items.map((item, index) => (
                   <div
                     key={item.key}
-                    className="rounded-2xl border border-slate-200 bg-slate-100/60 p-4"
+                    className="rounded-2xl border border-stone-200 bg-stone-100/60 p-4"
                   >
                     <div className="flex items-start gap-2">
-                      <span className="mt-2.5 flex size-6 shrink-0 items-center justify-center rounded-full bg-blue-600 text-[0.65rem] font-semibold text-white">
+                      <span className="mt-2.5 flex size-6 shrink-0 items-center justify-center rounded-full bg-teal-800 text-[0.65rem] font-semibold text-white">
                         {index + 1}
                       </span>
                       <div className="flex flex-1 flex-col gap-2 sm:flex-row">
@@ -855,9 +855,9 @@ export function AddBillPage() {
                     </div>
 
                     {groupId && members.length > 0 && (
-                      <div className="mt-3 border-t border-slate-200 pt-3">
+                      <div className="mt-3 border-t border-stone-200 pt-3">
                         <div className="flex items-center justify-between">
-                          <div className="flex items-center gap-1.5 text-xs font-medium text-slate-500">
+                          <div className="flex items-center gap-1.5 text-xs font-medium text-stone-500">
                             <UserPlus className="size-3.5" />
                             Split with
                           </div>
@@ -887,8 +887,8 @@ export function AddBillPage() {
                                 className={cn(
                                   'inline-flex cursor-pointer items-center gap-1 rounded-full border px-3 py-1.5 text-xs font-medium transition-colors',
                                   isSelected
-                                    ? 'border-transparent bg-blue-600 text-white'
-                                    : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-100',
+                                    ? 'border-transparent bg-teal-800 text-white'
+                                    : 'border-stone-200 bg-white text-stone-600 hover:bg-stone-100',
                                 )}
                               >
                                 <Users className="size-3" />
@@ -912,7 +912,7 @@ export function AddBillPage() {
                         {item.selectedUserIds.length > 0 &&
                           item.splitType === 'equal' &&
                           parseFloat(item.amount) > 0 && (
-                            <p className="mt-1.5 text-xs text-slate-400">
+                            <p className="mt-1.5 text-xs text-stone-400">
                               {formatCurrency(
                                 parseFloat(item.amount) / item.selectedUserIds.length,
                                 currency,
@@ -927,9 +927,9 @@ export function AddBillPage() {
               </div>
 
               {itemizedTotal > 0 && (
-                <div className="mt-4 flex items-center justify-between rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
-                  <span className="text-sm font-medium text-slate-600">Running total</span>
-                  <span className="text-lg font-semibold text-slate-800">
+                <div className="mt-4 flex items-center justify-between rounded-2xl border border-stone-200 bg-stone-50 px-4 py-3">
+                  <span className="text-sm font-medium text-stone-600">Running total</span>
+                  <span className="text-lg font-semibold text-stone-800">
                     {formatCurrency(itemizedTotal, currency)}
                   </span>
                 </div>

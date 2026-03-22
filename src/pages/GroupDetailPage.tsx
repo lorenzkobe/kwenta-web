@@ -150,10 +150,10 @@ function ManageMembersDialog({
   return (
     <div className="fixed inset-0 z-50 flex items-end justify-center p-4 sm:items-center">
       {sheetBackdrop(onClose)}
-      <div className="relative w-full max-w-sm animate-[slideUp_0.25s_ease-out] rounded-3xl border border-slate-200 bg-white shadow-[0_20px_60px_rgba(15,23,42,0.18)]">
-        <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4">
+      <div className="relative w-full max-w-sm animate-[slideUp_0.25s_ease-out] rounded-3xl border border-stone-200 bg-white shadow-[0_20px_60px_rgba(28,25,23,0.18)]">
+        <div className="flex items-center justify-between border-b border-stone-100 px-5 py-4">
           <div className="flex items-center gap-2">
-            <Users className="size-4 text-blue-600" />
+            <Users className="size-4 text-teal-800" />
             <h2 className="text-base font-semibold">Members</h2>
           </div>
           <Button variant="ghost" size="icon-xs" className="rounded-full" onClick={onClose}>
@@ -163,7 +163,7 @@ function ManageMembersDialog({
 
         <div className="max-h-64 overflow-y-auto px-5 py-3">
           {members.length === 0 ? (
-            <p className="py-4 text-center text-sm text-slate-400">No members yet</p>
+            <p className="py-4 text-center text-sm text-stone-400">No members yet</p>
           ) : (
             <ul className="space-y-1.5">
               {members.map((m) => (
@@ -171,10 +171,10 @@ function ManageMembersDialog({
                   key={m.id}
                   className="flex items-center gap-3 rounded-xl px-2 py-2"
                 >
-                  <div className="flex size-8 shrink-0 items-center justify-center rounded-full bg-blue-600/15 text-xs font-semibold text-blue-600">
+                  <div className="flex size-8 shrink-0 items-center justify-center rounded-full bg-teal-800/15 text-xs font-semibold text-teal-800">
                     {m.profileName.charAt(0).toUpperCase()}
                   </div>
-                  <span className="flex-1 text-sm font-medium text-slate-800">
+                  <span className="flex-1 text-sm font-medium text-stone-800">
                     {m.profileName}
                     {m.isCurrentUser && (
                       <Badge className="ml-1.5 px-2.5 py-1 text-[0.65rem] leading-none">You</Badge>
@@ -184,12 +184,12 @@ function ManageMembersDialog({
                     <Button
                       variant="ghost"
                       size="icon-xs"
-                      className="rounded-full text-slate-400 hover:text-red-600"
+                      className="rounded-full text-stone-400 hover:text-red-600"
                       disabled={removing === m.userId}
                       onClick={() => handleRemove(m.userId)}
                     >
                       {removing === m.userId ? (
-                        <span className="size-3.5 animate-spin rounded-full border-2 border-slate-300 border-t-slate-600" />
+                        <span className="size-3.5 animate-spin rounded-full border-2 border-stone-300 border-t-stone-600" />
                       ) : (
                         <UserMinus className="size-3.5" />
                       )}
@@ -201,8 +201,8 @@ function ManageMembersDialog({
           )}
         </div>
 
-        <div className="border-t border-slate-100 px-5 py-4">
-          <p className="mb-3 text-xs font-medium text-slate-500">Add a member</p>
+        <div className="border-t border-stone-100 px-5 py-4">
+          <p className="mb-3 text-xs font-medium text-stone-500">Add a member</p>
           {suggestions.filter((s) => !members.some((m) => m.userId === s.id)).length > 0 && (
             <div className="mb-3 flex flex-wrap gap-1.5">
               {suggestions
@@ -216,8 +216,8 @@ function ManageMembersDialog({
                   className={cn(
                     'rounded-full border px-2.5 py-1 text-xs font-medium transition-colors',
                     s.kind === 'local'
-                      ? 'border-blue-200 bg-blue-50 text-blue-800 hover:bg-blue-100'
-                      : 'border-slate-200 bg-slate-100 text-slate-700 hover:bg-slate-200',
+                      ? 'border-teal-800/25 bg-teal-800/8 text-teal-900 hover:bg-teal-800/10'
+                      : 'border-stone-200 bg-stone-100 text-stone-700 hover:bg-stone-200',
                   )}
                 >
                   {s.displayName}
@@ -248,7 +248,7 @@ function ManageMembersDialog({
               {adding ? '…' : 'Add'}
             </Button>
           </div>
-          <p className="mt-2 text-[0.65rem] text-slate-400">
+          <p className="mt-2 text-[0.65rem] text-stone-400">
             New names are saved to your phonebook (unique per name). Tap a suggestion to add someone
             you already know.
           </p>
@@ -301,10 +301,10 @@ function EditGroupDialog({
   return (
     <div className="fixed inset-0 z-50 flex items-end justify-center p-4 sm:items-center">
       {sheetBackdrop(onClose)}
-      <div className="relative w-full max-w-sm animate-[slideUp_0.25s_ease-out] rounded-3xl border border-slate-200 bg-white shadow-[0_20px_60px_rgba(15,23,42,0.18)]">
-        <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4">
+      <div className="relative w-full max-w-sm animate-[slideUp_0.25s_ease-out] rounded-3xl border border-stone-200 bg-white shadow-[0_20px_60px_rgba(28,25,23,0.18)]">
+        <div className="flex items-center justify-between border-b border-stone-100 px-5 py-4">
           <div className="flex items-center gap-2">
-            <Pencil className="size-4 text-blue-600" />
+            <Pencil className="size-4 text-teal-800" />
             <h2 className="text-base font-semibold">Edit group</h2>
           </div>
           <Button variant="ghost" size="icon-xs" className="rounded-full" onClick={onClose}>
@@ -314,7 +314,7 @@ function EditGroupDialog({
 
         <div className="space-y-4 px-5 py-4">
           <div className="flex flex-col gap-2">
-            <label htmlFor="edit-group-name" className="text-sm font-medium text-slate-800">
+            <label htmlFor="edit-group-name" className="text-sm font-medium text-stone-800">
               Group name
             </label>
             <Input
@@ -325,7 +325,7 @@ function EditGroupDialog({
             />
           </div>
           <div className="flex flex-col gap-2">
-            <label htmlFor="edit-group-currency" className="text-sm font-medium text-slate-800">
+            <label htmlFor="edit-group-currency" className="text-sm font-medium text-stone-800">
               Currency
             </label>
             <Select value={currency} onValueChange={setCurrency}>
@@ -341,10 +341,10 @@ function EditGroupDialog({
               </SelectContent>
             </Select>
           </div>
-          <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5">
-            <p className="text-xs font-medium text-slate-500">Invite code</p>
+          <div className="rounded-xl border border-stone-200 bg-stone-50 px-3 py-2.5">
+            <p className="text-xs font-medium text-stone-500">Invite code</p>
             <div className="mt-1 flex items-center justify-between gap-2">
-              <code className="text-sm font-semibold tracking-wide text-slate-800">{inviteCode}</code>
+              <code className="text-sm font-semibold tracking-wide text-stone-800">{inviteCode}</code>
               <Button
                 type="button"
                 variant="outline"
@@ -380,10 +380,10 @@ function PaymentHistoryDialog({
   return (
     <div className="fixed inset-0 z-50 flex items-end justify-center p-4 sm:items-center">
       {sheetBackdrop(onClose)}
-      <div className="relative flex max-h-[min(85dvh,560px)] w-full max-w-sm flex-col animate-[slideUp_0.25s_ease-out] rounded-3xl border border-slate-200 bg-white shadow-[0_20px_60px_rgba(15,23,42,0.18)]">
-        <div className="flex shrink-0 items-center justify-between border-b border-slate-100 px-5 py-4">
+      <div className="relative flex max-h-[min(85dvh,560px)] w-full max-w-sm flex-col animate-[slideUp_0.25s_ease-out] rounded-3xl border border-stone-200 bg-white shadow-[0_20px_60px_rgba(28,25,23,0.18)]">
+        <div className="flex shrink-0 items-center justify-between border-b border-stone-100 px-5 py-4">
           <div className="flex items-center gap-2">
-            <History className="size-4 text-blue-600" />
+            <History className="size-4 text-teal-800" />
             <h2 className="text-base font-semibold">Payment history</h2>
           </div>
           <Button variant="ghost" size="icon-xs" className="rounded-full" onClick={onClose}>
@@ -392,10 +392,10 @@ function PaymentHistoryDialog({
         </div>
         <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
           {items.length === 0 ? (
-            <p className="py-8 text-center text-sm text-slate-400">No recorded payments yet</p>
+            <p className="py-8 text-center text-sm text-stone-400">No recorded payments yet</p>
           ) : (
             <>
-              <p className="mb-3 text-xs text-slate-500">
+              <p className="mb-3 text-xs text-stone-500">
                 Payments recorded with Pay are already reflected in member balances.
               </p>
               <SettlementHistoryList
@@ -425,25 +425,25 @@ function GroupOptionsMenu({
   onClose: () => void
 }) {
   const itemClass =
-    'flex w-full items-center gap-3 rounded-xl px-4 py-3.5 text-left text-sm font-medium text-slate-800 transition-colors hover:bg-slate-100'
+    'flex w-full items-center gap-3 rounded-xl px-4 py-3.5 text-left text-sm font-medium text-stone-800 transition-colors hover:bg-stone-100'
 
   return (
     <div className="fixed inset-0 z-50 flex items-end justify-center p-4 sm:items-center">
       {sheetBackdrop(onClose)}
-      <div className="relative w-full max-w-sm animate-[slideUp_0.25s_ease-out] rounded-3xl border border-slate-200 bg-white p-2 shadow-[0_20px_60px_rgba(15,23,42,0.18)]">
-        <p className="px-3 pb-2 pt-1 text-center text-xs font-medium uppercase tracking-wide text-slate-400">
+      <div className="relative w-full max-w-sm animate-[slideUp_0.25s_ease-out] rounded-3xl border border-stone-200 bg-white p-2 shadow-[0_20px_60px_rgba(28,25,23,0.18)]">
+        <p className="px-3 pb-2 pt-1 text-center text-xs font-medium uppercase tracking-wide text-stone-400">
           Group options
         </p>
         <button type="button" className={itemClass} onClick={onPaymentHistory}>
-          <History className="size-4 text-blue-600" />
+          <History className="size-4 text-teal-800" />
           Payment history
         </button>
         <button type="button" className={itemClass} onClick={onMembers}>
-          <Users className="size-4 text-blue-600" />
+          <Users className="size-4 text-teal-800" />
           Members
         </button>
         <button type="button" className={itemClass} onClick={onEdit}>
-          <Pencil className="size-4 text-blue-600" />
+          <Pencil className="size-4 text-teal-800" />
           Edit group
         </button>
         <button
@@ -454,7 +454,7 @@ function GroupOptionsMenu({
           <Trash2 className="size-4" />
           Delete group
         </button>
-        <Button variant="ghost" className="mt-1 w-full rounded-xl text-slate-500" onClick={onClose}>
+        <Button variant="ghost" className="mt-1 w-full rounded-xl text-stone-500" onClick={onClose}>
           Cancel
         </Button>
       </div>
@@ -559,8 +559,8 @@ export function GroupDetailPage() {
             Back to groups
           </Link>
         </Button>
-        <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
-          <p className="text-center text-sm text-slate-500">Group not found</p>
+        <div className="rounded-3xl border border-stone-200 bg-white p-5 shadow-sm">
+          <p className="text-center text-sm text-stone-500">Group not found</p>
         </div>
       </div>
     )
@@ -594,19 +594,19 @@ export function GroupDetailPage() {
           </Button>
         </div>
 
-        <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
-          <h1 className="text-2xl font-semibold tracking-tight text-slate-900">{group.name}</h1>
-          <p className="mt-1 text-sm text-slate-500">
+        <div className="rounded-3xl border border-stone-200 bg-white p-5 shadow-sm">
+          <h1 className="text-2xl font-semibold tracking-tight text-stone-900">{group.name}</h1>
+          <p className="mt-1 text-sm text-stone-500">
             {group.currency} · {members?.length ?? 0} member{(members?.length ?? 0) !== 1 ? 's' : ''}
           </p>
         </div>
 
-        <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
+        <div className="rounded-3xl border border-stone-200 bg-white p-5 shadow-sm">
           <div className="flex items-center gap-2">
-            <Users className="size-4 text-blue-600" />
+            <Users className="size-4 text-teal-800" />
             <h2 className="text-lg font-semibold">Members</h2>
           </div>
-          <p className="mt-1 text-xs text-slate-500">
+          <p className="mt-1 text-xs text-stone-500">
             Net amount in this group: positive = credit, negative = owes, 0 = even.
           </p>
 
@@ -617,21 +617,21 @@ export function GroupDetailPage() {
               const amount = Math.abs(rounded) <= 0.01 ? 0 : rounded
               const amountClass =
                 amount === 0
-                  ? 'text-slate-500'
+                  ? 'text-stone-500'
                   : amount > 0
                     ? 'text-emerald-600'
                     : 'text-amber-600'
               return (
                 <li
                   key={m.id}
-                  className="flex items-center justify-between gap-3 rounded-xl border border-slate-200 bg-slate-100/60 px-4 py-3"
+                  className="flex items-center justify-between gap-3 rounded-xl border border-stone-200 bg-stone-100/60 px-4 py-3"
                 >
                   <div className="flex min-w-0 items-center gap-2.5">
-                    <div className="flex size-9 shrink-0 items-center justify-center rounded-full bg-blue-600/15 text-sm font-semibold text-blue-600">
+                    <div className="flex size-9 shrink-0 items-center justify-center rounded-full bg-teal-800/15 text-sm font-semibold text-teal-800">
                       {m.profileName.charAt(0).toUpperCase()}
                     </div>
                     <div className="min-w-0">
-                      <p className="truncate text-sm font-medium text-slate-800">
+                      <p className="truncate text-sm font-medium text-stone-800">
                         {m.profileName}
                         {m.isCurrentUser && (
                           <Badge className="ml-1.5 px-2 py-0.5 text-[0.65rem] leading-none">You</Badge>
@@ -648,21 +648,21 @@ export function GroupDetailPage() {
           </ul>
 
           {balanceSummary && balanceSummary.suggestions.length > 0 && (
-            <div className="mt-5 border-t border-slate-100 pt-5">
-              <p className="text-xs font-medium text-slate-500">Suggested payments</p>
+            <div className="mt-5 border-t border-stone-100 pt-5">
+              <p className="text-xs font-medium text-stone-500">Suggested payments</p>
               <div className="mt-2 space-y-2">
                 {balanceSummary.suggestions.map((s) => {
                   const key = `${s.fromUserId}-${s.toUserId}`
                   return (
                     <div
                       key={key}
-                      className="flex flex-col gap-2 rounded-xl border border-slate-200 bg-white px-4 py-3 sm:flex-row sm:items-center sm:justify-between"
+                      className="flex flex-col gap-2 rounded-xl border border-stone-200 bg-white px-4 py-3 sm:flex-row sm:items-center sm:justify-between"
                     >
                       <div className="flex flex-wrap items-center gap-2 text-sm">
-                        <span className="font-medium text-slate-800">{s.fromName}</span>
-                        <ArrowRight className="size-3.5 text-slate-400" />
-                        <span className="font-medium text-slate-800">{s.toName}</span>
-                        <span className="font-semibold text-blue-600">
+                        <span className="font-medium text-stone-800">{s.fromName}</span>
+                        <ArrowRight className="size-3.5 text-stone-400" />
+                        <span className="font-medium text-stone-800">{s.toName}</span>
+                        <span className="font-semibold text-teal-800">
                           {formatCurrency(s.amount, balanceSummary.currency)}
                         </span>
                       </div>
@@ -692,10 +692,10 @@ export function GroupDetailPage() {
           )}
         </div>
 
-        <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
+        <div className="rounded-3xl border border-stone-200 bg-white p-5 shadow-sm">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
-              <ReceiptText className="size-4 text-blue-600" />
+              <ReceiptText className="size-4 text-teal-800" />
               <h2 className="text-lg font-semibold">Group bills</h2>
             </div>
             <Button
@@ -713,7 +713,7 @@ export function GroupDetailPage() {
 
           {(!bills || bills.length === 0) ? (
             <div className="mt-4 flex flex-col items-center py-8 text-center">
-              <p className="text-sm text-slate-400">No bills in this group yet</p>
+              <p className="text-sm text-stone-400">No bills in this group yet</p>
             </div>
           ) : (
             <div className="mt-4 space-y-2">
@@ -722,15 +722,15 @@ export function GroupDetailPage() {
                   key={bill.id}
                   type="button"
                   onClick={() => setDetailBillId(bill.id)}
-                  className="flex w-full items-center justify-between rounded-xl border border-slate-200 bg-slate-100/60 px-4 py-3 text-left transition-colors hover:bg-slate-100/80"
+                  className="flex w-full items-center justify-between rounded-xl border border-stone-200 bg-stone-100/60 px-4 py-3 text-left transition-colors hover:bg-stone-100/80"
                 >
                   <div>
-                    <p className="text-sm font-medium text-slate-800">{bill.title}</p>
-                    <p className="text-xs text-slate-400">
+                    <p className="text-sm font-medium text-stone-800">{bill.title}</p>
+                    <p className="text-xs text-stone-400">
                       by {bill.creatorName} · {new Date(bill.created_at).toLocaleDateString()}
                     </p>
                   </div>
-                  <span className="text-sm font-semibold text-slate-800">
+                  <span className="text-sm font-semibold text-stone-800">
                     {formatCurrency(bill.total_amount, bill.currency)}
                   </span>
                 </button>

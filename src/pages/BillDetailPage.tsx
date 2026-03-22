@@ -32,7 +32,7 @@ export function BillDetailPage() {
   if (loading) {
     return (
       <div className="flex items-center justify-center py-20">
-        <Loader2 className="size-5 animate-spin text-blue-600" />
+        <Loader2 className="size-5 animate-spin text-teal-800" />
       </div>
     )
   }
@@ -46,8 +46,8 @@ export function BillDetailPage() {
             Back to bills
           </Link>
         </Button>
-        <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
-          <p className="text-center text-sm text-slate-500">Bill not found</p>
+        <div className="rounded-3xl border border-stone-200 bg-white p-5 shadow-sm">
+          <p className="text-center text-sm text-stone-500">Bill not found</p>
         </div>
       </div>
     )
@@ -81,32 +81,32 @@ export function BillDetailPage() {
         </div>
       </div>
 
-      <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
+      <div className="rounded-3xl border border-stone-200 bg-white p-5 shadow-sm">
         <div className="flex items-start justify-between">
           <div>
             <h1 className="text-2xl font-semibold tracking-tight">{bill.title}</h1>
-            <p className="mt-1 text-sm text-slate-500">
+            <p className="mt-1 text-sm text-stone-500">
               Created by {bill.creatorName} · {new Date(bill.created_at).toLocaleDateString()}
             </p>
           </div>
           <div className="text-right">
-            <p className="text-2xl font-semibold text-blue-600">
+            <p className="text-2xl font-semibold text-teal-800">
               {formatCurrency(bill.total_amount, bill.currency)}
             </p>
-            <p className="text-xs text-slate-400">{bill.currency}</p>
+            <p className="text-xs text-stone-400">{bill.currency}</p>
           </div>
         </div>
 
         {bill.note && (
-          <div className="mt-4 rounded-2xl bg-slate-100/80 px-4 py-3">
-            <p className="text-sm text-slate-600">{bill.note}</p>
+          <div className="mt-4 rounded-2xl bg-stone-100/80 px-4 py-3">
+            <p className="text-sm text-stone-600">{bill.note}</p>
           </div>
         )}
       </div>
 
-      <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
+      <div className="rounded-3xl border border-stone-200 bg-white p-5 shadow-sm">
         <div className="flex items-center gap-2">
-          <ReceiptText className="size-4 text-blue-600" />
+          <ReceiptText className="size-4 text-teal-800" />
           <h2 className="text-lg font-semibold">
             Items ({bill.items.length})
           </h2>
@@ -116,18 +116,18 @@ export function BillDetailPage() {
           {bill.items.map((item) => (
             <div
               key={item.id}
-              className="rounded-2xl border border-slate-200 bg-slate-100/60 p-4"
+              className="rounded-2xl border border-stone-200 bg-stone-100/60 p-4"
             >
               <div className="flex items-center justify-between">
-                <p className="font-medium text-slate-800">{item.name}</p>
-                <p className="font-semibold text-slate-800">
+                <p className="font-medium text-stone-800">{item.name}</p>
+                <p className="font-semibold text-stone-800">
                   {formatCurrency(item.amount, bill.currency)}
                 </p>
               </div>
 
               {item.splits.length > 0 && (
-                <div className="mt-3 border-t border-slate-200 pt-3">
-                  <div className="flex items-center gap-1.5 text-xs font-medium text-slate-400">
+                <div className="mt-3 border-t border-stone-200 pt-3">
+                  <div className="flex items-center gap-1.5 text-xs font-medium text-stone-400">
                     <Users className="size-3.5" />
                     Split ({item.splits[0].split_type})
                   </div>
@@ -137,8 +137,8 @@ export function BillDetailPage() {
                         key={split.id}
                         className="flex items-center justify-between text-sm"
                       >
-                        <span className="text-slate-600">{split.displayName}</span>
-                        <span className="font-medium text-slate-800">
+                        <span className="text-stone-600">{split.displayName}</span>
+                        <span className="font-medium text-stone-800">
                           {formatCurrency(split.computed_amount, bill.currency)}
                         </span>
                       </div>

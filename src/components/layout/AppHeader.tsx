@@ -29,11 +29,11 @@ export function AppHeader() {
   const syncStatus = useAppStore((s) => s.syncStatus)
 
   return (
-    <header className="sticky top-0 z-30 border-b border-slate-200/80 bg-white/92 backdrop-blur">
+    <header className="sticky top-0 z-30 border-b border-stone-200/80 bg-white/92 backdrop-blur">
       <div className="mx-auto flex max-w-7xl items-center justify-between px-4 py-3 sm:px-6 lg:px-8">
         <div className="flex items-center gap-6">
           <Link to="/app" className="flex items-center gap-2.5">
-            <div className="rounded-xl bg-blue-600/15 p-2 text-blue-600">
+            <div className="rounded-xl bg-teal-800/12 p-2 text-teal-800">
               <Wallet className="size-4" />
             </div>
             <span className="text-sm font-semibold tracking-tight">Kwenta</span>
@@ -49,8 +49,8 @@ export function AppHeader() {
                   cn(
                     'flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm font-medium transition-colors',
                     isActive
-                      ? 'bg-blue-600/10 text-blue-600'
-                      : 'text-slate-500 hover:bg-slate-100/60 hover:text-slate-800',
+                      ? 'bg-teal-800/10 text-teal-800'
+                      : 'text-stone-500 hover:bg-stone-100/80 hover:text-stone-900',
                   )
                 }
               >

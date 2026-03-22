@@ -461,11 +461,11 @@ export function AddBillDialog({
     <div className="fixed inset-0 z-50 flex items-end justify-center sm:items-center">
       <div className="fixed inset-0 bg-black/30 backdrop-blur-sm" onClick={onClose} />
 
-      <div className="relative flex w-full max-w-lg animate-[slideUp_0.25s_ease-out] flex-col rounded-t-3xl border border-slate-200 bg-white shadow-[0_-20px_60px_rgba(15,23,42,0.15)] sm:max-h-[90vh] sm:rounded-3xl">
-        <div className="flex shrink-0 items-center justify-between border-b border-slate-100 px-5 py-4">
+      <div className="relative flex w-full max-w-lg animate-[slideUp_0.25s_ease-out] flex-col rounded-t-3xl border border-stone-200 bg-white shadow-[0_-20px_60px_rgba(28,25,23,0.15)] sm:max-h-[90vh] sm:rounded-3xl">
+        <div className="flex shrink-0 items-center justify-between border-b border-stone-100 px-5 py-4">
           <div>
             <h2 className="text-base font-semibold">{isEdit ? 'Edit bill' : 'Add bill'}</h2>
-            <p className="text-xs text-slate-400">{groupCurrency}</p>
+            <p className="text-xs text-stone-400">{groupCurrency}</p>
           </div>
           <Button variant="ghost" size="icon-xs" className="rounded-full" onClick={onClose}>
             <X className="size-4" />
@@ -474,14 +474,14 @@ export function AddBillDialog({
 
         <div className="flex-1 space-y-3 overflow-y-auto px-5 py-4">
           {loadingEdit && (
-            <p className="py-6 text-center text-sm text-slate-500">Loading bill…</p>
+            <p className="py-6 text-center text-sm text-stone-500">Loading bill…</p>
           )}
 
           {!loadingEdit && (
             <>
               <div
                 className={cn(
-                  'rounded-2xl border border-slate-200 bg-slate-50 p-1',
+                  'rounded-2xl border border-stone-200 bg-stone-50 p-1',
                   isEdit && 'pointer-events-none opacity-60',
                 )}
               >
@@ -498,8 +498,8 @@ export function AddBillDialog({
                       className={cn(
                         'flex items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-sm font-medium transition-colors',
                         mode === id
-                          ? 'bg-slate-800 text-white shadow-sm'
-                          : 'text-slate-500 hover:bg-slate-100 hover:text-slate-800',
+                          ? 'bg-stone-800 text-white shadow-sm'
+                          : 'text-stone-500 hover:bg-stone-100 hover:text-stone-800',
                       )}
                     >
                       <Icon className="size-4" />
@@ -531,7 +531,7 @@ export function AddBillDialog({
               </div>
 
               {mode === 'simple' && (
-                <div className="space-y-3 rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                <div className="space-y-3 rounded-2xl border border-stone-200 bg-stone-50 p-4">
                   <div className="flex flex-col gap-2">
                     <label className="text-sm font-medium">Total amount</label>
                     <Input
@@ -581,7 +581,7 @@ export function AddBillDialog({
                       </div>
 
                       <div className="flex flex-col gap-2">
-                        <div className="flex items-center gap-1.5 text-sm font-medium text-slate-600">
+                        <div className="flex items-center gap-1.5 text-sm font-medium text-stone-600">
                           <UserPlus className="size-3.5" />
                           Split with
                         </div>
@@ -596,8 +596,8 @@ export function AddBillDialog({
                                 className={cn(
                                   'inline-flex cursor-pointer items-center gap-1.5 rounded-full border px-3 py-2 text-sm font-medium transition-colors',
                                   selected
-                                    ? 'border-transparent bg-blue-600 text-white'
-                                    : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-100',
+                                    ? 'border-transparent bg-teal-800 text-white'
+                                    : 'border-stone-200 bg-white text-stone-600 hover:bg-stone-100',
                                 )}
                               >
                                 <Users className="size-3.5" />
@@ -619,10 +619,10 @@ export function AddBillDialog({
                         />
 
                         {simpleSelectedUserIds.length > 0 && simpleAmountNum > 0 && (
-                          <div className="rounded-xl border border-blue-600/20 bg-blue-600/5 px-4 py-2.5">
+                          <div className="rounded-xl border border-teal-800/20 bg-teal-800/5 px-4 py-2.5">
                             {simpleSplitType === 'equal' ? (
-                              <p className="text-sm text-slate-700">
-                                <span className="font-semibold text-blue-600">
+                              <p className="text-sm text-stone-700">
+                                <span className="font-semibold text-teal-800">
                                   {formatCurrency(
                                     simpleAmountNum / simpleSelectedUserIds.length,
                                     groupCurrency,
@@ -632,7 +632,7 @@ export function AddBillDialog({
                                 {simpleSelectedUserIds.length === 1 ? 'person' : 'people'}
                               </p>
                             ) : (
-                              <p className="text-sm text-slate-500">
+                              <p className="text-sm text-stone-500">
                                 {formatCurrency(simpleAmountNum, groupCurrency)} among{' '}
                                 {simpleSelectedUserIds.length}{' '}
                                 {simpleSelectedUserIds.length === 1 ? 'person' : 'people'}
@@ -649,7 +649,7 @@ export function AddBillDialog({
               {mode === 'itemized' && (
                 <div className="space-y-3">
                   <div className="flex items-center justify-between">
-                    <p className="text-sm font-medium text-slate-600">Items</p>
+                    <p className="text-sm font-medium text-stone-600">Items</p>
                     <Button
                       variant="ghost"
                       size="sm"
@@ -663,9 +663,9 @@ export function AddBillDialog({
                   </div>
 
                   {items.map((item, index) => (
-                    <div key={item.key} className="rounded-2xl border border-slate-200 bg-slate-50 p-3">
+                    <div key={item.key} className="rounded-2xl border border-stone-200 bg-stone-50 p-3">
                       <div className="flex items-start gap-2">
-                        <span className="mt-2.5 flex size-5 shrink-0 items-center justify-center rounded-full bg-blue-600 text-[0.6rem] font-semibold text-white">
+                        <span className="mt-2.5 flex size-5 shrink-0 items-center justify-center rounded-full bg-teal-800 text-[0.6rem] font-semibold text-white">
                           {index + 1}
                         </span>
                         <div className="flex flex-1 flex-col gap-2 sm:flex-row">
@@ -734,9 +734,9 @@ export function AddBillDialog({
                       </div>
 
                       {groupMembers.length > 0 && (
-                        <div className="mt-3 border-t border-slate-200 pt-3">
+                        <div className="mt-3 border-t border-stone-200 pt-3">
                           <div className="flex items-center justify-between">
-                            <div className="flex items-center gap-1.5 text-xs font-medium text-slate-500">
+                            <div className="flex items-center gap-1.5 text-xs font-medium text-stone-500">
                               <UserPlus className="size-3.5" />
                               Split with
                             </div>
@@ -766,8 +766,8 @@ export function AddBillDialog({
                                   className={cn(
                                     'inline-flex cursor-pointer items-center gap-1 rounded-full border px-2.5 py-1.5 text-xs font-medium transition-colors',
                                     selected
-                                      ? 'border-transparent bg-blue-600 text-white'
-                                      : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-100',
+                                      ? 'border-transparent bg-teal-800 text-white'
+                                      : 'border-stone-200 bg-white text-stone-600 hover:bg-stone-100',
                                   )}
                                 >
                                   <Users className="size-3" />
@@ -791,7 +791,7 @@ export function AddBillDialog({
                           {item.selectedUserIds.length > 0 &&
                             item.splitType === 'equal' &&
                             parseFloat(item.amount) > 0 && (
-                              <p className="mt-1.5 text-xs text-slate-400">
+                              <p className="mt-1.5 text-xs text-stone-400">
                                 {formatCurrency(
                                   parseFloat(item.amount) / item.selectedUserIds.length,
                                   groupCurrency,
@@ -805,9 +805,9 @@ export function AddBillDialog({
                   ))}
 
                   {itemizedTotal > 0 && (
-                    <div className="flex items-center justify-between rounded-2xl border border-slate-200 bg-white px-4 py-3">
-                      <span className="text-sm font-medium text-slate-600">Running total</span>
-                      <span className="text-lg font-semibold text-slate-800">
+                    <div className="flex items-center justify-between rounded-2xl border border-stone-200 bg-white px-4 py-3">
+                      <span className="text-sm font-medium text-stone-600">Running total</span>
+                      <span className="text-lg font-semibold text-stone-800">
                         {formatCurrency(itemizedTotal, groupCurrency)}
                       </span>
                     </div>
@@ -818,7 +818,7 @@ export function AddBillDialog({
           )}
         </div>
 
-        <div className="shrink-0 border-t border-slate-100 px-5 py-4">
+        <div className="shrink-0 border-t border-stone-100 px-5 py-4">
           <Button
             className="w-full rounded-xl"
             disabled={!canSave || saving || loadingEdit}

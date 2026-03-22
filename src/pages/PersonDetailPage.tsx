@@ -3,7 +3,6 @@ import { Link, useNavigate, useParams } from 'react-router-dom'
 import {
   ArrowLeft,
   Banknote,
-  Check,
   ChevronRight,
   Link2,
   Loader2,
@@ -22,7 +21,6 @@ import {
 } from '@/lib/people'
 import { deletePerson, linkProfileToRemote } from '@/db/operations'
 import { ConfirmDialog } from '@/components/common/ConfirmDialog'
-import { useAuth } from '@/hooks/useAuth'
 import { useCurrentUser } from '@/hooks/useCurrentUser'
 import { cn, formatCurrency } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
@@ -60,13 +58,13 @@ function PersonOptionsMenu({
   onClose: () => void
 }) {
   const itemClass =
-    'flex w-full items-center gap-3 rounded-xl px-4 py-3.5 text-left text-sm font-medium text-slate-800 transition-colors hover:bg-slate-100'
+    'flex w-full items-center gap-3 rounded-xl px-4 py-3.5 text-left text-sm font-medium text-stone-800 transition-colors hover:bg-stone-100'
 
   return (
     <div className="fixed inset-0 z-50 flex items-end justify-center p-4 sm:items-center">
       {sheetBackdrop(onClose)}
-      <div className="relative w-full max-w-sm animate-[slideUp_0.25s_ease-out] rounded-3xl border border-slate-200 bg-white p-2 shadow-[0_20px_60px_rgba(15,23,42,0.18)]">
-        <p className="px-3 pb-2 pt-1 text-center text-xs font-medium uppercase tracking-wide text-slate-400">
+      <div className="relative w-full max-w-sm animate-[slideUp_0.25s_ease-out] rounded-3xl border border-stone-200 bg-white p-2 shadow-[0_20px_60px_rgba(28,25,23,0.18)]">
+        <p className="px-3 pb-2 pt-1 text-center text-xs font-medium uppercase tracking-wide text-stone-400">
           Options
         </p>
         <button
@@ -77,7 +75,7 @@ function PersonOptionsMenu({
           <Trash2 className="size-4" />
           Remove contact
         </button>
-        <Button variant="ghost" className="mt-1 w-full rounded-xl text-slate-500" onClick={onClose}>
+        <Button variant="ghost" className="mt-1 w-full rounded-xl text-stone-500" onClick={onClose}>
           Cancel
         </Button>
       </div>
@@ -112,16 +110,16 @@ function LinkAccountSheet({
         aria-modal="true"
         aria-labelledby="link-account-title"
         id="link-account-dialog"
-        className="relative z-1 flex max-h-[min(90vh,560px)] w-full max-w-sm animate-[slideUp_0.25s_ease-out] flex-col overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-[0_20px_60px_rgba(15,23,42,0.18)]"
+        className="relative z-1 flex max-h-[min(90vh,560px)] w-full max-w-sm animate-[slideUp_0.25s_ease-out] flex-col overflow-hidden rounded-3xl border border-stone-200 bg-white shadow-[0_20px_60px_rgba(28,25,23,0.18)]"
       >
         <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-4">
           <div className="flex items-start gap-2">
-            <Link2 className="mt-0.5 size-4 shrink-0 text-blue-600" />
+            <Link2 className="mt-0.5 size-4 shrink-0 text-teal-800" />
             <div className="min-w-0 space-y-1">
-              <p id="link-account-title" className="text-sm font-medium text-slate-800">
+              <p id="link-account-title" className="text-sm font-medium text-stone-800">
                 Link to their account
               </p>
-              <p className="text-xs text-slate-500">
+              <p className="text-xs text-stone-500">
                 Pick someone you’re in a group with, or paste their <strong>Kwenta profile ID</strong>{' '}
                 (UUID from Settings if they share it). Their profile must exist on this device and have an
                 email (signed-in account).
@@ -142,12 +140,12 @@ function LinkAccountSheet({
               </SelectContent>
             </Select>
           ) : (
-            <p className="text-xs text-slate-500">
+            <p className="text-xs text-stone-500">
               No signed-in people in your groups yet — use profile ID below, or share a group first.
             </p>
           )}
-          <div className="border-t border-slate-200 pt-3">
-            <p className="text-xs font-medium text-slate-600">Or paste profile ID</p>
+          <div className="border-t border-stone-200 pt-3">
+            <p className="text-xs font-medium text-stone-600">Or paste profile ID</p>
             <div className="mt-2 flex flex-col gap-2 sm:flex-row">
               <Input
                 placeholder="e.g. 8b3e2f1a-…"
@@ -170,64 +168,9 @@ function LinkAccountSheet({
             {linkByIdError && <p className="mt-2 text-xs text-red-600">{linkByIdError}</p>}
           </div>
         </div>
-        <div className="shrink-0 border-t border-slate-200 p-2">
-          <Button variant="ghost" className="w-full rounded-xl text-slate-500" type="button" onClick={onClose}>
+        <div className="shrink-0 border-t border-stone-200 p-2">
+          <Button variant="ghost" className="w-full rounded-xl text-stone-500" type="button" onClick={onClose}>
             Cancel
-          </Button>
-        </div>
-      </div>
-    </div>
-  )
-}
-
-function LinkAccountSignInSheet({ onClose }: { onClose: () => void }) {
-  return (
-    <div className="fixed inset-0 z-50 flex items-end justify-center p-4 sm:items-center">
-      {sheetBackdrop(onClose)}
-      <div
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="link-signin-title"
-        id="link-account-signin-dialog"
-        className="relative z-1 flex max-h-[min(90vh,520px)] w-full max-w-sm animate-[slideUp_0.25s_ease-out] flex-col overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-[0_20px_60px_rgba(15,23,42,0.18)]"
-      >
-        <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-4">
-          <div className="flex items-start gap-2">
-            <Link2 className="mt-0.5 size-4 shrink-0 text-blue-600" />
-            <div className="min-w-0 space-y-1">
-              <p id="link-signin-title" className="text-sm font-medium text-slate-800">
-                Sign in to link this contact
-              </p>
-              <p className="text-xs text-slate-500">
-                Linking matches this local contact to someone’s Kwenta account (so balances and groups stay
-                consistent). You need a signed-in account to use it.
-              </p>
-            </div>
-          </div>
-          <div>
-            <p className="text-xs font-medium text-slate-600">With an account you can</p>
-            <ul className="mt-2 space-y-2 text-xs text-slate-600">
-              <li className="flex gap-2">
-                <Check className="mt-0.5 size-3.5 shrink-0 text-emerald-600" aria-hidden />
-                <span>Sync data across devices and back it up online</span>
-              </li>
-              <li className="flex gap-2">
-                <Check className="mt-0.5 size-3.5 shrink-0 text-emerald-600" aria-hidden />
-                <span>Pick people from your groups or paste their profile ID from Settings</span>
-              </li>
-              <li className="flex gap-2">
-                <Check className="mt-0.5 size-3.5 shrink-0 text-emerald-600" aria-hidden />
-                <span>Share your own profile ID so others can link to you</span>
-              </li>
-            </ul>
-          </div>
-        </div>
-        <div className="shrink-0 space-y-2 border-t border-slate-200 p-3">
-          <Button asChild className="w-full rounded-xl">
-            <Link to="/login">Create account or sign in</Link>
-          </Button>
-          <Button variant="ghost" className="w-full rounded-xl text-slate-500" type="button" onClick={onClose}>
-            Not now
           </Button>
         </div>
       </div>
@@ -238,7 +181,6 @@ function LinkAccountSignInSheet({ onClose }: { onClose: () => void }) {
 export function PersonDetailPage() {
   const { personId } = useParams<{ personId: string }>()
   const navigate = useNavigate()
-  const { isAuthenticated } = useAuth()
   const { userId, profile: meProfile } = useCurrentUser()
   const [editing, setEditing] = useState<SettlementHistoryItem | null>(null)
   const [record, setRecord] = useState<{
@@ -321,7 +263,7 @@ export function PersonDetailPage() {
   if (!userId || !personId) {
     return (
       <div className="flex justify-center py-20">
-        <Loader2 className="size-5 animate-spin text-blue-600" />
+        <Loader2 className="size-5 animate-spin text-teal-800" />
       </div>
     )
   }
@@ -333,7 +275,7 @@ export function PersonDetailPage() {
   if (profile === undefined) {
     return (
       <div className="flex justify-center py-20">
-        <Loader2 className="size-5 animate-spin text-blue-600" />
+        <Loader2 className="size-5 animate-spin text-teal-800" />
       </div>
     )
   }
@@ -347,7 +289,7 @@ export function PersonDetailPage() {
             People
           </Link>
         </Button>
-        <p className="text-center text-sm text-slate-500">Person not found</p>
+        <p className="text-center text-sm text-stone-500">Person not found</p>
       </div>
     )
   }
@@ -434,25 +376,23 @@ export function PersonDetailPage() {
         </Button>
       </div>
 
-      <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
+      <div className="rounded-3xl border border-stone-200 bg-white p-5 shadow-sm">
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0 flex-1">
             <h1 className="text-2xl font-semibold tracking-tight">
               {display?.displayName ?? profile.display_name}
             </h1>
-            {display?.subtitle && <p className="mt-1 text-sm text-slate-500">{display.subtitle}</p>}
+            {display?.subtitle && <p className="mt-1 text-sm text-stone-500">{display.subtitle}</p>}
           </div>
           {canLink && (
             <Button
               type="button"
               variant="outline"
               size="sm"
-              className="shrink-0 rounded-full border-slate-300 text-xs font-medium text-slate-600 hover:bg-slate-50"
+              className="shrink-0 rounded-full border-stone-300 text-xs font-medium text-stone-600 hover:bg-stone-50"
               aria-haspopup="dialog"
               aria-expanded={linkAccountOpen}
-              aria-controls={
-                isAuthenticated ? 'link-account-dialog' : 'link-account-signin-dialog'
-              }
+              aria-controls="link-account-dialog"
               onClick={() => setLinkAccountOpen(true)}
             >
               Unlinked
@@ -463,7 +403,7 @@ export function PersonDetailPage() {
           <p
             className={cn(
               'mt-3 text-lg font-semibold',
-              summary.tone === 'balanced' && 'text-slate-500',
+              summary.tone === 'balanced' && 'text-stone-500',
               summary.tone === 'collect' && 'text-emerald-600',
               summary.tone === 'pay' && 'text-amber-600',
             )}
@@ -471,7 +411,7 @@ export function PersonDetailPage() {
             {summary.lines.length > 0 ? summary.lines.join(' · ') : summary.primaryLabel}
           </p>
         )}
-        <p className="mt-2 text-xs text-slate-500">
+        <p className="mt-2 text-xs text-stone-500">
           Totals include bills where one of you paid or the other paid (not when a third person paid for
           both). All recorded payments with this person are included.
         </p>
@@ -501,24 +441,24 @@ export function PersonDetailPage() {
         </div>
       </div>
 
-      <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
+      <div className="rounded-3xl border border-stone-200 bg-white p-5 shadow-sm">
         <div className="flex items-center gap-2">
-          <ReceiptText className="size-4 text-blue-600" />
+          <ReceiptText className="size-4 text-teal-800" />
           <h2 className="text-lg font-semibold">Shared bills</h2>
         </div>
         {(!bills || bills.length === 0) ? (
-          <p className="mt-3 text-sm text-slate-500">No bills yet with this person on a split.</p>
+          <p className="mt-3 text-sm text-stone-500">No bills yet with this person on a split.</p>
         ) : (
           <ul className="mt-3 space-y-2">
             {bills.map((bill) => (
               <li key={bill.id}>
                 <Link
                   to={bill.group_id ? `/app/groups/${bill.group_id}` : `/app/bills/${bill.id}`}
-                  className="flex items-center justify-between rounded-xl border border-slate-200 bg-slate-100/60 px-4 py-3 transition-colors hover:bg-slate-100"
+                  className="flex items-center justify-between rounded-xl border border-stone-200 bg-stone-100/60 px-4 py-3 transition-colors hover:bg-stone-100"
                 >
                   <div className="min-w-0">
-                    <p className="font-medium text-slate-800">{bill.title}</p>
-                    <p className="text-xs text-slate-500">
+                    <p className="font-medium text-stone-800">{bill.title}</p>
+                    <p className="text-xs text-stone-500">
                       {bill.groupName ? (
                         <span>{bill.groupName} · </span>
                       ) : (
@@ -528,10 +468,10 @@ export function PersonDetailPage() {
                     </p>
                   </div>
                   <div className="flex items-center gap-2">
-                    <span className="text-sm font-semibold text-slate-800">
+                    <span className="text-sm font-semibold text-stone-800">
                       {formatCurrency(bill.total_amount, bill.currency)}
                     </span>
-                    <ChevronRight className="size-4 text-slate-400" />
+                    <ChevronRight className="size-4 text-stone-400" />
                   </div>
                 </Link>
               </li>
@@ -540,13 +480,13 @@ export function PersonDetailPage() {
         )}
       </div>
 
-      <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
+      <div className="rounded-3xl border border-stone-200 bg-white p-5 shadow-sm">
         <div className="flex items-center gap-2">
-          <Banknote className="size-4 text-blue-600" />
+          <Banknote className="size-4 text-teal-800" />
           <h2 className="text-lg font-semibold">Payments between you</h2>
         </div>
         {(!settlements || settlements.length === 0) ? (
-          <p className="mt-3 text-sm text-slate-500">No recorded payments yet.</p>
+          <p className="mt-3 text-sm text-stone-500">No recorded payments yet.</p>
         ) : (
           <div className="mt-3">
             <SettlementHistoryList
@@ -603,7 +543,7 @@ export function PersonDetailPage() {
         />
       )}
 
-      {linkAccountOpen && canLink && isAuthenticated && (
+      {linkAccountOpen && canLink && (
         <LinkAccountSheet
           onClose={() => {
             setLinkAccountOpen(false)
@@ -619,14 +559,6 @@ export function PersonDetailPage() {
           linkByIdError={linkByIdError}
           linkByIdPending={linkByIdPending}
           onLinkByProfileId={() => void handleLinkByProfileId()}
-        />
-      )}
-
-      {linkAccountOpen && canLink && !isAuthenticated && (
-        <LinkAccountSignInSheet
-          onClose={() => {
-            setLinkAccountOpen(false)
-          }}
         />
       )}
 

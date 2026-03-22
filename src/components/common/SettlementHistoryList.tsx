@@ -32,7 +32,7 @@ export function SettlementHistoryList({
         return (
           <li
             key={h.id}
-            className="flex flex-col gap-0.5 rounded-xl border border-slate-200 bg-slate-100/60 px-4 py-3 sm:flex-row sm:items-center sm:justify-between"
+            className="flex flex-col gap-0.5 rounded-xl border border-stone-200 bg-stone-100/60 px-4 py-3 sm:flex-row sm:items-center sm:justify-between"
           >
             <div className="flex items-start gap-2.5">
               <div className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-full bg-emerald-500/15 text-emerald-700">
@@ -40,15 +40,15 @@ export function SettlementHistoryList({
               </div>
               <div>
                 {showGroupName && h.groupName && (
-                  <p className="text-[0.65rem] font-medium uppercase tracking-wide text-slate-400">
+                  <p className="text-[0.65rem] font-medium uppercase tracking-wide text-stone-400">
                     {h.groupName}
                   </p>
                 )}
-                <p className="text-sm font-medium text-slate-800">{primary}</p>
+                <p className="text-sm font-medium text-stone-800">{primary}</p>
                 {h.label.trim() !== '' && (
-                  <p className="mt-0.5 text-xs font-medium text-slate-600">{h.label}</p>
+                  <p className="mt-0.5 text-xs font-medium text-stone-600">{h.label}</p>
                 )}
-                <p className="text-xs text-slate-400">
+                <p className="text-xs text-stone-400">
                   {new Date(h.createdAt).toLocaleString(undefined, {
                     dateStyle: 'medium',
                     timeStyle: 'short',
@@ -65,7 +65,7 @@ export function SettlementHistoryList({
                   type="button"
                   variant="ghost"
                   size="icon-xs"
-                  className="rounded-full text-slate-500 hover:text-blue-600"
+                  className="rounded-full text-stone-500 hover:text-teal-800"
                   aria-label="Edit payment"
                   onClick={() => onEdit(h)}
                 >

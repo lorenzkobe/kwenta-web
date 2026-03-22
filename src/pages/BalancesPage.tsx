@@ -48,7 +48,7 @@ export function BalancesPage() {
   if (loading) {
     return (
       <div className="flex items-center justify-center py-20">
-        <Loader2 className="size-5 animate-spin text-blue-600" />
+        <Loader2 className="size-5 animate-spin text-teal-800" />
       </div>
     )
   }
@@ -57,7 +57,7 @@ export function BalancesPage() {
     <div className="space-y-5">
       <div>
         <h1 className="text-2xl font-semibold tracking-tight">Balances</h1>
-        <p className="mt-1 text-sm text-slate-600">
+        <p className="mt-1 text-sm text-stone-600">
           See who should collect and who should pay
         </p>
       </div>
@@ -78,13 +78,13 @@ export function BalancesPage() {
       </div>
 
       {summaries.length === 0 ? (
-        <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
+        <div className="rounded-3xl border border-stone-200 bg-white p-5 shadow-sm">
           <div className="flex flex-col items-center py-12 text-center">
-            <div className="rounded-2xl bg-slate-100 p-4">
-              <Scale className="size-6 text-slate-400" />
+            <div className="rounded-2xl bg-stone-100 p-4">
+              <Scale className="size-6 text-stone-400" />
             </div>
-            <p className="mt-3 text-sm font-medium text-slate-500">No balances yet</p>
-            <p className="mt-1 text-xs text-slate-400">
+            <p className="mt-3 text-sm font-medium text-stone-500">No balances yet</p>
+            <p className="mt-1 text-xs text-stone-400">
               Join a group and add bills to see balances
             </p>
             <Button asChild size="sm" className="mt-4 rounded-full">
@@ -102,25 +102,25 @@ export function BalancesPage() {
           return (
           <div
             key={summary.groupId}
-            className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm"
+            className="rounded-3xl border border-stone-200 bg-white p-5 shadow-sm"
           >
             <div className="flex items-center justify-between">
               <div>
                 <Link
                   to={`/app/groups/${summary.groupId}`}
-                  className="text-lg font-semibold text-slate-800 hover:text-blue-600"
+                  className="text-lg font-semibold text-stone-800 hover:text-teal-800"
                 >
                   {summary.groupName}
                 </Link>
-                <p className="text-xs text-slate-400">{summary.currency}</p>
+                <p className="text-xs text-stone-400">{summary.currency}</p>
               </div>
               <div className="flex items-center gap-2">
-                <Users className="size-4 text-blue-600" />
+                <Users className="size-4 text-teal-800" />
               </div>
             </div>
 
             <div className="mt-4">
-              <p className="text-xs font-medium text-slate-400">Member balances</p>
+              <p className="text-xs font-medium text-stone-400">Member balances</p>
               <div className="mt-2 space-y-1.5">
                 {summary.balances
                   .filter((b) => Math.abs(b.amount) > 0.01)
@@ -128,13 +128,13 @@ export function BalancesPage() {
                   .map((balance) => (
                     <div
                       key={balance.userId}
-                      className="flex items-center justify-between rounded-xl border border-slate-200 bg-slate-100/60 px-4 py-2.5"
+                      className="flex items-center justify-between rounded-xl border border-stone-200 bg-stone-100/60 px-4 py-2.5"
                     >
                       <div className="flex items-center gap-2.5">
-                        <div className="flex size-7 items-center justify-center rounded-full bg-blue-600/15 text-xs font-semibold text-blue-600">
+                        <div className="flex size-7 items-center justify-center rounded-full bg-teal-800/15 text-xs font-semibold text-teal-800">
                           {balance.displayName.charAt(0).toUpperCase()}
                         </div>
-                        <span className="text-sm font-medium text-slate-800">
+                        <span className="text-sm font-medium text-stone-800">
                           {balance.displayName}
                         </span>
                       </div>
@@ -160,7 +160,7 @@ export function BalancesPage() {
 
             {summary.suggestions.length > 0 && (
               <div className="mt-4">
-                <p className="text-xs font-medium text-slate-400">
+                <p className="text-xs font-medium text-stone-400">
                   Suggested payments
                 </p>
                 <div className="mt-2 space-y-2">
@@ -169,13 +169,13 @@ export function BalancesPage() {
                     return (
                       <div
                         key={key}
-                        className="flex items-center justify-between rounded-xl border border-slate-200 bg-slate-100/60 px-4 py-3"
+                        className="flex items-center justify-between rounded-xl border border-stone-200 bg-stone-100/60 px-4 py-3"
                       >
                         <div className="flex items-center gap-2 text-sm">
-                          <span className="font-medium text-slate-800">{s.fromName}</span>
-                          <ArrowRight className="size-3.5 text-slate-400" />
-                          <span className="font-medium text-slate-800">{s.toName}</span>
-                          <span className="font-semibold text-blue-600">
+                          <span className="font-medium text-stone-800">{s.fromName}</span>
+                          <ArrowRight className="size-3.5 text-stone-400" />
+                          <span className="font-medium text-stone-800">{s.toName}</span>
+                          <span className="font-semibold text-teal-800">
                             {formatCurrency(s.amount, summary.currency)}
                           </span>
                         </div>
@@ -207,10 +207,10 @@ export function BalancesPage() {
             )}
 
             {groupPaymentHistory.length > 0 && (
-              <div className="mt-4 border-t border-slate-100 pt-4">
+              <div className="mt-4 border-t border-stone-100 pt-4">
                 <div className="flex items-center gap-2">
-                  <History className="size-3.5 text-slate-400" />
-                  <p className="text-xs font-medium text-slate-500">Payment history</p>
+                  <History className="size-3.5 text-stone-400" />
+                  <p className="text-xs font-medium text-stone-500">Payment history</p>
                 </div>
                 <SettlementHistoryList
                   className="mt-2"

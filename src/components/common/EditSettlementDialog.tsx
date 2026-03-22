@@ -103,8 +103,8 @@ export function EditSettlementDialog({
     <>
     <div className="fixed inset-0 z-[60] flex items-end justify-center p-4 sm:items-center">
       <div className="fixed inset-0 bg-black/30 backdrop-blur-sm" onClick={onClose} aria-hidden />
-      <div className="relative w-full max-w-sm animate-[slideUp_0.25s_ease-out] rounded-3xl border border-slate-200 bg-white shadow-[0_20px_60px_rgba(15,23,42,0.18)]">
-        <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4">
+      <div className="relative w-full max-w-sm animate-[slideUp_0.25s_ease-out] rounded-3xl border border-stone-200 bg-white shadow-[0_20px_60px_rgba(28,25,23,0.18)]">
+        <div className="flex items-center justify-between border-b border-stone-100 px-5 py-4">
           <h2 className="text-base font-semibold">Edit payment</h2>
           <Button variant="ghost" size="icon-xs" className="rounded-full" onClick={onClose}>
             <X className="size-4" />
@@ -113,7 +113,7 @@ export function EditSettlementDialog({
 
         <div className="space-y-4 px-5 py-4">
           <div className="flex flex-col gap-2">
-            <span className="text-sm font-medium text-slate-800">Paid by</span>
+            <span className="text-sm font-medium text-stone-800">Paid by</span>
             <Select value={fromId} onValueChange={setFromId}>
               <SelectTrigger className="rounded-lg">
                 <SelectValue />
@@ -128,7 +128,7 @@ export function EditSettlementDialog({
             </Select>
           </div>
           <div className="flex flex-col gap-2">
-            <span className="text-sm font-medium text-slate-800">Received by</span>
+            <span className="text-sm font-medium text-stone-800">Received by</span>
             <Select value={toId} onValueChange={setToId}>
               <SelectTrigger className="rounded-lg">
                 <SelectValue />
@@ -143,7 +143,7 @@ export function EditSettlementDialog({
             </Select>
           </div>
           <div className="flex flex-col gap-2">
-            <label htmlFor="edit-settlement-amount" className="text-sm font-medium text-slate-800">
+            <label htmlFor="edit-settlement-amount" className="text-sm font-medium text-stone-800">
               Amount ({item.currency})
             </label>
             <Input
@@ -162,8 +162,8 @@ export function EditSettlementDialog({
           </div>
 
           <div className="flex flex-col gap-2">
-            <label htmlFor="edit-settlement-label" className="text-sm font-medium text-slate-800">
-              Label <span className="font-normal text-slate-400">(optional)</span>
+            <label htmlFor="edit-settlement-label" className="text-sm font-medium text-stone-800">
+              Label <span className="font-normal text-stone-400">(optional)</span>
             </label>
             <Input
               id="edit-settlement-label"

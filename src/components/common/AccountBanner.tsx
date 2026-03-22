@@ -33,7 +33,7 @@ export function AccountBanner() {
         onClick={handleDismiss}
       />
 
-      <div className="relative w-full max-w-sm animate-[slideUp_0.3s_ease-out] rounded-3xl border border-slate-200 bg-white p-6 shadow-[0_20px_60px_rgba(15,23,42,0.18)]">
+      <div className="relative w-full max-w-sm animate-[slideUp_0.3s_ease-out] rounded-3xl border border-stone-200 bg-white p-6 shadow-[0_20px_60px_rgba(28,25,23,0.18)]">
         <Button
           variant="ghost"
           size="icon-xs"
@@ -44,15 +44,15 @@ export function AccountBanner() {
         </Button>
 
         <div className="flex flex-col items-center text-center">
-          <div className="rounded-2xl bg-blue-600/15 p-3.5 text-blue-600">
+          <div className="rounded-2xl bg-teal-800/15 p-3.5 text-teal-800">
             <CloudUpload className="size-6" />
           </div>
 
-          <h2 className="mt-4 text-lg font-semibold tracking-tight text-slate-800">
+          <h2 className="mt-4 text-lg font-semibold tracking-tight text-stone-800">
             Your data lives on this device
           </h2>
 
-          <p className="mt-2 text-sm leading-relaxed text-slate-500">
+          <p className="mt-2 text-sm leading-relaxed text-stone-500">
             Everything is saved locally, but creating a free account lets you
             back up your data to the cloud and access it from other devices.
           </p>
@@ -70,7 +70,7 @@ export function AccountBanner() {
             <Button
               variant="ghost"
               size="sm"
-              className="w-full rounded-xl text-slate-500"
+              className="w-full rounded-xl text-stone-500"
               onClick={handleDismiss}
             >
               Maybe later

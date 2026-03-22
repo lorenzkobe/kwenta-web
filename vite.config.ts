@@ -16,7 +16,7 @@ export default defineConfig({
         short_name: 'Kwenta',
         description: 'Offline-first bill splitting for real-life groups',
         theme_color: '#1f2937',
-        background_color: '#f7fbff',
+        background_color: '#faf8f5',
         display: 'standalone',
         start_url: '/',
         icons: [

@@ -76,8 +76,8 @@ export function RecordSettlementDialog({
         onClick={() => !saving && onOpenChange(false)}
         aria-hidden
       />
-      <div className="relative w-full max-w-sm animate-[slideUp_0.25s_ease-out] rounded-3xl border border-slate-200 bg-white shadow-[0_20px_60px_rgba(15,23,42,0.18)]">
-        <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4">
+      <div className="relative w-full max-w-sm animate-[slideUp_0.25s_ease-out] rounded-3xl border border-stone-200 bg-white shadow-[0_20px_60px_rgba(28,25,23,0.18)]">
+        <div className="flex items-center justify-between border-b border-stone-100 px-5 py-4">
           <h2 className="text-base font-semibold">Record payment</h2>
           <Button
             variant="ghost"
@@ -91,16 +91,16 @@ export function RecordSettlementDialog({
         </div>
 
         <div className="space-y-4 px-5 py-4">
-          <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3">
-            <p className="text-xs font-medium text-slate-500">Payment</p>
+          <div className="rounded-xl border border-stone-200 bg-stone-50 px-4 py-3">
+            <p className="text-xs font-medium text-stone-500">Payment</p>
             <div className="mt-2 flex flex-wrap items-center gap-2 text-sm">
-              <span className="font-medium text-slate-800">{fromName}</span>
-              <ArrowRight className="size-3.5 text-slate-400" />
-              <span className="font-medium text-slate-800">{toName}</span>
+              <span className="font-medium text-stone-800">{fromName}</span>
+              <ArrowRight className="size-3.5 text-stone-400" />
+              <span className="font-medium text-stone-800">{toName}</span>
             </div>
             {amountEditable ? (
               <div className="mt-3">
-                <label htmlFor="settlement-amt" className="text-xs font-medium text-slate-500">
+                <label htmlFor="settlement-amt" className="text-xs font-medium text-stone-500">
                   Amount
                 </label>
                 <Input
@@ -113,15 +113,15 @@ export function RecordSettlementDialog({
                 />
               </div>
             ) : (
-              <p className="mt-2 text-lg font-semibold text-blue-600">
+              <p className="mt-2 text-lg font-semibold text-teal-800">
                 {formatCurrency(amount, currency)}
               </p>
             )}
           </div>
 
           <div className="flex flex-col gap-2">
-            <label htmlFor="settlement-label" className="text-sm font-medium text-slate-800">
-              Label <span className="font-normal text-slate-400">(optional)</span>
+            <label htmlFor="settlement-label" className="text-sm font-medium text-stone-800">
+              Label <span className="font-normal text-stone-400">(optional)</span>
             </label>
             <Input
               id="settlement-label"
@@ -132,7 +132,7 @@ export function RecordSettlementDialog({
               maxLength={120}
               className="rounded-lg"
             />
-            <p className="text-xs text-slate-500">
+            <p className="text-xs text-stone-500">
               {groupId
                 ? "Shown in this group's history and in your global payment list with the group name."
                 : 'Shown in your payment history and on this person.'}

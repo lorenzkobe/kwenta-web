@@ -1,8 +1,9 @@
 import { lazy, Suspense } from 'react'
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom'
 import { Loader2 } from 'lucide-react'
-import { LandingPage } from './landingPage'
+import { LandingPage } from '@/landing/LandingPage'
 import { AppShell } from '@/components/layout/AppShell'
+import { RequireAuth } from '@/components/auth/RequireAuth'
 
 const LoginPage = lazy(() => import('@/pages/LoginPage').then((m) => ({ default: m.LoginPage })))
 const JoinGroupPage = lazy(() => import('@/pages/JoinGroupPage').then((m) => ({ default: m.JoinGroupPage })))
@@ -22,7 +23,7 @@ const SettingsPage = lazy(() => import('@/pages/SettingsPage').then((m) => ({ de
 function PageLoader() {
   return (
     <div className="flex items-center justify-center py-20">
-      <Loader2 className="size-5 animate-spin text-blue-600" />
+      <Loader2 className="size-5 animate-spin text-teal-800" />
     </div>
   )
 }
@@ -36,17 +37,19 @@ function App() {
           <Route path="/login" element={<LoginPage />} />
           <Route path="/join/:inviteCode" element={<JoinGroupPage />} />
 
-          <Route path="/app" element={<AppShell />}>
-            <Route index element={<HomePage />} />
-            <Route path="bills" element={<BillsPage />} />
-            <Route path="bills/new" element={<AddBillPage />} />
-            <Route path="bills/:billId" element={<BillDetailPage />} />
-            <Route path="groups" element={<GroupsPage />} />
-            <Route path="groups/:groupId" element={<GroupDetailPage />} />
-            <Route path="people" element={<PeoplePage />} />
-            <Route path="people/:personId" element={<PersonDetailPage />} />
-            <Route path="balances" element={<BalancesPage />} />
-            <Route path="settings" element={<SettingsPage />} />
+          <Route element={<RequireAuth />}>
+            <Route path="/app" element={<AppShell />}>
+              <Route index element={<HomePage />} />
+              <Route path="bills" element={<BillsPage />} />
+              <Route path="bills/new" element={<AddBillPage />} />
+              <Route path="bills/:billId" element={<BillDetailPage />} />
+              <Route path="groups" element={<GroupsPage />} />
+              <Route path="groups/:groupId" element={<GroupDetailPage />} />
+              <Route path="people" element={<PeoplePage />} />
+              <Route path="people/:personId" element={<PersonDetailPage />} />
+              <Route path="balances" element={<BalancesPage />} />
+              <Route path="settings" element={<SettingsPage />} />
+            </Route>
           </Route>
 
           <Route path="*" element={<Navigate to="/" replace />} />

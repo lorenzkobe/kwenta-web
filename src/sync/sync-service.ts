@@ -14,7 +14,7 @@ import type {
   SyncFields,
 } from '@/types'
 
-const LAST_PULL_KEY = 'kwenta_last_pull'
+export const KWENTA_LAST_PULL_STORAGE_KEY = 'kwenta_last_pull'
 
 const TABLE_NAMES = [
   'profiles',
@@ -119,6 +119,22 @@ function filterUnsyncedForPush(
   }
 }
 
+/** True if this user has local rows that still need a successful cloud push. */
+export async function hasUnsyncedLocalDataForUser(userId: string): Promise<boolean> {
+  const ctx = await buildPushFilterContext(userId)
+  for (const tableName of TABLE_NAMES) {
+    const table = getLocalTable(tableName)
+    const allRecords = await table.toArray()
+    const unsyncedRaw = allRecords.filter((r: SyncFields) => {
+      if (r.synced_at === null) return true
+      return r.updated_at > r.synced_at
+    })
+    const unsynced = filterUnsyncedForPush(tableName, unsyncedRaw, userId, ctx)
+    if (unsynced.length > 0) return true
+  }
+  return false
+}
+
 /**
  * Push locally unsynced records the current user may write under RLS.
  * A record is unsynced if synced_at is null OR updated_at > synced_at.
@@ -178,7 +194,7 @@ export async function pushChanges(): Promise<{ pushed: number; errors: string[] 
 export async function pullChanges(userId: string): Promise<{ pulled: number; errors: string[] }> {
   let pulled = 0
   const errors: string[] = []
-  const lastPull = localStorage.getItem(LAST_PULL_KEY) ?? '1970-01-01T00:00:00.000Z'
+  const lastPull = localStorage.getItem(KWENTA_LAST_PULL_STORAGE_KEY) ?? '1970-01-01T00:00:00.000Z'
 
   const groupIds = await getGroupIdsForUser(userId)
 
@@ -207,7 +223,7 @@ export async function pullChanges(userId: string): Promise<{ pulled: number; err
     }
   }
 
-  localStorage.setItem(LAST_PULL_KEY, now())
+  localStorage.setItem(KWENTA_LAST_PULL_STORAGE_KEY, now())
   return { pulled, errors }
 }
 

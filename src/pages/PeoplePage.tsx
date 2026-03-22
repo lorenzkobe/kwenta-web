@@ -79,7 +79,7 @@ export function PeoplePage() {
   if (!userId) {
     return (
       <div className="flex justify-center py-20">
-        <Loader2 className="size-5 animate-spin text-blue-600" />
+        <Loader2 className="size-5 animate-spin text-teal-800" />
       </div>
     )
   }
@@ -89,7 +89,7 @@ export function PeoplePage() {
       <div className="flex items-center justify-between gap-3">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">People</h1>
-          <p className="mt-1 text-sm text-slate-600">
+          <p className="mt-1 text-sm text-stone-600">
             Phonebook, balances, and payments across all groups and personal bills
           </p>
         </div>
@@ -100,7 +100,7 @@ export function PeoplePage() {
       </div>
 
       {showAdd && (
-        <div className="rounded-3xl border border-blue-600/20 bg-blue-600/5 p-5 shadow-sm">
+        <div className="rounded-3xl border border-teal-800/20 bg-teal-800/5 p-5 shadow-sm">
           <div className="flex items-center justify-between">
             <h2 className="text-lg font-semibold">Add local contact</h2>
             <Button
@@ -115,7 +115,7 @@ export function PeoplePage() {
               ×
             </Button>
           </div>
-          <p className="mt-1 text-xs text-slate-600">
+          <p className="mt-1 text-xs text-stone-600">
             Names are unique in your phonebook. You can link a contact to an online account later from
             their page.
           </p>
@@ -146,13 +146,13 @@ export function PeoplePage() {
       )}
 
       {(!rows || rows.length === 0) && !showAdd ? (
-        <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
+        <div className="rounded-3xl border border-stone-200 bg-white p-5 shadow-sm">
           <div className="flex flex-col items-center py-12 text-center">
-            <div className="rounded-2xl bg-slate-100 p-4">
-              <BookUser className="size-6 text-slate-400" />
+            <div className="rounded-2xl bg-stone-100 p-4">
+              <BookUser className="size-6 text-stone-400" />
             </div>
-            <p className="mt-3 text-sm font-medium text-slate-500">No people yet</p>
-            <p className="mt-1 max-w-sm text-xs text-slate-400">
+            <p className="mt-3 text-sm font-medium text-stone-500">No people yet</p>
+            <p className="mt-1 max-w-sm text-xs text-stone-400">
               Add group members, split personal bills, or add a local contact. Everyone you share
               expenses with appears here.
             </p>
@@ -168,15 +168,15 @@ export function PeoplePage() {
             <Link
               key={r.id}
               to={`/app/people/${r.id}`}
-              className="flex items-center justify-between rounded-2xl border border-slate-200 bg-white p-4 shadow-sm transition-colors hover:bg-slate-50"
+              className="flex items-center justify-between rounded-2xl border border-stone-200 bg-white p-4 shadow-sm transition-colors hover:bg-stone-50"
             >
               <div className="min-w-0 flex-1">
-                <p className="font-semibold text-slate-800">{r.displayName}</p>
-                {r.subtitle && <p className="text-xs text-slate-500">{r.subtitle}</p>}
+                <p className="font-semibold text-stone-800">{r.displayName}</p>
+                {r.subtitle && <p className="text-xs text-stone-500">{r.subtitle}</p>}
                 <p
                   className={cn(
                     'mt-0.5 text-sm font-medium',
-                    r.tone === 'balanced' && 'text-slate-500',
+                    r.tone === 'balanced' && 'text-stone-500',
                     r.tone === 'collect' && 'text-emerald-600',
                     r.tone === 'pay' && 'text-amber-600',
                   )}
@@ -184,7 +184,7 @@ export function PeoplePage() {
                   {r.lines.length > 0 ? r.lines.join(' · ') : r.primaryLabel}
                 </p>
               </div>
-              <ChevronRight className="size-4 shrink-0 text-slate-400" />
+              <ChevronRight className="size-4 shrink-0 text-stone-400" />
             </Link>
           ))}
         </div>

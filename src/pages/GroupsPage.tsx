@@ -14,7 +14,7 @@ import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@
 function myBalanceLine(summary: GroupBalanceSummary) {
   const { totalOwed, totalOwing, currency } = summary
   if (totalOwed < 0.01 && totalOwing < 0.01) {
-    return { text: 'Balanced', className: 'text-slate-500' }
+    return { text: 'Balanced', className: 'text-stone-500' }
   }
   if (totalOwed >= 0.01) {
     return {
@@ -73,7 +73,7 @@ export function GroupsPage() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Groups</h1>
-          <p className="mt-1 text-sm text-slate-600">
+          <p className="mt-1 text-sm text-stone-600">
             {groupsWithBalances?.length ?? 0} group{(groupsWithBalances?.length ?? 0) !== 1 ? 's' : ''}
           </p>
         </div>
@@ -84,7 +84,7 @@ export function GroupsPage() {
       </div>
 
       {showCreate && (
-        <div className="rounded-3xl border border-blue-600/20 bg-blue-600/5 p-5 shadow-sm">
+        <div className="rounded-3xl border border-teal-800/20 bg-teal-800/5 p-5 shadow-sm">
           <div className="flex items-center justify-between">
             <h2 className="text-lg font-semibold">Create group</h2>
             <Button variant="ghost" size="icon-xs" className="rounded-full" onClick={() => setShowCreate(false)}>
@@ -93,7 +93,7 @@ export function GroupsPage() {
           </div>
           <div className="mt-4 space-y-3">
             <div className="flex flex-col gap-2">
-              <label htmlFor="new-group-name" className="text-sm font-medium text-slate-800">
+              <label htmlFor="new-group-name" className="text-sm font-medium text-stone-800">
                 Group name
               </label>
               <Input
@@ -106,7 +106,7 @@ export function GroupsPage() {
               />
             </div>
             <div className="flex flex-col gap-2">
-              <label htmlFor="new-group-currency" className="text-sm font-medium text-slate-800">
+              <label htmlFor="new-group-currency" className="text-sm font-medium text-stone-800">
                 Currency
               </label>
               <Select value={currency} onValueChange={setCurrency}>
@@ -135,13 +135,13 @@ export function GroupsPage() {
       )}
 
       {(!groupsWithBalances || groupsWithBalances.length === 0) ? (
-        <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
+        <div className="rounded-3xl border border-stone-200 bg-white p-5 shadow-sm">
           <div className="flex flex-col items-center py-12 text-center">
-            <div className="rounded-2xl bg-slate-100 p-4">
-              <Layers3 className="size-6 text-slate-400" />
+            <div className="rounded-2xl bg-stone-100 p-4">
+              <Layers3 className="size-6 text-stone-400" />
             </div>
-            <p className="mt-3 text-sm font-medium text-slate-500">No groups yet</p>
-            <p className="mt-1 text-xs text-slate-400">
+            <p className="mt-3 text-sm font-medium text-stone-500">No groups yet</p>
+            <p className="mt-1 text-xs text-stone-400">
               Create a group to start splitting expenses with others
             </p>
           </div>
@@ -154,21 +154,21 @@ export function GroupsPage() {
             <Link
               key={group.id}
               to={`/app/groups/${group.id}`}
-              className="flex items-center justify-between rounded-2xl border border-slate-200 bg-white p-4 shadow-sm transition-colors hover:bg-slate-50"
+              className="flex items-center justify-between rounded-2xl border border-stone-200 bg-white p-4 shadow-sm transition-colors hover:bg-stone-50"
             >
               <div className="flex min-w-0 flex-1 items-center gap-3">
-                <div className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-blue-600/15 text-blue-600">
+                <div className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-teal-800/15 text-teal-800">
                   <Users className="size-5" />
                 </div>
                 <div className="min-w-0">
-                  <p className="font-semibold text-slate-800">{group.name}</p>
-                  <p className="text-xs text-slate-500">
+                  <p className="font-semibold text-stone-800">{group.name}</p>
+                  <p className="text-xs text-stone-500">
                     {group.memberCount} member{group.memberCount !== 1 ? 's' : ''} · {group.currency}
                   </p>
                   <p className={cn('mt-0.5 text-xs font-semibold', className)}>{text}</p>
                 </div>
               </div>
-              <ChevronRight className="size-4 shrink-0 text-slate-400" />
+              <ChevronRight className="size-4 shrink-0 text-stone-400" />
             </Link>
             )
           })}

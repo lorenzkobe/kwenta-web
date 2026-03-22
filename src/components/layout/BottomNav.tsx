@@ -13,8 +13,8 @@ const navItems = [
 
 export function BottomNav() {
   return (
-    <nav className="fixed inset-x-0 bottom-0 z-40 border-t border-slate-200/80 bg-white/95 backdrop-blur lg:hidden">
-      <div className="mx-auto grid max-w-[26rem] grid-cols-6 gap-0 px-1 py-1">
+    <nav className="fixed inset-x-0 bottom-0 z-40 border-t border-stone-200/80 bg-white/95 backdrop-blur lg:hidden">
+      <div className="mx-auto grid max-w-104 grid-cols-6 gap-0 px-1 py-1">
         {navItems.map(({ to, icon: Icon, label, end }) => (
           <NavLink
             key={to}
@@ -24,8 +24,8 @@ export function BottomNav() {
               cn(
                 'flex flex-col items-center gap-0.5 py-2 text-[0.58rem] font-medium transition-colors',
                 isActive
-                  ? 'text-blue-600'
-                  : 'text-slate-400 hover:text-slate-600',
+                  ? 'text-teal-800'
+                  : 'text-stone-400 hover:text-stone-600',
               )
             }
           >
