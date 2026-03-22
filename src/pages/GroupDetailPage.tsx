@@ -607,7 +607,7 @@ export function GroupDetailPage() {
             <h2 className="text-lg font-semibold">Members</h2>
           </div>
           <p className="mt-1 text-xs text-stone-500">
-            Net amount in this group: positive = credit, negative = owes, 0 = even.
+            Net in this group: positive = should receive, negative = should pay, 0 = even.
           </p>
 
           <ul className="mt-4 space-y-2">

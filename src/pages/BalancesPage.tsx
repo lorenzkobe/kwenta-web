@@ -42,8 +42,8 @@ export function BalancesPage() {
     reloadSummaries().finally(() => setLoading(false))
   }, [userId, reloadSummaries])
 
-  const overallOwed = summaries.reduce((sum, s) => sum + s.totalOwed, 0)
-  const overallOwing = summaries.reduce((sum, s) => sum + s.totalOwing, 0)
+  const overallToReceive = summaries.reduce((sum, s) => sum + s.totalToReceive, 0)
+  const overallToPay = summaries.reduce((sum, s) => sum + s.totalToPay, 0)
 
   if (loading) {
     return (
@@ -58,21 +58,21 @@ export function BalancesPage() {
       <div>
         <h1 className="text-2xl font-semibold tracking-tight">Balances</h1>
         <p className="mt-1 text-sm text-stone-600">
-          See who should collect and who should pay
+          See who should receive and who should pay
         </p>
       </div>
 
       <div className="grid gap-3 sm:grid-cols-2">
         <div className="rounded-2xl border border-emerald-500/20 bg-emerald-500/8 p-4">
-          <p className="text-xs font-medium text-emerald-600/70">To collect</p>
+          <p className="text-xs font-medium text-emerald-600/70">To receive</p>
           <p className="mt-1 text-2xl font-semibold text-emerald-600">
-            {formatCurrency(overallOwed)}
+            {formatCurrency(overallToReceive)}
           </p>
         </div>
         <div className="rounded-2xl border border-amber-500/20 bg-amber-500/8 p-4">
           <p className="text-xs font-medium text-amber-600/70">To pay</p>
           <p className="mt-1 text-2xl font-semibold text-amber-600">
-            {formatCurrency(overallOwing)}
+            {formatCurrency(overallToPay)}
           </p>
         </div>
       </div>

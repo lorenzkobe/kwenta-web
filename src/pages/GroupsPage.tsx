@@ -12,18 +12,18 @@ import { Input } from '@/components/ui/input'
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@/components/ui/select'
 
 function myBalanceLine(summary: GroupBalanceSummary) {
-  const { totalOwed, totalOwing, currency } = summary
-  if (totalOwed < 0.01 && totalOwing < 0.01) {
+  const { totalToReceive, totalToPay, currency } = summary
+  if (totalToReceive < 0.01 && totalToPay < 0.01) {
     return { text: 'Balanced', className: 'text-stone-500' }
   }
-  if (totalOwed >= 0.01) {
+  if (totalToReceive >= 0.01) {
     return {
-      text: `Collect ${formatCurrency(totalOwed, currency)}`,
+      text: `Receive ${formatCurrency(totalToReceive, currency)}`,
       className: 'text-emerald-600',
     }
   }
   return {
-    text: `Pay ${formatCurrency(totalOwing, currency)}`,
+    text: `Pay ${formatCurrency(totalToPay, currency)}`,
     className: 'text-amber-600',
   }
 }

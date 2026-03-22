@@ -4,6 +4,7 @@ import { supabase } from '@/lib/supabase'
 import { consumeVoluntarySignOut, SESSION_EXPIRED_MESSAGE_KEY } from '@/lib/auth-session-flags'
 import { db } from '@/db/db'
 import { useAppStore } from '@/store/app-store'
+import { triggerSync } from '@/sync/sync-manager'
 import { getDeviceId, now } from '@/lib/utils'
 
 async function ensureProfile(userId: string, email: string) {
@@ -24,6 +25,7 @@ async function ensureProfile(userId: string, email: string) {
       is_deleted: false,
       device_id: getDeviceId(),
     })
+    triggerSync()
   }
 }
 
@@ -97,7 +99,9 @@ export function useAuth() {
     await db.profiles.update(userId, {
       display_name: displayName,
       updated_at: now(),
+      synced_at: null,
     })
+    triggerSync()
   }, [])
 
   return {

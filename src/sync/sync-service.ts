@@ -14,6 +14,18 @@ import type {
   SyncFields,
 } from '@/types'
 
+/** Prefer linked Kwenta account id when set; otherwise keep id (synced local profiles satisfy FK). */
+async function resolveSplitUserIdForPush(localUserId: string): Promise<string> {
+  const p = await db.profiles.get(localUserId)
+  if (!p || p.is_deleted) {
+    return localUserId
+  }
+  if (p.linked_profile_id) {
+    return p.linked_profile_id
+  }
+  return localUserId
+}
+
 export const KWENTA_LAST_PULL_STORAGE_KEY = 'kwenta_last_pull'
 
 const TABLE_NAMES = [
@@ -28,6 +40,23 @@ const TABLE_NAMES = [
 ] as const
 
 type TableName = (typeof TABLE_NAMES)[number]
+
+function syncErrMessage(err: unknown): string {
+  if (err instanceof Error) return err.message
+  if (
+    err &&
+    typeof err === 'object' &&
+    'message' in err &&
+    typeof (err as { message: unknown }).message === 'string'
+  ) {
+    return (err as { message: string }).message
+  }
+  try {
+    return JSON.stringify(err)
+  } catch {
+    return String(err)
+  }
+}
 
 type PushFilterContext = {
   groupsICreated: Set<string>
@@ -83,8 +112,13 @@ function filterUnsyncedForPush(
   ctx: PushFilterContext,
 ): SyncFields[] {
   switch (tableName) {
-    case 'profiles':
-      return unsynced.filter((r) => (r as Profile).id === userId)
+    case 'profiles': {
+      return unsynced.filter((r) => {
+        const p = r as Profile
+        if (p.id === userId) return true
+        return Boolean(p.is_local && p.owner_id === userId)
+      })
+    }
     case 'groups':
       return unsynced.filter((r) => (r as Group).created_by === userId)
     case 'group_members': {
@@ -166,7 +200,19 @@ export async function pushChanges(): Promise<{ pushed: number; errors: string[] 
 
     if (unsynced.length === 0) continue
 
-    const { error } = await supabase.from(tableName).upsert(unsynced, {
+    let rowsToUpsert: SyncFields[] = unsynced
+
+    if (tableName === 'item_splits') {
+      rowsToUpsert = await Promise.all(
+        unsynced.map(async (r) => {
+          const split = r as ItemSplit
+          const resolved = await resolveSplitUserIdForPush(split.user_id)
+          return resolved === split.user_id ? split : { ...split, user_id: resolved }
+        }),
+      )
+    }
+
+    const { error } = await supabase.from(tableName).upsert(rowsToUpsert, {
       onConflict: 'id',
       ignoreDuplicates: false,
     })
@@ -177,8 +223,20 @@ export async function pushChanges(): Promise<{ pushed: number; errors: string[] 
     }
 
     const timestamp = now()
-    for (const record of unsynced) {
-      await table.update((record as SyncFields).id, { synced_at: timestamp })
+    if (tableName === 'item_splits') {
+      for (let i = 0; i < unsynced.length; i++) {
+        const original = unsynced[i] as ItemSplit
+        const pushed = rowsToUpsert[i] as ItemSplit
+        const patch: Partial<ItemSplit> & { synced_at: string } = { synced_at: timestamp }
+        if (pushed.user_id !== original.user_id) {
+          patch.user_id = pushed.user_id
+        }
+        await table.update(original.id, patch)
+      }
+    } else {
+      for (const record of unsynced) {
+        await table.update((record as SyncFields).id, { synced_at: timestamp })
+      }
     }
     pushed += unsynced.length
   }
@@ -186,21 +244,40 @@ export async function pushChanges(): Promise<{ pushed: number; errors: string[] 
   return { pushed, errors }
 }
 
+export type PullPrefetchContext = {
+  groupIds: string[]
+  billIds: string[]
+  itemIds: string[]
+}
+
+/** Fetch group ids + bill/item ids once per pull (avoids duplicate RPCs). */
+export async function prefetchPullContext(userId: string): Promise<PullPrefetchContext> {
+  const groupIds = await getGroupIdsForUser(userId)
+  const billIds = await getRelevantBillIds(userId, groupIds)
+  let itemIds: string[] = []
+  if (billIds.length > 0) {
+    const { data, error } = await supabase.from('bill_items').select('id').in('bill_id', billIds)
+    if (error) throw error
+    itemIds = (data ?? []).map((r) => r.id)
+  }
+  return { groupIds, billIds, itemIds }
+}
+
 /**
  * Pull all remote records updated since our last pull timestamp.
- * For each table, query Supabase for rows where updated_at > lastPull.
  * Insert or update them into local Dexie.
+ * Does not advance last-pull time unless every table pull succeeds.
  */
 export async function pullChanges(userId: string): Promise<{ pulled: number; errors: string[] }> {
   let pulled = 0
   const errors: string[] = []
   const lastPull = localStorage.getItem(KWENTA_LAST_PULL_STORAGE_KEY) ?? '1970-01-01T00:00:00.000Z'
 
-  const groupIds = await getGroupIdsForUser(userId)
+  const prefetch = await prefetchPullContext(userId)
 
   for (const tableName of TABLE_NAMES) {
     try {
-      const rows = await fetchRemoteRows(tableName, lastPull, userId, groupIds)
+      const rows = await fetchRemoteRows(tableName, lastPull, userId, prefetch)
       if (rows.length === 0) continue
 
       const table = getLocalTable(tableName)
@@ -219,11 +296,14 @@ export async function pullChanges(userId: string): Promise<{ pulled: number; err
 
       pulled += rows.length
     } catch (err) {
-      errors.push(`Pull ${tableName}: ${err instanceof Error ? err.message : String(err)}`)
+      errors.push(`Pull ${tableName}: ${syncErrMessage(err)}`)
     }
   }
 
-  localStorage.setItem(KWENTA_LAST_PULL_STORAGE_KEY, now())
+  if (errors.length === 0) {
+    localStorage.setItem(KWENTA_LAST_PULL_STORAGE_KEY, now())
+  }
+
   return { pulled, errors }
 }
 
@@ -275,14 +355,37 @@ async function fetchRemoteRows(
   tableName: TableName,
   since: string,
   userId: string,
-  groupIds: string[],
+  prefetch: PullPrefetchContext,
 ): Promise<SyncFields[]> {
+  const { groupIds, billIds, itemIds } = prefetch
   let query = supabase.from(tableName).select('*').gt('updated_at', since)
 
   switch (tableName) {
-    case 'profiles':
-      query = query.eq('id', userId)
-      break
+    case 'profiles': {
+      const { data: ownRow, error: e1 } = await supabase
+        .from('profiles')
+        .select('*')
+        .gt('updated_at', since)
+        .eq('id', userId)
+      if (e1) throw e1
+      const { data: ownedLocals, error: e2 } = await supabase
+        .from('profiles')
+        .select('*')
+        .gt('updated_at', since)
+        .eq('owner_id', userId)
+        .eq('is_local', true)
+      if (e2) throw e2
+      const merged = [...(ownRow ?? []), ...(ownedLocals ?? [])]
+      const dedup = new Map<string, SyncFields>()
+      for (const r of merged) {
+        const id = (r as Profile).id
+        const prev = dedup.get(id)
+        if (!prev || (r as SyncFields).updated_at > prev.updated_at) {
+          dedup.set(id, r as SyncFields)
+        }
+      }
+      return [...dedup.values()]
+    }
     case 'groups':
       if (groupIds.length === 0) return []
       query = query.in('id', groupIds)
@@ -291,21 +394,19 @@ async function fetchRemoteRows(
       if (groupIds.length === 0) return []
       query = query.in('group_id', groupIds)
       break
-    case 'bills':
-      if (groupIds.length === 0) {
-        query = query.eq('created_by', userId)
-      } else {
-        query = query.or(`created_by.eq.${userId},group_id.in.(${groupIds.join(',')})`)
-      }
-      break
+    case 'bills': {
+      const { data: rpcRows, error: rpcError } = await supabase.rpc('bills_for_sync', {
+        p_since: since,
+      })
+      if (rpcError) throw rpcError
+      return (rpcRows ?? []) as SyncFields[]
+    }
     case 'bill_items': {
-      const billIds = await getRelevantBillIds(userId, groupIds)
       if (billIds.length === 0) return []
       query = query.in('bill_id', billIds)
       break
     }
     case 'item_splits': {
-      const itemIds = await getRelevantItemIds(userId, groupIds)
       if (itemIds.length === 0) return []
       query = query.in('item_id', itemIds)
       break
@@ -326,22 +427,11 @@ async function fetchRemoteRows(
   return (data ?? []) as SyncFields[]
 }
 
-async function getRelevantBillIds(userId: string, groupIds: string[]): Promise<string[]> {
-  let query = supabase.from('bills').select('id')
-  if (groupIds.length === 0) {
-    query = query.eq('created_by', userId)
-  } else {
-    query = query.or(`created_by.eq.${userId},group_id.in.(${groupIds.join(',')})`)
-  }
-  const { data } = await query
-  return (data ?? []).map((r) => r.id)
-}
-
-async function getRelevantItemIds(userId: string, groupIds: string[]): Promise<string[]> {
-  const billIds = await getRelevantBillIds(userId, groupIds)
-  if (billIds.length === 0) return []
-  const { data } = await supabase.from('bill_items').select('id').in('bill_id', billIds)
-  return (data ?? []).map((r) => r.id)
+async function getRelevantBillIds(userId: string, _groupIds: string[]): Promise<string[]> {
+  void userId
+  const { data, error } = await supabase.rpc('relevant_bill_ids_for_user')
+  if (error) throw error
+  return (data ?? []).map((r: { id: string }) => r.id)
 }
 
 export async function fullSync(userId: string): Promise<{
@@ -349,12 +439,128 @@ export async function fullSync(userId: string): Promise<{
   pulled: number
   errors: string[]
 }> {
-  const pushResult = await pushChanges()
-  const pullResult = await pullChanges(userId)
-
+  const roundTrip = await syncRoundTrip(userId)
   return {
-    pushed: pushResult.pushed,
-    pulled: pullResult.pulled,
-    errors: [...pushResult.errors, ...pullResult.errors],
+    pushed: roundTrip.pushed,
+    pulled: roundTrip.pulled,
+    errors: roundTrip.errors,
   }
+}
+
+type KwentaSyncPullBundle = Record<(typeof TABLE_NAMES)[number], unknown[]>
+
+function isPullBundle(x: unknown): x is KwentaSyncPullBundle {
+  if (!x || typeof x !== 'object') return false
+  const o = x as Record<string, unknown>
+  return TABLE_NAMES.every((t) => Array.isArray(o[t]))
+}
+
+/**
+ * One RPC: apply push payload on the server, return all visible rows changed since `since`.
+ * Falls back to pushChanges + pullChanges if the RPC is missing (older DB).
+ */
+export async function syncRoundTrip(userId: string): Promise<{
+  pushed: number
+  pulled: number
+  errors: string[]
+}> {
+  const {
+    data: { session },
+  } = await supabase.auth.getSession()
+  if (!session?.user?.id) {
+    return { pushed: 0, pulled: 0, errors: ['Sync skipped: not signed in'] }
+  }
+
+  const lastPull = localStorage.getItem(KWENTA_LAST_PULL_STORAGE_KEY) ?? '1970-01-01T00:00:00.000Z'
+
+  const ctx = await buildPushFilterContext(userId)
+  const pPush: Record<string, SyncFields[]> = {}
+
+  for (const tableName of TABLE_NAMES) {
+    const table = getLocalTable(tableName)
+    const allRecords = await table.toArray()
+    const unsyncedRaw = allRecords.filter((r: SyncFields) => {
+      if (r.synced_at === null) return true
+      return r.updated_at > r.synced_at
+    })
+    let unsynced = filterUnsyncedForPush(tableName, unsyncedRaw, userId, ctx)
+    if (tableName === 'item_splits') {
+      unsynced = await Promise.all(
+        unsynced.map(async (r) => {
+          const split = r as ItemSplit
+          const resolved = await resolveSplitUserIdForPush(split.user_id)
+          return resolved === split.user_id ? split : { ...split, user_id: resolved }
+        }),
+      )
+    }
+    if (unsynced.length > 0) {
+      pPush[tableName] = unsynced
+    }
+  }
+
+  const { data: bundle, error: rpcError } = await supabase.rpc('kwenta_sync', {
+    p_since: lastPull,
+    p_push: pPush,
+  })
+
+  if (rpcError) {
+    const code = 'code' in rpcError ? String((rpcError as { code?: string }).code) : ''
+    const msg = rpcError.message ?? ''
+    if (code === 'PGRST202' || /does not exist/i.test(msg)) {
+      const pushResult = await pushChanges()
+      const pullResult = await pullChanges(userId)
+      return {
+        pushed: pushResult.pushed,
+        pulled: pullResult.pulled,
+        errors: [...pushResult.errors, ...pullResult.errors],
+      }
+    }
+    return { pushed: 0, pulled: 0, errors: [`kwenta_sync: ${syncErrMessage(rpcError)}`] }
+  }
+
+  if (!isPullBundle(bundle)) {
+    return { pushed: 0, pulled: 0, errors: ['kwenta_sync: invalid response shape'] }
+  }
+
+  let pulled = 0
+  for (const tableName of TABLE_NAMES) {
+    const rows = bundle[tableName] as SyncFields[]
+    const table = getLocalTable(tableName)
+    for (const row of rows) {
+      const existing = await table.get(row.id)
+      if (existing) {
+        const local = existing as SyncFields
+        if (row.updated_at > local.updated_at) {
+          await table.update(row.id, { ...row, synced_at: row.updated_at })
+        }
+      } else {
+        await table.add({ ...row, synced_at: row.updated_at })
+      }
+    }
+    pulled += rows.length
+  }
+
+  const timestamp = now()
+  for (const tableName of TABLE_NAMES) {
+    const pushedRows = pPush[tableName]
+    if (!pushedRows?.length) continue
+    const table = getLocalTable(tableName)
+    for (const r of pushedRows) {
+      if (tableName === 'item_splits') {
+        const s = r as ItemSplit
+        await table.update(s.id, { synced_at: timestamp, user_id: s.user_id })
+      } else {
+        await table.update((r as SyncFields).id, { synced_at: timestamp })
+      }
+    }
+  }
+
+  localStorage.setItem(KWENTA_LAST_PULL_STORAGE_KEY, now())
+
+  let pushedCount = 0
+  for (const rows of Object.values(pPush)) {
+    pushedCount += rows.length
+  }
+
+  return { pushed: pushedCount, pulled, errors: [] }
 }

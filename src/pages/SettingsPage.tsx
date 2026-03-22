@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { useLiveQuery } from 'dexie-react-hooks'
 import { useNavigate } from 'react-router-dom'
 import { Check, Copy, LogOut, Pencil, RefreshCcw, Shield, User } from 'lucide-react'
 import { markVoluntarySignOut } from '@/lib/auth-session-flags'
@@ -14,10 +15,15 @@ import { Input } from '@/components/ui/input'
 export function SettingsPage() {
   const navigate = useNavigate()
   const { user, isAuthenticated, updateDisplayName } = useAuth()
-  const { profile, userId } = useCurrentUser()
+  const { profile } = useCurrentUser()
   const isOnline = useAppStore((s) => s.isOnline)
   const syncStatus = useAppStore((s) => s.syncStatus)
   const setSyncStatus = useAppStore((s) => s.setSyncStatus)
+
+  const hasPendingSync = useLiveQuery(
+    async () => (user?.id ? hasUnsyncedLocalDataForUser(user.id) : false),
+    [user?.id],
+  )
 
   const [editing, setEditing] = useState(false)
   const [displayName, setDisplayName] = useState('')
@@ -128,23 +134,30 @@ export function SettingsPage() {
             </div>
           </div>
 
-          {isAuthenticated && userId && (
-            <div className="mt-4 rounded-xl border border-stone-200 bg-stone-50 px-3 py-3">
-              <p className="text-xs font-medium text-stone-600">Profile ID</p>
-              <p className="mt-1 break-all font-mono text-[0.7rem] leading-snug text-stone-800">{userId}</p>
-              <p className="mt-1.5 text-[0.65rem] text-stone-500">
-                Your signed-in account id. Share it so others can link their local contact to you in People.
+          {isAuthenticated && user?.email && (
+            <div className="mt-4 rounded-xl border border-stone-200 bg-stone-50 px-4 py-4">
+              <p className="text-sm font-semibold text-stone-900">Linking</p>
+              <p className="mt-2 text-sm leading-relaxed text-stone-600">
+                If someone has you saved as a local contact, they can link that contact to your Kwenta
+                account with your email:{' '}
+                <span className="font-medium text-stone-900">{user.email}</span>. They’ll use{' '}
+                <span className="font-medium text-stone-800">People → Link</span> on their device. Their phone
+                or browser needs your profile already (for example from a shared group and a sync).
               </p>
               <Button
                 type="button"
                 variant="outline"
-                size="xs"
-                className="mt-2 rounded-lg"
-                onClick={() => void navigator.clipboard.writeText(userId)}
+                size="sm"
+                className="mt-3 rounded-lg"
+                onClick={() => void navigator.clipboard.writeText(user.email!)}
               >
-                <Copy className="size-3" />
-                Copy ID
+                <Copy className="size-3.5" />
+                Copy email
               </Button>
+              <p className="mt-3 border-t border-stone-200/80 pt-3 text-xs leading-relaxed text-stone-500">
+                If you were added to a group as <span className="font-medium text-stone-600">name only</span>,
+                sign in with this email and let the app sync so others can link you in People → Link.
+              </p>
             </div>
           )}
         </div>
@@ -161,8 +174,12 @@ export function SettingsPage() {
                       ? 'Syncing…'
                       : syncStatus === 'error'
                         ? 'Online — last sync had errors'
-                        : 'Online — changes sync to your account when signed in'
-                    : 'Offline — changes stay on this device until you’re online'}
+                        : hasPendingSync === true
+                          ? 'Waiting to sync — changes are saved here and will upload when the server accepts them'
+                          : 'Online — changes sync to your account when signed in'
+                    : hasPendingSync === true
+                      ? 'Offline — you have changes not yet on the server; they’ll upload when you’re online'
+                      : 'Offline — changes stay on this device until you’re online'}
                 </p>
               </div>
               <div className={`size-2.5 rounded-full ${isOnline ? 'bg-emerald-500' : 'bg-amber-500'}`} />

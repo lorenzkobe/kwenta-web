@@ -10,7 +10,7 @@ export function LandingFinalCta() {
           <div className="grid gap-10 lg:grid-cols-[1.2fr_1fr] lg:items-center">
             <div>
               <h2 className="font-display text-3xl font-semibold tracking-tight sm:text-4xl">
-                Stop guessing who owes what.
+                Stop guessing who should pay what.
               </h2>
               <p className="mt-4 text-base leading-relaxed text-stone-300">
                 Sign in to use Kwenta on this device, sync with your account, and keep a backup in the

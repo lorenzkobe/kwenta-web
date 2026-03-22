@@ -9,14 +9,17 @@ import {
   MoreVertical,
   ReceiptText,
   Trash2,
+  Users,
 } from 'lucide-react'
 import { useLiveQuery } from 'dexie-react-hooks'
 import { db } from '@/db/db'
 import {
   computePairwiseNet,
+  findRemoteProfileIdForLinking,
   formatPairwiseSummary,
   listBillsInvolvingPair,
   listPairwiseSettlementsBetween,
+  listSharedGroupsWithBalance,
   resolveProfileDisplay,
 } from '@/lib/people'
 import { deletePerson, linkProfileToRemote } from '@/db/operations'
@@ -36,9 +39,6 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
-
-const UUID_RE =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 
 function sheetBackdrop(onClose: () => void) {
   return (
@@ -91,7 +91,7 @@ function LinkAccountSheet({
   onLinkByIdInputChange,
   linkByIdError,
   linkByIdPending,
-  onLinkByProfileId,
+  onLinkByIdOrEmail,
 }: {
   onClose: () => void
   linkableRemotes: { id: string; displayName: string }[] | undefined
@@ -100,7 +100,7 @@ function LinkAccountSheet({
   onLinkByIdInputChange: (value: string) => void
   linkByIdError: string | null
   linkByIdPending: boolean
-  onLinkByProfileId: () => void | Promise<void>
+  onLinkByIdOrEmail: () => void | Promise<void>
 }) {
   return (
     <div className="fixed inset-0 z-50 flex items-end justify-center p-4 sm:items-center">
@@ -120,9 +120,14 @@ function LinkAccountSheet({
                 Link to their account
               </p>
               <p className="text-xs text-stone-500">
-                Pick someone you’re in a group with, or paste their <strong>Kwenta profile ID</strong>{' '}
-                (UUID from Settings if they share it). Their profile must exist on this device and have an
-                email (signed-in account).
+                Pick someone you’re in a group with, or enter the <strong>email they use in Kwenta</strong>{' '}
+                (same as in Settings). Their profile must already be on this device — usually after you’re in a
+                group together or you’ve synced.
+              </p>
+              <p className="text-xs leading-relaxed text-stone-500">
+                <span className="font-medium text-stone-600">Tip:</span> Name-only group placeholders can’t be
+                linked until that person signs in to Kwenta and you’ve synced here—then use their email or the
+                list above.
               </p>
             </div>
           </div>
@@ -141,18 +146,19 @@ function LinkAccountSheet({
             </Select>
           ) : (
             <p className="text-xs text-stone-500">
-              No signed-in people in your groups yet — use profile ID below, or share a group first.
+              No signed-in people in your groups yet — enter their email below, or share a group first.
             </p>
           )}
           <div className="border-t border-stone-200 pt-3">
-            <p className="text-xs font-medium text-stone-600">Or paste profile ID</p>
+            <p className="text-xs font-medium text-stone-600">Or enter email or profile ID</p>
             <div className="mt-2 flex flex-col gap-2 sm:flex-row">
               <Input
-                placeholder="e.g. 8b3e2f1a-…"
+                type="email"
+                placeholder="friend@email.com"
                 value={linkByIdInput}
                 onChange={(e) => onLinkByIdInputChange(e.target.value)}
-                onKeyDown={(e) => e.key === 'Enter' && void onLinkByProfileId()}
-                className="rounded-lg font-mono text-sm"
+                onKeyDown={(e) => e.key === 'Enter' && void onLinkByIdOrEmail()}
+                className="rounded-lg text-sm"
                 autoComplete="off"
                 spellCheck={false}
               />
@@ -160,7 +166,7 @@ function LinkAccountSheet({
                 type="button"
                 className="shrink-0 rounded-lg"
                 disabled={linkByIdPending || !linkByIdInput.trim()}
-                onClick={() => void onLinkByProfileId()}
+                onClick={() => void onLinkByIdOrEmail()}
               >
                 {linkByIdPending ? '…' : 'Link'}
               </Button>
@@ -183,16 +189,14 @@ export function PersonDetailPage() {
   const navigate = useNavigate()
   const { userId, profile: meProfile } = useCurrentUser()
   const [editing, setEditing] = useState<SettlementHistoryItem | null>(null)
-  const [record, setRecord] = useState<{
-    direction: 'you_pay' | 'they_pay'
-    currency: string
-  } | null>(null)
+  const [record, setRecord] = useState<{ currency: string } | null>(null)
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false)
   const [showOptionsMenu, setShowOptionsMenu] = useState(false)
   const [linkByIdInput, setLinkByIdInput] = useState('')
   const [linkByIdError, setLinkByIdError] = useState<string | null>(null)
   const [linkByIdPending, setLinkByIdPending] = useState(false)
   const [linkAccountOpen, setLinkAccountOpen] = useState(false)
+  const [billsScope, setBillsScope] = useState<'personal' | 'groups'>('personal')
 
   const profile = useLiveQuery(
     () => (personId ? db.profiles.get(personId) : undefined),
@@ -212,6 +216,11 @@ export function PersonDetailPage() {
   const bills = useLiveQuery(async () => {
     if (!userId || !personId) return []
     return listBillsInvolvingPair(userId, personId)
+  }, [userId, personId])
+
+  const sharedGroups = useLiveQuery(async () => {
+    if (!userId || !personId) return []
+    return listSharedGroupsWithBalance(userId, personId)
   }, [userId, personId])
 
   const settlements = useLiveQuery(async () => {
@@ -245,10 +254,27 @@ export function PersonDetailPage() {
     return formatPairwiseSummary(netByCurrency)
   }, [netByCurrency])
 
+  const personalBills = useMemo(
+    () => (bills ?? []).filter((b) => !b.group_id),
+    [bills],
+  )
+
   const defaultCurrency = useMemo(() => {
-    const b = bills?.[0]
-    return b?.currency ?? 'PHP'
-  }, [bills])
+    const pb = personalBills[0]
+    if (pb) return pb.currency
+    return bills?.[0]?.currency ?? 'PHP'
+  }, [personalBills, bills])
+
+  const settlementParties = useMemo((): { id: string; label: string }[] | undefined => {
+    if (!userId || !personId) return undefined
+    return [
+      { id: userId, label: meProfile?.display_name?.trim() || 'You' },
+      {
+        id: personId,
+        label: (display?.displayName ?? profile?.display_name ?? 'Contact').trim() || 'Contact',
+      },
+    ]
+  }, [userId, personId, meProfile?.display_name, display?.displayName, profile?.display_name])
 
   useEffect(() => {
     if (personId && userId && personId === userId) {
@@ -306,36 +332,35 @@ export function PersonDetailPage() {
     }
   }
 
-  async function handleLinkByProfileId() {
+  async function handleLinkByIdOrEmail() {
     if (!userId || !personId) return
     setLinkByIdError(null)
     const raw = linkByIdInput.trim()
     if (!raw) {
-      setLinkByIdError('Paste a profile ID first.')
-      return
-    }
-    if (!UUID_RE.test(raw)) {
-      setLinkByIdError('That doesn’t look like a valid profile ID (UUID).')
-      return
-    }
-    if (raw === personId) {
-      setLinkByIdError('Use a different person’s ID, not this contact’s.')
+      setLinkByIdError('Enter their email or profile ID.')
       return
     }
     setLinkByIdPending(true)
     try {
-      const remote = await db.profiles.get(raw)
-      if (!remote || remote.is_deleted) {
-        setLinkByIdError('No profile with this ID on this device. Sync or join a group with them first.')
+      const remoteId = await findRemoteProfileIdForLinking(raw)
+      if (!remoteId) {
+        setLinkByIdError(
+          'No matching account on this device. Use the email they use in Kwenta, or join a group with them and sync.',
+        )
         return
       }
-      if (!remote.email?.trim()) {
+      if (remoteId === personId) {
+        setLinkByIdError('That’s this contact — use the other person’s email or ID.')
+        return
+      }
+      const remote = await db.profiles.get(remoteId)
+      if (!remote?.email?.trim()) {
         setLinkByIdError('That profile has no email — only signed-in accounts can be linked.')
         return
       }
-      await linkProfileToRemote(personId, raw, userId)
+      await linkProfileToRemote(personId, remoteId, userId)
       const updated = await db.profiles.get(personId)
-      if (updated?.linked_profile_id === raw) {
+      if (updated?.linked_profile_id === remoteId) {
         setLinkByIdInput('')
         setLinkAccountOpen(false)
       }
@@ -404,7 +429,7 @@ export function PersonDetailPage() {
             className={cn(
               'mt-3 text-lg font-semibold',
               summary.tone === 'balanced' && 'text-stone-500',
-              summary.tone === 'collect' && 'text-emerald-600',
+              summary.tone === 'receive' && 'text-emerald-600',
               summary.tone === 'pay' && 'text-amber-600',
             )}
           >
@@ -416,67 +441,162 @@ export function PersonDetailPage() {
           both). All recorded payments with this person are included.
         </p>
 
-        <div className="mt-4 flex flex-wrap gap-2">
+        <div className="mt-4">
           <Button
             size="sm"
             className="rounded-full"
             type="button"
-            onClick={() =>
-              setRecord({ direction: 'you_pay', currency: defaultCurrency })
-            }
+            onClick={() => setRecord({ currency: defaultCurrency })}
           >
-            You paid them
-          </Button>
-          <Button
-            size="sm"
-            variant="secondary"
-            className="rounded-full"
-            type="button"
-            onClick={() =>
-              setRecord({ direction: 'they_pay', currency: defaultCurrency })
-            }
-          >
-            They paid you
+            Add payment
           </Button>
         </div>
       </div>
 
       <div className="rounded-3xl border border-stone-200 bg-white p-5 shadow-sm">
-        <div className="flex items-center gap-2">
-          <ReceiptText className="size-4 text-teal-800" />
-          <h2 className="text-lg font-semibold">Shared bills</h2>
+        <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex items-center gap-2">
+            <ReceiptText className="size-4 text-teal-800" />
+            <h2 className="text-lg font-semibold">Bills &amp; groups</h2>
+          </div>
         </div>
-        {(!bills || bills.length === 0) ? (
-          <p className="mt-3 text-sm text-stone-500">No bills yet with this person on a split.</p>
-        ) : (
-          <ul className="mt-3 space-y-2">
-            {bills.map((bill) => (
-              <li key={bill.id}>
-                <Link
-                  to={bill.group_id ? `/app/groups/${bill.group_id}` : `/app/bills/${bill.id}`}
-                  className="flex items-center justify-between rounded-xl border border-stone-200 bg-stone-100/60 px-4 py-3 transition-colors hover:bg-stone-100"
-                >
-                  <div className="min-w-0">
-                    <p className="font-medium text-stone-800">{bill.title}</p>
-                    <p className="text-xs text-stone-500">
-                      {bill.groupName ? (
-                        <span>{bill.groupName} · </span>
-                      ) : (
-                        <span>Personal · </span>
-                      )}
-                      {bill.creatorName}
-                    </p>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <span className="text-sm font-semibold text-stone-800">
-                      {formatCurrency(bill.total_amount, bill.currency)}
-                    </span>
-                    <ChevronRight className="size-4 text-stone-400" />
-                  </div>
-                </Link>
-              </li>
-            ))}
-          </ul>
+
+        <div className="mt-3 grid grid-cols-2 gap-1 rounded-2xl border border-stone-200 bg-stone-100/80 p-1">
+          <button
+            type="button"
+            onClick={() => setBillsScope('personal')}
+            className={cn(
+              'flex items-center justify-center gap-2 rounded-xl px-3 py-2.5 text-sm font-medium transition-colors',
+              billsScope === 'personal'
+                ? 'bg-white text-stone-900 shadow-sm'
+                : 'text-stone-500 hover:text-stone-800',
+            )}
+          >
+            <ReceiptText className="size-3.5" />
+            Personal
+            {personalBills.length > 0 && (
+              <span className="rounded-full bg-stone-200/80 px-1.5 text-[0.65rem] font-semibold text-stone-600">
+                {personalBills.length}
+              </span>
+            )}
+          </button>
+          <button
+            type="button"
+            onClick={() => setBillsScope('groups')}
+            className={cn(
+              'flex items-center justify-center gap-2 rounded-xl px-3 py-2.5 text-sm font-medium transition-colors',
+              billsScope === 'groups'
+                ? 'bg-white text-stone-900 shadow-sm'
+                : 'text-stone-500 hover:text-stone-800',
+            )}
+          >
+            <Users className="size-3.5" />
+            Groups
+            {(sharedGroups?.length ?? 0) > 0 && (
+              <span className="rounded-full bg-stone-200/80 px-1.5 text-[0.65rem] font-semibold text-stone-600">
+                {sharedGroups?.length}
+              </span>
+            )}
+          </button>
+        </div>
+
+        {billsScope === 'personal' && (
+          <>
+            {personalBills.length === 0 ? (
+              <p className="mt-3 text-sm text-stone-500">
+                No personal bills yet where you both appear on a split. (Group trips are under{' '}
+                <strong>Groups</strong>.)
+              </p>
+            ) : (
+              <ul className="mt-3 space-y-2">
+                {personalBills.map((bill) => (
+                  <li key={bill.id}>
+                    <Link
+                      to={`/app/bills/${bill.id}`}
+                      className="flex items-center justify-between rounded-xl border border-stone-200 bg-stone-100/60 px-4 py-3 transition-colors hover:bg-stone-100"
+                    >
+                      <div className="min-w-0">
+                        <p className="font-medium text-stone-800">{bill.title}</p>
+                        <p className="text-xs text-stone-500">
+                          Personal · {bill.creatorName}
+                        </p>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm font-semibold text-stone-800">
+                          {formatCurrency(bill.total_amount, bill.currency)}
+                        </span>
+                        <ChevronRight className="size-4 text-stone-400" />
+                      </div>
+                    </Link>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </>
+        )}
+
+        {billsScope === 'groups' && (
+          <>
+            {!sharedGroups || sharedGroups.length === 0 ? (
+              <p className="mt-3 text-sm text-stone-500">
+                You’re not in any group with this person yet.
+              </p>
+            ) : (
+              <ul className="mt-3 space-y-2">
+                {sharedGroups.map((g) => {
+                  const settled = Math.abs(g.theirNet) < 0.005
+                  return (
+                    <li key={g.groupId}>
+                      <Link
+                        to={`/app/groups/${g.groupId}`}
+                        className="flex items-center justify-between gap-3 rounded-xl border border-stone-200 bg-stone-100/60 px-4 py-3 transition-colors hover:bg-stone-100"
+                      >
+                        <div className="min-w-0 flex-1">
+                          <p className="font-medium text-stone-800">{g.groupName}</p>
+                          <p className="mt-0.5 text-xs text-stone-500">
+                            {settled ? (
+                              <span className="text-stone-400">Even in this group</span>
+                            ) : g.theirNet > 0 ? (
+                              <span className="font-medium text-emerald-700">
+                                Receive {formatCurrency(g.theirNet, g.currency)} in this group
+                              </span>
+                            ) : (
+                              <span className="font-medium text-amber-700">
+                                Pay {formatCurrency(Math.abs(g.theirNet), g.currency)} in this group
+                              </span>
+                            )}
+                          </p>
+                        </div>
+                        <div className="flex shrink-0 items-center gap-2">
+                          {!settled && (
+                            <span
+                              className={cn(
+                                'rounded-full px-2 py-0.5 text-[0.65rem] font-semibold uppercase tracking-wide',
+                                g.theirNet > 0
+                                  ? 'bg-emerald-100 text-emerald-800'
+                                  : 'bg-amber-100 text-amber-800',
+                              )}
+                              title={
+                                g.theirNet > 0
+                                  ? 'On net, the group should pay them this much'
+                                  : 'On net, they should pay into the group this much'
+                              }
+                            >
+                              {g.theirNet > 0 ? 'Receive' : 'Pay'}
+                            </span>
+                          )}
+                          <ChevronRight className="size-4 text-stone-400" />
+                        </div>
+                      </Link>
+                    </li>
+                  )
+                })}
+              </ul>
+            )}
+            <p className="mt-3 text-xs text-stone-400">
+              Their net in that group from bills and settlements—not only your balance with them.
+            </p>
+          </>
         )}
       </div>
 
@@ -499,28 +619,23 @@ export function PersonDetailPage() {
         )}
       </div>
 
-      {record && (
+      {record && settlementParties && (
         <RecordSettlementDialog
           open
           onOpenChange={(o) => {
             if (!o) setRecord(null)
           }}
+          title="Add payment"
+          confirmLabel="Add payment"
           groupId={null}
           currency={record.currency}
-          fromUserId={record.direction === 'you_pay' ? userId : personId}
-          toUserId={record.direction === 'you_pay' ? personId : userId}
+          fromUserId={userId}
+          toUserId={personId}
           defaultAmount={0}
           amountEditable
-          fromName={
-            record.direction === 'you_pay'
-              ? (meProfile?.display_name ?? 'You')
-              : (display?.displayName ?? profile.display_name)
-          }
-          toName={
-            record.direction === 'you_pay'
-              ? (display?.displayName ?? profile.display_name)
-              : (meProfile?.display_name ?? 'You')
-          }
+          fromName={meProfile?.display_name ?? 'You'}
+          toName={display?.displayName ?? profile.display_name}
+          partyPicker={settlementParties}
           markedBy={userId}
           onRecorded={() => {
             setRecord(null)
@@ -558,7 +673,7 @@ export function PersonDetailPage() {
           }}
           linkByIdError={linkByIdError}
           linkByIdPending={linkByIdPending}
-          onLinkByProfileId={() => void handleLinkByProfileId()}
+          onLinkByIdOrEmail={() => void handleLinkByIdOrEmail()}
         />
       )}
 

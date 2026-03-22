@@ -20,6 +20,7 @@ import {
   redistributeWithPinned,
   type PinnedSplits,
 } from '@/lib/bill-split-form'
+import { collectRelatedProfileIds } from '@/lib/people'
 import { cn, formatCurrency } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -113,13 +114,34 @@ export function AddBillPage() {
     return withProfiles
   }, [groupId, userId])
 
+  const personalSplitMembers = useLiveQuery(async () => {
+    if (!userId) return []
+    const ids = await collectRelatedProfileIds(userId)
+    ids.add(userId)
+    const out: { userId: string; displayName: string; isCurrentUser: boolean }[] = []
+    for (const id of ids) {
+      const p = await db.profiles.get(id)
+      if (!p || p.is_deleted) continue
+      out.push({
+        userId: id,
+        displayName: p.display_name,
+        isCurrentUser: id === userId,
+      })
+    }
+    out.sort((a, b) => {
+      if (a.isCurrentUser !== b.isCurrentUser) return a.isCurrentUser ? -1 : 1
+      return a.displayName.localeCompare(b.displayName)
+    })
+    return out
+  }, [userId])
+
   const itemizedTotal = items.reduce((sum, item) => {
     const val = parseFloat(item.amount)
     return sum + (isNaN(val) ? 0 : val)
   }, 0)
 
   const simpleAmountNum = parseFloat(simpleAmount) || 0
-  const members = groupMembers ?? []
+  const members = groupId ? (groupMembers ?? []) : (personalSplitMembers ?? [])
   const isEdit = Boolean(editBillId)
 
   const simpleSplitsOk =
@@ -662,7 +684,7 @@ export function AddBillPage() {
                   />
                 </div>
 
-                {groupId && members.length > 0 && (
+                {members.length > 0 && (
                   <>
                     <div className="flex flex-col gap-2">
                       <label className="text-sm font-medium">Split type</label>
@@ -748,9 +770,9 @@ export function AddBillPage() {
                   </>
                 )}
 
-                {!groupId && (
+                {!groupId && members.length <= 1 && (
                   <p className="text-xs text-stone-400">
-                    Select a group above to split this bill among members.
+                    Add people under People (or join a group) to split personal bills with others.
                   </p>
                 )}
               </div>
@@ -854,7 +876,7 @@ export function AddBillPage() {
                       )}
                     </div>
 
-                    {groupId && members.length > 0 && (
+                    {members.length > 0 && (
                       <div className="mt-3 border-t border-stone-200 pt-3">
                         <div className="flex items-center justify-between">
                           <div className="flex items-center gap-1.5 text-xs font-medium text-stone-500">

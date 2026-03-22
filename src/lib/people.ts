@@ -1,7 +1,44 @@
 import { db } from '@/db/db'
 import type { Bill } from '@/types'
 import type { SettlementHistoryItem } from '@/lib/settlement'
+import { computeGroupBalances } from '@/lib/settlement'
 import { formatCurrency } from '@/lib/utils'
+
+const LINK_UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+
+/**
+ * Resolve a remote profile id for “link local contact → account”.
+ * Accepts Kwenta profile UUID or the sign-in email (case-insensitive). Email must exist on this device.
+ */
+export async function findRemoteProfileIdForLinking(input: string): Promise<string | null> {
+  const raw = input.trim()
+  if (!raw) return null
+
+  if (LINK_UUID_RE.test(raw)) {
+    const p = await db.profiles.get(raw)
+    if (!p || p.is_deleted || !p.email?.trim()) return null
+    return p.id
+  }
+
+  const normalized = raw.toLowerCase()
+  if (!normalized.includes('@')) return null
+
+  const matches = await db.profiles
+    .filter(
+      (p) =>
+        !p.is_deleted &&
+        (p.email?.trim().toLowerCase() ?? '') === normalized &&
+        Boolean(p.email?.trim()),
+    )
+    .toArray()
+
+  if (matches.length === 0) return null
+  if (matches.length === 1) return matches[0].id
+
+  const nonLocal = matches.find((p) => !p.is_local)
+  return (nonLocal ?? matches[0]).id
+}
 
 export interface ProfileDisplay {
   displayName: string
@@ -27,31 +64,34 @@ export async function resolveProfileDisplay(profileId: string): Promise<ProfileD
   }
 }
 
-/** Net balance per currency: positive = other owes you, negative = you owe other. Bills count only when payer is you or them. */
+/** Net balance per currency: positive = you should receive from them, negative = you should pay them. Bills count only when payer is you or them. */
 export async function computePairwiseNet(
   meId: string,
   otherId: string,
 ): Promise<Map<string, number>> {
+  const meIds = await expandProfileIdsForSplitMatching(meId)
+  const otherIds = await expandProfileIdsForSplitMatching(otherId)
+
   const byCurrency = new Map<string, number>()
 
   const bills = await db.bills.filter((b) => !b.is_deleted).toArray()
 
   for (const bill of bills) {
-    if (bill.created_by !== meId && bill.created_by !== otherId) continue
+    if (!meIds.has(bill.created_by) && !otherIds.has(bill.created_by)) continue
 
     const items = await db.bill_items.where('bill_id').equals(bill.id).toArray()
     for (const item of items) {
       if (item.is_deleted) continue
       const splits = await db.item_splits.where('item_id').equals(item.id).toArray()
       const active = splits.filter((s) => !s.is_deleted)
-      const mySplit = active.find((s) => s.user_id === meId)
-      const otherSplit = active.find((s) => s.user_id === otherId)
+      const mySplit = active.find((s) => meIds.has(s.user_id))
+      const otherSplit = active.find((s) => otherIds.has(s.user_id))
       if (!mySplit || !otherSplit) continue
 
       const cur = bill.currency
       const prev = byCurrency.get(cur) ?? 0
 
-      if (bill.created_by === meId) {
+      if (meIds.has(bill.created_by)) {
         byCurrency.set(cur, prev + otherSplit.computed_amount)
       } else {
         byCurrency.set(cur, prev - mySplit.computed_amount)
@@ -61,15 +101,17 @@ export async function computePairwiseNet(
 
   const settlements = await db.settlements.filter((s) => !s.is_deleted && s.is_settled).toArray()
   for (const s of settlements) {
-    const meInvolved = s.from_user_id === meId || s.to_user_id === meId
-    const otherInvolved = s.from_user_id === otherId || s.to_user_id === otherId
-    if (!meInvolved || !otherInvolved) continue
+    const fromMe = meIds.has(s.from_user_id)
+    const toMe = meIds.has(s.to_user_id)
+    const fromOther = otherIds.has(s.from_user_id)
+    const toOther = otherIds.has(s.to_user_id)
+    if (!((fromMe && toOther) || (fromOther && toMe))) continue
 
     const cur = s.currency
     const prev = byCurrency.get(cur) ?? 0
-    if (s.from_user_id === otherId && s.to_user_id === meId) {
+    if (fromOther && toMe) {
       byCurrency.set(cur, prev + s.amount)
-    } else if (s.from_user_id === meId && s.to_user_id === otherId) {
+    } else if (fromMe && toOther) {
       byCurrency.set(cur, prev - s.amount)
     }
   }
@@ -80,7 +122,7 @@ export async function computePairwiseNet(
 export function formatPairwiseSummary(byCurrency: Map<string, number>): {
   lines: string[]
   primaryLabel: string
-  tone: 'balanced' | 'collect' | 'pay'
+  tone: 'balanced' | 'receive' | 'pay'
 } {
   const entries = [...byCurrency.entries()].filter(([, v]) => Math.abs(v) > 0.005)
   if (entries.length === 0) {
@@ -88,16 +130,16 @@ export function formatPairwiseSummary(byCurrency: Map<string, number>): {
   }
 
   const lines = entries.map(([cur, net]) => {
-    if (net > 0) return `They owe you ${formatCurrency(net, cur)}`
-    return `You owe them ${formatCurrency(Math.abs(net), cur)}`
+    if (net > 0) return `Receive ${formatCurrency(net, cur)} from them`
+    return `Pay ${formatCurrency(Math.abs(net), cur)} to them`
   })
 
   const [cur0, net0] = entries[0]
-  const tone = net0 > 0 ? 'collect' : 'pay'
+  const tone = net0 > 0 ? 'receive' : 'pay'
   const primaryLabel =
     net0 > 0
-      ? `They owe you ${formatCurrency(net0, cur0)}`
-      : `You owe them ${formatCurrency(Math.abs(net0), cur0)}`
+      ? `Receive ${formatCurrency(net0, cur0)} from them`
+      : `Pay ${formatCurrency(Math.abs(net0), cur0)} to them`
 
   return { lines, primaryLabel, tone }
 }
@@ -156,12 +198,56 @@ export async function collectRelatedProfileIds(meId: string): Promise<Set<string
   return ids
 }
 
+/**
+ * IDs that refer to the same real person for matching `item_splits.user_id` / settlement parties.
+ * The local contact row stays in Dexie; linking adds `linked_profile_id` and sync may rewrite split
+ * rows to the remote id—queries need to accept either id without merging rows.
+ */
+export async function expandProfileIdsForSplitMatching(profileId: string): Promise<Set<string>> {
+  const ids = new Set<string>([profileId])
+  const p = await db.profiles.get(profileId)
+  if (!p || p.is_deleted) return ids
+  if (p.linked_profile_id) {
+    ids.add(p.linked_profile_id)
+    const sameRemote = await db.profiles
+      .where('linked_profile_id')
+      .equals(p.linked_profile_id)
+      .toArray()
+    for (const x of sameRemote) {
+      if (!x.is_deleted) ids.add(x.id)
+    }
+  }
+  const linkToThis = await db.profiles.where('linked_profile_id').equals(profileId).toArray()
+  for (const x of linkToThis) {
+    if (!x.is_deleted) ids.add(x.id)
+  }
+  return ids
+}
+
+function setsOverlapItemSplits(
+  uids: Set<string>,
+  meIds: Set<string>,
+  otherIds: Set<string>,
+): boolean {
+  let meHit = false
+  let otherHit = false
+  for (const u of uids) {
+    if (meIds.has(u)) meHit = true
+    if (otherIds.has(u)) otherHit = true
+    if (meHit && otherHit) return true
+  }
+  return false
+}
+
 export interface BillWithContext extends Bill {
   groupName: string | null
   creatorName: string
 }
 
 export async function listBillsInvolvingPair(meId: string, otherId: string): Promise<BillWithContext[]> {
+  const meIds = await expandProfileIdsForSplitMatching(meId)
+  const otherIds = await expandProfileIdsForSplitMatching(otherId)
+
   const bills = await db.bills.filter((b) => !b.is_deleted).toArray()
   const out: BillWithContext[] = []
 
@@ -173,7 +259,7 @@ export async function listBillsInvolvingPair(meId: string, otherId: string): Pro
       const splits = await db.item_splits.where('item_id').equals(item.id).toArray()
       const active = splits.filter((s) => !s.is_deleted)
       const uids = new Set(active.map((s) => s.user_id))
-      if (uids.has(meId) && uids.has(otherId)) {
+      if (setsOverlapItemSplits(uids, meIds, otherIds)) {
         both = true
         break
       }
@@ -232,7 +318,10 @@ export async function getMemberSuggestions(
     if (p.id === currentUserId) continue
     const name = p.display_name.trim()
     const lower = name.toLowerCase()
-    if (!lower.includes(q)) continue
+    const emailLower = (p.email ?? '').trim().toLowerCase()
+    const matchesName = lower.includes(q)
+    const matchesEmail = emailLower.length > 0 && emailLower.includes(q)
+    if (!matchesName && !matchesEmail) continue
 
     const isMine = p.owner_id === currentUserId
     const inMyGroups = onlineInGroups.has(p.id)
@@ -254,12 +343,17 @@ export async function listPairwiseSettlementsBetween(
   meId: string,
   otherId: string,
 ): Promise<SettlementHistoryItem[]> {
+  const meIds = await expandProfileIdsForSplitMatching(meId)
+  const otherIds = await expandProfileIdsForSplitMatching(otherId)
+
   const all = await db.settlements.filter((s) => !s.is_deleted && s.is_settled).toArray()
-  const pair = all.filter(
-    (s) =>
-      (s.from_user_id === meId && s.to_user_id === otherId) ||
-      (s.from_user_id === otherId && s.to_user_id === meId),
-  )
+  const pair = all.filter((s) => {
+    const fromMe = meIds.has(s.from_user_id)
+    const toMe = meIds.has(s.to_user_id)
+    const fromOther = otherIds.has(s.from_user_id)
+    const toOther = otherIds.has(s.to_user_id)
+    return (fromMe && toOther) || (fromOther && toMe)
+  })
   const items: SettlementHistoryItem[] = []
   for (const s of pair) {
     let groupName: string | undefined
@@ -289,4 +383,53 @@ export async function listPairwiseSettlementsBetween(
   }
   items.sort((a, b) => b.createdAt.localeCompare(a.createdAt))
   return items
+}
+
+export interface SharedGroupWithPersonRow {
+  groupId: string
+  groupName: string
+  currency: string
+  /** Their net in this group: + = should receive on net, − = should pay in on net. */
+  theirNet: number
+}
+
+/** Groups you both belong to, with their balance in each (from group bills + settlements). */
+export async function listSharedGroupsWithBalance(
+  meId: string,
+  personId: string,
+): Promise<SharedGroupWithPersonRow[]> {
+  const otherIds = await expandProfileIdsForSplitMatching(personId)
+  const myMemberships = await db.group_members.where('user_id').equals(meId).toArray()
+  const myGroupIds = new Set(
+    myMemberships.filter((m) => !m.is_deleted).map((m) => m.group_id),
+  )
+
+  const out: SharedGroupWithPersonRow[] = []
+
+  for (const gid of myGroupIds) {
+    const members = await db.group_members.where('group_id').equals(gid).toArray()
+    const active = members.filter((m) => !m.is_deleted)
+    if (!active.some((m) => otherIds.has(m.user_id))) continue
+
+    const summary = await computeGroupBalances(gid, meId)
+    if (!summary) continue
+
+    let theirNet = 0
+    for (const b of summary.balances) {
+      if (otherIds.has(b.userId)) {
+        theirNet = b.amount
+        break
+      }
+    }
+
+    out.push({
+      groupId: gid,
+      groupName: summary.groupName,
+      currency: summary.currency,
+      theirNet,
+    })
+  }
+
+  out.sort((a, b) => a.groupName.localeCompare(b.groupName))
+  return out
 }

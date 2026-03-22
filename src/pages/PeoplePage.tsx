@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { Link } from 'react-router-dom'
 import { BookUser, ChevronRight, Loader2, Plus, UserPlus } from 'lucide-react'
 import { useLiveQuery } from 'dexie-react-hooks'
 import {
@@ -15,7 +15,6 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 
 export function PeoplePage() {
-  const navigate = useNavigate()
   const { userId } = useCurrentUser()
   const [showAdd, setShowAdd] = useState(false)
   const [newName, setNewName] = useState('')
@@ -31,7 +30,7 @@ export function PeoplePage() {
       displayName: string
       subtitle?: string
       primaryLabel: string
-      tone: 'balanced' | 'collect' | 'pay'
+      tone: 'balanced' | 'receive' | 'pay'
       lines: string[]
     }[] = []
     for (const id of ids) {
@@ -70,7 +69,6 @@ export function PeoplePage() {
       }
       setNewName('')
       setShowAdd(false)
-      navigate(`/app/people/${result.id}`)
     } finally {
       setAdding(false)
     }
@@ -177,7 +175,7 @@ export function PeoplePage() {
                   className={cn(
                     'mt-0.5 text-sm font-medium',
                     r.tone === 'balanced' && 'text-stone-500',
-                    r.tone === 'collect' && 'text-emerald-600',
+                    r.tone === 'receive' && 'text-emerald-600',
                     r.tone === 'pay' && 'text-amber-600',
                   )}
                 >

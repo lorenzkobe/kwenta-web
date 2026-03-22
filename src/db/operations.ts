@@ -1,4 +1,5 @@
 import { db } from './db'
+import { triggerSync } from '@/sync/sync-manager'
 import type {
   Bill,
   BillItem,
@@ -9,6 +10,10 @@ import type {
 } from '@/types'
 import { generateId, getDeviceId, now } from '@/lib/utils'
 import { computeSplits, type SplitInput } from '@/lib/splits'
+
+function notifySyncAfterMutation() {
+  triggerSync()
+}
 
 function syncFields(overrides?: Partial<{ id: string }>) {
   const timestamp = now()
@@ -94,6 +99,7 @@ export async function createBill(input: CreateBillInput): Promise<string> {
     })
   })
 
+  notifySyncAfterMutation()
   return billId
 }
 
@@ -173,6 +179,7 @@ export async function updateBill(
       description: `Updated bill "${patch.title}"`,
     })
   })
+  notifySyncAfterMutation()
 }
 
 export async function deleteBill(billId: string, userId: string) {
@@ -202,6 +209,7 @@ export async function deleteBill(billId: string, userId: string) {
       description: `Deleted bill "${bill.title}"`,
     })
   })
+  notifySyncAfterMutation()
 }
 
 // ── Groups ───────────────────────────────────────────
@@ -244,6 +252,7 @@ export async function createGroup(
     })
   })
 
+  notifySyncAfterMutation()
   return groupId
 }
 
@@ -277,6 +286,7 @@ export async function updateGroup(
       description: `Updated group "${nextName}"`,
     })
   })
+  notifySyncAfterMutation()
 }
 
 export async function addGroupMember(
@@ -295,6 +305,7 @@ export async function addGroupMember(
   for (const m of existingMembership) {
     const p = await db.profiles.get(m.user_id)
     if (p && !p.is_deleted && p.display_name.trim().toLowerCase() === normalized) {
+      notifySyncAfterMutation()
       return m.user_id
     }
   }
@@ -312,6 +323,7 @@ export async function addGroupMember(
   if (userId) {
     const already = await db.group_members.where('[group_id+user_id]').equals([groupId, userId]).first()
     if (already && !already.is_deleted) {
+      notifySyncAfterMutation()
       return userId
     }
   }
@@ -353,6 +365,7 @@ export async function addGroupMember(
     })
   })
 
+  notifySyncAfterMutation()
   return userId!
 }
 
@@ -386,6 +399,7 @@ export async function createLocalProfile(
     linked_profile_id: null,
     owner_id: ownerUserId,
   })
+  notifySyncAfterMutation()
   return { outcome: 'created', id: userId }
 }
 
@@ -396,7 +410,10 @@ export async function addExistingGroupMember(
   addedBy: string,
 ): Promise<void> {
   const existing = await db.group_members.where('[group_id+user_id]').equals([groupId, memberUserId]).first()
-  if (existing && !existing.is_deleted) return
+  if (existing && !existing.is_deleted) {
+    notifySyncAfterMutation()
+    return
+  }
 
   const p = await db.profiles.get(memberUserId)
   if (!p || p.is_deleted) return
@@ -421,6 +438,7 @@ export async function addExistingGroupMember(
       description: `Added "${p.display_name}" to group`,
     })
   })
+  notifySyncAfterMutation()
 }
 
 /** Point a local contact at a synced account (for display & future migration). */
@@ -442,6 +460,7 @@ export async function linkProfileToRemote(
     updated_at: timestamp,
     synced_at: null,
   })
+  notifySyncAfterMutation()
 }
 
 export async function removeGroupMember(
@@ -510,6 +529,7 @@ export async function removeGroupMember(
       })
     },
   )
+  notifySyncAfterMutation()
 }
 
 /**
@@ -607,6 +627,7 @@ export async function deletePerson(personId: string, actorUserId: string): Promi
     entity_id: personId,
     description: `Removed contact "${displayName}"`,
   })
+  notifySyncAfterMutation()
 }
 
 export async function deleteGroup(groupId: string, userId: string) {
@@ -632,6 +653,7 @@ export async function deleteGroup(groupId: string, userId: string) {
       description: `Deleted group "${group.name}"`,
     })
   })
+  notifySyncAfterMutation()
 }
 
 // ── Settlements ─────────────────────────────────────
@@ -675,6 +697,7 @@ export async function createSettlement(
     })
   })
 
+  notifySyncAfterMutation()
   return settlementId
 }
 
@@ -748,6 +771,7 @@ export async function deleteSettlement(settlementId: string, editorUserId: strin
       description: `Removed payment ${fromProfile?.display_name ?? '?'} → ${toProfile?.display_name ?? '?'}`,
     })
   })
+  notifySyncAfterMutation()
 }
 
 // ── Queries ──────────────────────────────────────────

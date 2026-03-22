@@ -1,6 +1,7 @@
 import {
   BellRing,
   BookUser,
+  CloudUpload,
   Home,
   Layers3,
   ReceiptText,
@@ -10,7 +11,10 @@ import {
   WifiOff,
   Wifi,
 } from 'lucide-react'
+import { useLiveQuery } from 'dexie-react-hooks'
 import { Link, NavLink } from 'react-router-dom'
+import { useCurrentUser } from '@/hooks/useCurrentUser'
+import { hasUnsyncedLocalDataForUser } from '@/sync/sync-service'
 import { useAppStore } from '@/store/app-store'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
@@ -27,6 +31,11 @@ const navItems = [
 export function AppHeader() {
   const isOnline = useAppStore((s) => s.isOnline)
   const syncStatus = useAppStore((s) => s.syncStatus)
+  const { userId } = useCurrentUser()
+  const waitingToSync = useLiveQuery(
+    async () => (userId ? hasUnsyncedLocalDataForUser(userId) : false),
+    [userId],
+  )
 
   return (
     <header className="sticky top-0 z-30 border-b border-stone-200/80 bg-white/92 backdrop-blur">
@@ -63,15 +72,30 @@ export function AppHeader() {
 
         <div className="flex items-center gap-2">
           <Badge variant="ghost" className="px-3 py-2 text-xs font-medium">
-            {isOnline ? (
-              <>
-                <Wifi className="mr-1 size-3" />
-                {syncStatus === 'syncing' ? 'Syncing…' : 'Online'}
-              </>
-            ) : (
+            {!isOnline ? (
               <>
                 <WifiOff className="mr-1 size-3" />
                 Offline
+              </>
+            ) : syncStatus === 'syncing' ? (
+              <>
+                <Wifi className="mr-1 size-3" />
+                Syncing…
+              </>
+            ) : syncStatus === 'error' ? (
+              <>
+                <Wifi className="mr-1 size-3 text-amber-600" />
+                Sync issue
+              </>
+            ) : waitingToSync === true ? (
+              <>
+                <CloudUpload className="mr-1 size-3 text-amber-700" />
+                Waiting to sync
+              </>
+            ) : (
+              <>
+                <Wifi className="mr-1 size-3" />
+                Online
               </>
             )}
           </Badge>

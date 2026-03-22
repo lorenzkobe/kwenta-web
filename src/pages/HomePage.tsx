@@ -124,7 +124,7 @@ export function HomePage() {
           {[
             { title: 'Add bill', detail: 'Restaurant, utilities, or debt', icon: ReceiptText, to: '/app/bills/new' },
             { title: 'New group', detail: 'Invite housemates or friends', icon: Users, to: '/app/groups' },
-            { title: 'Balances', detail: 'See who should collect or pay', icon: CreditCard, to: '/app/balances' },
+            { title: 'Balances', detail: 'See who should receive or pay', icon: CreditCard, to: '/app/balances' },
           ].map((action) => (
             <Link
               key={action.title}

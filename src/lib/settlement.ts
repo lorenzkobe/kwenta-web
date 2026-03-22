@@ -3,9 +3,11 @@ import { db } from '@/db/db'
 export interface BalanceEntry {
   userId: string
   displayName: string
+  /** Net in group: positive = should receive, negative = should pay */
   amount: number
 }
 
+/** One suggested transfer: payer → receiver for `amount`. */
 export interface SettlementSuggestion {
   fromUserId: string
   fromName: string
@@ -20,15 +22,17 @@ export interface GroupBalanceSummary {
   currency: string
   balances: BalanceEntry[]
   suggestions: SettlementSuggestion[]
-  totalOwed: number
-  totalOwing: number
+  /** Positive net for you in this group: amount you should receive */
+  totalToReceive: number
+  /** Magnitude of negative net for you in this group: amount you should pay */
+  totalToPay: number
 }
 
 /**
  * Compute net balances for a group.
  * The bill creator paid the total; each split assigns a share to a user.
- * Net balance = (total you paid) - (total you owe from splits).
- * Positive = others owe you. Negative = you owe others.
+ * Net balance = (total you paid) - (your share from splits).
+ * Positive = you should receive on net. Negative = you should pay on net.
  */
 export async function computeGroupBalances(
   groupId: string,
@@ -83,8 +87,8 @@ export async function computeGroupBalances(
   }
 
   const balances: BalanceEntry[] = []
-  let totalOwed = 0
-  let totalOwing = 0
+  let totalToReceive = 0
+  let totalToPay = 0
 
   for (const [userId, amount] of netBalance) {
     const rounded = Math.round(amount * 100) / 100
@@ -94,8 +98,8 @@ export async function computeGroupBalances(
       amount: rounded,
     })
     if (userId === currentUserId) {
-      if (rounded > 0) totalOwed = rounded
-      if (rounded < 0) totalOwing = Math.abs(rounded)
+      if (rounded > 0) totalToReceive = rounded
+      if (rounded < 0) totalToPay = Math.abs(rounded)
     }
   }
 
@@ -107,57 +111,57 @@ export async function computeGroupBalances(
     currency: group.currency,
     balances,
     suggestions,
-    totalOwed,
-    totalOwing,
+    totalToReceive,
+    totalToPay,
   }
 }
 
 /**
- * Greedy settlement optimization: match largest creditor with largest debtor
- * to minimize number of transactions.
+ * Greedy settlement optimization: match who should pay with who should receive
+ * to minimize number of suggested transfers.
  */
 function optimizeSettlements(
   balances: BalanceEntry[],
   nameMap: Map<string, string>,
 ): SettlementSuggestion[] {
-  const creditors: { userId: string; amount: number }[] = []
-  const debtors: { userId: string; amount: number }[] = []
+  const receiveSide: { userId: string; amount: number }[] = []
+  const paySide: { userId: string; amount: number }[] = []
 
   for (const b of balances) {
     if (b.amount > 0.01) {
-      creditors.push({ userId: b.userId, amount: b.amount })
+      receiveSide.push({ userId: b.userId, amount: b.amount })
     } else if (b.amount < -0.01) {
-      debtors.push({ userId: b.userId, amount: Math.abs(b.amount) })
+      paySide.push({ userId: b.userId, amount: Math.abs(b.amount) })
     }
   }
 
-  creditors.sort((a, b) => b.amount - a.amount)
-  debtors.sort((a, b) => b.amount - a.amount)
+  receiveSide.sort((a, b) => b.amount - a.amount)
+  paySide.sort((a, b) => b.amount - a.amount)
 
   const suggestions: SettlementSuggestion[] = []
-  let ci = 0
-  let di = 0
+  let ri = 0
+  let pi = 0
 
-  while (ci < creditors.length && di < debtors.length) {
-    const c = creditors[ci]
-    const d = debtors[di]
-    const amount = Math.round(Math.min(c.amount, d.amount) * 100) / 100
+  while (ri < receiveSide.length && pi < paySide.length) {
+    const receiver = receiveSide[ri]
+    const payer = paySide[pi]
+    const amount = Math.round(Math.min(receiver.amount, payer.amount) * 100) / 100
 
     if (amount > 0) {
       suggestions.push({
-        fromUserId: d.userId,
-        fromName: nameMap.get(d.userId) ?? 'Unknown',
-        toUserId: c.userId,
-        toName: nameMap.get(c.userId) ?? 'Unknown',
+        fromUserId: payer.userId,
+        fromName: nameMap.get(payer.userId) ?? 'Unknown',
+        toUserId: receiver.userId,
+        toName: nameMap.get(receiver.userId) ?? 'Unknown',
         amount,
       })
     }
 
-    c.amount -= amount
-    d.amount -= amount
+    receiver.amount -= amount
+    payer.amount -= amount
 
-    if (c.amount < 0.01) ci++
-    if (d.amount < 0.01) di++
+    if (receiver.amount < 0.01) ri++
+    if (payer.amount < 0.01) pi++
   }
 
   return suggestions
