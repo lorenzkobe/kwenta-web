@@ -96,10 +96,57 @@ export function useAuth() {
   const updateDisplayName = useCallback(async (displayName: string) => {
     const userId = useAppStore.getState().currentUserId
     if (!userId) return
+
+    const trimmed = displayName.trim()
+    const timestamp = now()
+
+    const existing = await db.profiles.get(userId)
+    if (!existing) return
+
     await db.profiles.update(userId, {
-      display_name: displayName,
-      updated_at: now(),
+      display_name: trimmed,
+      updated_at: timestamp,
       synced_at: null,
+    })
+
+    const {
+      data: { session },
+    } = await supabase.auth.getSession()
+    if (!session?.user) {
+      triggerSync()
+      return
+    }
+
+    const row = await db.profiles.get(userId)
+    if (!row) return
+
+    const { error } = await supabase.from('profiles').upsert(
+      {
+        id: row.id,
+        email: row.email,
+        display_name: row.display_name,
+        avatar_url: row.avatar_url,
+        created_at: row.created_at,
+        updated_at: timestamp,
+        synced_at: timestamp,
+        is_deleted: row.is_deleted,
+        device_id: row.device_id,
+        is_local: row.is_local,
+        linked_profile_id: row.linked_profile_id,
+        owner_id: row.owner_id,
+      },
+      { onConflict: 'id' },
+    )
+
+    if (error) {
+      console.warn('[profile] cloud display_name update failed', error)
+      triggerSync()
+      return
+    }
+
+    await db.profiles.update(userId, { synced_at: timestamp })
+    void supabase.auth.updateUser({ data: { display_name: trimmed } }).catch(() => {
+      /* optional metadata; ignore */
     })
     triggerSync()
   }, [])
