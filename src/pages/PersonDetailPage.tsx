@@ -687,7 +687,7 @@ export function PersonDetailPage() {
         open={deleteConfirmOpen}
         onOpenChange={setDeleteConfirmOpen}
         title="Delete this person?"
-        description="All payments with them will be removed. They will be removed from every group and personal bill; equal splits will be redistributed among remaining people. This cannot be undone here."
+        description="All payments with them will be removed. They will be removed from every group. Personal bills that only involved you and them will be deleted. Personal bills that also include other people will stay: their share is removed and equal splits are redistributed among whoever remains. This cannot be undone here."
         confirmLabel="Delete"
         variant="danger"
         onConfirm={handleDeletePerson}

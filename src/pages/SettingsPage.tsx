@@ -13,6 +13,7 @@ import {
   Scale,
   Shield,
   User,
+  X,
 } from 'lucide-react'
 import { SettlementHistoryList } from '@/components/common/SettlementHistoryList'
 import { EditSettlementDialog } from '@/components/common/EditSettlementDialog'
@@ -46,7 +47,7 @@ export function SettingsPage() {
 
   const recentActivity = useLiveQuery(async () => {
     if (!userId) return []
-    const logs = await db.activity_log.orderBy('created_at').reverse().limit(8).toArray()
+    const logs = await db.activity_log.orderBy('created_at').reverse().limit(50).toArray()
     return logs.filter((l) => !l.is_deleted)
   }, [userId])
   const isOnline = useAppStore((s) => s.isOnline)
@@ -64,6 +65,7 @@ export function SettingsPage() {
   const [signOutOpen, setSignOutOpen] = useState(false)
   const [signOutHasUnsynced, setSignOutHasUnsynced] = useState<boolean | null>(null)
   const [signOutBusy, setSignOutBusy] = useState(false)
+  const [activityOpen, setActivityOpen] = useState(false)
 
   function startEditing() {
     setDisplayName(profile?.display_name ?? '')
@@ -235,20 +237,25 @@ export function SettingsPage() {
 
         {(recentActivity?.length ?? 0) > 0 && (
           <div className="rounded-3xl border border-stone-200 bg-white p-5 shadow-sm">
-            <div className="flex items-center gap-2">
-              <ArrowUpRight className="size-4 text-teal-800" aria-hidden />
-              <h2 className="text-lg font-semibold">Recent activity</h2>
-            </div>
-            <div className="mt-4 space-y-2">
-              {recentActivity!.map((log) => (
-                <div
-                  key={log.id}
-                  className="rounded-xl border border-stone-200 bg-stone-100/60 px-4 py-3"
-                >
-                  <p className="text-sm text-stone-600">{log.description}</p>
-                  <p className="mt-0.5 text-xs text-stone-400">{timeAgo(log.created_at)}</p>
+            <div className="flex items-start justify-between gap-3">
+              <div className="flex items-start gap-2">
+                <ArrowUpRight className="mt-0.5 size-4 shrink-0 text-teal-800" aria-hidden />
+                <div>
+                  <h2 className="text-lg font-semibold">Recent activity</h2>
+                  <p className="mt-1 text-sm text-stone-600">
+                    Bills, groups, and payments ({recentActivity!.length} recent)
+                  </p>
                 </div>
-              ))}
+              </div>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="shrink-0 rounded-xl"
+                onClick={() => setActivityOpen(true)}
+              >
+                View
+              </Button>
             </div>
           </div>
         )}
@@ -308,6 +315,51 @@ export function SettingsPage() {
           </div>
         </div>
       </div>
+
+      {activityOpen && (recentActivity?.length ?? 0) > 0 && (
+        <div className="fixed inset-0 z-70 flex items-end justify-center p-4 sm:items-center">
+          <div
+            className="fixed inset-0 bg-black/40 backdrop-blur-sm"
+            onClick={() => setActivityOpen(false)}
+            aria-hidden
+          />
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="activity-sheet-title"
+            className="relative flex max-h-[85dvh] w-full max-w-md flex-col rounded-3xl border border-stone-200 bg-white shadow-[0_20px_60px_rgba(28,25,23,0.18)] animate-[slideUp_0.25s_ease-out]"
+          >
+            <div className="flex shrink-0 items-center justify-between border-b border-stone-100 px-5 py-4">
+              <h2 id="activity-sheet-title" className="text-base font-semibold text-stone-900">
+                Recent activity
+              </h2>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-xs"
+                className="rounded-full"
+                onClick={() => setActivityOpen(false)}
+                aria-label="Close"
+              >
+                <X className="size-4" />
+              </Button>
+            </div>
+            <div className="max-h-[70dvh] overflow-y-auto overscroll-contain px-5 py-4">
+              <ul className="space-y-2">
+                {recentActivity!.map((log) => (
+                  <li
+                    key={log.id}
+                    className="rounded-xl border border-stone-200 bg-stone-100/60 px-4 py-3"
+                  >
+                    <p className="text-sm text-stone-600">{log.description}</p>
+                    <p className="mt-0.5 text-xs text-stone-400">{timeAgo(log.created_at)}</p>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          </div>
+        </div>
+      )}
 
       {signOutOpen && (
         <div className="fixed inset-0 z-70 flex items-end justify-center p-4 sm:items-center">

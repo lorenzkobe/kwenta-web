@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo } from 'react'
 import { ArrowRight, X } from 'lucide-react'
 import { createSettlement } from '@/db/operations'
-import { filterDecimalInput, stripLeadingZerosAmount } from '@/lib/amount-input'
+import { normalizeAmountInput, stripLeadingZerosAmount } from '@/lib/amount-input'
 import { formatCurrency } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -179,7 +179,7 @@ export function RecordSettlementDialog({
                   type="text"
                   inputMode="decimal"
                   value={amountStr}
-                  onChange={(e) => setAmountStr(filterDecimalInput(e.target.value))}
+                  onChange={(e) => setAmountStr(normalizeAmountInput(e.target.value))}
                   onBlur={() =>
                     setAmountStr((s) => {
                       const next = stripLeadingZerosAmount(s)

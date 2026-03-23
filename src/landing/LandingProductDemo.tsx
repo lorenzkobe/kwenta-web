@@ -8,7 +8,7 @@ import {
   UserPlus,
   Users,
 } from 'lucide-react'
-import { filterDecimalInput, stripLeadingZerosAmount } from '@/lib/amount-input'
+import { normalizeAmountInput, stripLeadingZerosAmount } from '@/lib/amount-input'
 import { cn, formatCurrency } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -599,7 +599,7 @@ export function LandingProductDemo() {
                           inputMode="decimal"
                           pattern="[0-9.]*"
                           value={newSimpleAmount}
-                          onChange={(e) => setNewSimpleAmount(filterDecimalInput(e.target.value))}
+                          onChange={(e) => setNewSimpleAmount(normalizeAmountInput(e.target.value))}
                           onBlur={() =>
                             setNewSimpleAmount((s) => {
                               const next = stripLeadingZerosAmount(s)
@@ -777,7 +777,7 @@ export function LandingProductDemo() {
                               inputMode="decimal"
                               pattern="[0-9.]*"
                               value={addItemAmount}
-                              onChange={(e) => setAddItemAmount(filterDecimalInput(e.target.value))}
+                              onChange={(e) => setAddItemAmount(normalizeAmountInput(e.target.value))}
                               onBlur={() =>
                                 setAddItemAmount((s) => {
                                   const next = stripLeadingZerosAmount(s)

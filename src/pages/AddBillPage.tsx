@@ -34,7 +34,7 @@ import {
 } from '@/lib/bill-split-form'
 import { BILL_BACK_QUERY, parseSafeAppPath, withBillBackQuery } from '@/lib/bill-navigation'
 import { collectRelatedProfileIds } from '@/lib/people'
-import { filterDecimalInput, stripLeadingZerosAmount } from '@/lib/amount-input'
+import { normalizeAmountInput, stripLeadingZerosAmount } from '@/lib/amount-input'
 import { cn, formatCurrency } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -780,7 +780,7 @@ export function AddBillPage() {
                     placeholder="0.00"
                     value={simpleAmount}
                     onChange={(e) => {
-                      const v = filterDecimalInput(e.target.value)
+                      const v = normalizeAmountInput(e.target.value)
                       setSimpleAmount(v)
                       const amt = parseFloat(v) || 0
                       const ids = selectedIdsRef.current
@@ -1016,7 +1016,7 @@ export function AddBillPage() {
                           className="rounded-lg sm:w-32"
                           value={item.amount}
                           onChange={(e) => {
-                            const v = filterDecimalInput(e.target.value)
+                            const v = normalizeAmountInput(e.target.value)
                             const amt = parseFloat(v) || 0
                             const key = item.key
                             setItems((prev) =>

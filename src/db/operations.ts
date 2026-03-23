@@ -570,17 +570,33 @@ export async function removeGroupMember(
 }
 
 /**
- * Remove a person from all personal (non-group) bill splits — same rules as removeGroupMember
- * (equal splits redistributed across remaining members).
+ * Remove a person from all personal (non-group) bills.
+ * - If the bill only involves you and them (no other participants), soft-delete the whole bill.
+ * - Otherwise remove their splits and redistribute equal splits among remaining people (same as group removal).
  */
 async function removePersonFromPersonalBills(memberUserId: string, removedBy: string): Promise<void> {
-  const timestamp = now()
-  const allBills = await db.bills
+  const actorId = removedBy
+  const allPersonal = await db.bills
     .filter((b) => !b.is_deleted && (b.group_id === null || b.group_id === undefined))
     .toArray()
 
+  for (const bill of allPersonal) {
+    const union = await participantUnionForBill(bill.id)
+    if (!union.has(memberUserId)) continue
+
+    const othersBesidesYouTwo = [...union].filter((id) => id !== actorId && id !== memberUserId)
+    if (othersBesidesYouTwo.length === 0) {
+      await deleteBill(bill.id, actorId)
+    }
+  }
+
+  const timestamp = now()
   await db.transaction('rw', [db.bill_items, db.item_splits, db.activity_log], async () => {
-    for (const bill of allBills) {
+    const bills = await db.bills
+      .filter((b) => !b.is_deleted && (b.group_id === null || b.group_id === undefined))
+      .toArray()
+
+    for (const bill of bills) {
       const items = await db.bill_items.where('bill_id').equals(bill.id).toArray()
       const activeItems = items.filter((i) => !i.is_deleted)
 
@@ -616,7 +632,8 @@ async function removePersonFromPersonalBills(memberUserId: string, removedBy: st
       action: 'deleted',
       entity_type: 'bill',
       entity_id: memberUserId,
-      description: 'Removed person from personal bill splits',
+      description:
+        'Removed contact from personal bills (bills only between you two were deleted; other bills had their splits updated)',
     })
   })
 }

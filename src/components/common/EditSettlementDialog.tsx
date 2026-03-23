@@ -9,7 +9,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@/components/ui/select'
 import { ConfirmDialog } from '@/components/common/ConfirmDialog'
-import { filterDecimalInput, stripLeadingZerosAmount } from '@/lib/amount-input'
+import { normalizeAmountInput, stripLeadingZerosAmount } from '@/lib/amount-input'
 
 export function EditSettlementDialog({
   item,
@@ -102,7 +102,7 @@ export function EditSettlementDialog({
 
   return (
     <>
-    <div className="fixed inset-0 z-[60] flex items-end justify-center p-4 sm:items-center">
+    <div className="fixed inset-0 z-60 flex items-end justify-center p-4 sm:items-center">
       <div className="fixed inset-0 bg-black/30 backdrop-blur-sm" onClick={onClose} aria-hidden />
       <div className="relative w-full max-w-sm animate-[slideUp_0.25s_ease-out] rounded-3xl border border-stone-200 bg-white shadow-[0_20px_60px_rgba(28,25,23,0.18)]">
         <div className="flex items-center justify-between border-b border-stone-100 px-5 py-4">
@@ -152,7 +152,7 @@ export function EditSettlementDialog({
               type="text"
               inputMode="decimal"
               value={amountStr}
-              onChange={(e) => setAmountStr(filterDecimalInput(e.target.value))}
+              onChange={(e) => setAmountStr(normalizeAmountInput(e.target.value))}
               onBlur={() =>
                 setAmountStr((s) => {
                   const next = stripLeadingZerosAmount(s)

@@ -25,3 +25,8 @@ export function stripLeadingZerosAmount(raw: string): string {
   if (frac !== undefined) return `${i}.${frac}`
   return i
 }
+
+/** Decimal-only input normalized for live typing (prevents values like "0250"). */
+export function normalizeAmountInput(raw: string): string {
+  return stripLeadingZerosAmount(filterDecimalInput(raw))
+}
