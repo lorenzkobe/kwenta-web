@@ -22,7 +22,7 @@ export function AppShell() {
   }
 
   return (
-    <div className="flex min-h-dvh flex-col bg-[linear-gradient(180deg,#faf8f5_0%,#f0ebe3_55%,#ebe4da_100%)] text-stone-800">
+    <div className="flex min-h-dvh w-full flex-col overflow-x-hidden overscroll-none bg-[linear-gradient(180deg,#faf8f5_0%,#f0ebe3_55%,#ebe4da_100%)] bg-[#ebe4da] text-stone-800">
       <OfflineBanner />
       <AppHeader />
 

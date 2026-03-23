@@ -121,10 +121,11 @@ export async function computePairwiseNet(
 
     const cur = s.currency
     const prev = byCurrency.get(cur) ?? 0
+    // from_user pays to_user: money reduces payer-side debt / payee-side receivable vs pairwise net
     if (fromOther && toMe) {
-      byCurrency.set(cur, prev + s.amount)
-    } else if (fromMe && toOther) {
       byCurrency.set(cur, prev - s.amount)
+    } else if (fromMe && toOther) {
+      byCurrency.set(cur, prev + s.amount)
     }
   }
 
@@ -171,8 +172,8 @@ export async function computePairwiseNetForBill(
     const fromOther = otherIds.has(s.from_user_id)
     const toOther = otherIds.has(s.to_user_id)
     if (!((fromMe && toOther) || (fromOther && toMe))) continue
-    if (fromOther && toMe) net += s.amount
-    else if (fromMe && toOther) net -= s.amount
+    if (fromOther && toMe) net -= s.amount
+    else if (fromMe && toOther) net += s.amount
   }
 
   return Math.round(net * 100) / 100
@@ -229,9 +230,9 @@ export async function computePairwiseNetPersonalOnly(
     const cur = s.currency
     const prev = byCurrency.get(cur) ?? 0
     if (fromOther && toMe) {
-      byCurrency.set(cur, prev + s.amount)
-    } else if (fromMe && toOther) {
       byCurrency.set(cur, prev - s.amount)
+    } else if (fromMe && toOther) {
+      byCurrency.set(cur, prev + s.amount)
     }
   }
 

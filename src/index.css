@@ -16,6 +16,9 @@
 
 html {
   background: linear-gradient(180deg, #faf8f5 0%, #f5f0e8 55%, #efe9df 100%);
+  background-color: #efe9df;
+  min-height: 100dvh;
+  min-height: -webkit-fill-available;
   scroll-behavior: smooth;
 }
 
@@ -28,12 +31,16 @@ html {
 body {
   margin: 0;
   min-width: 320px;
-  min-height: 100vh;
+  min-height: 100dvh;
+  min-height: -webkit-fill-available;
+  background: linear-gradient(180deg, #faf8f5 0%, #f5f0e8 55%, #efe9df 100%);
+  background-color: #efe9df;
 }
 
 body,
 #root {
-  min-height: 100vh;
+  min-height: 100dvh;
+  min-height: -webkit-fill-available;
 }
 
 /* Headings / logo: same sans stack as body (no secondary serif face). */
