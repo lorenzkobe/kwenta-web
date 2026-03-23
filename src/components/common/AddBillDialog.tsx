@@ -90,8 +90,10 @@ export function AddBillDialog({
   const simpleSplitValues = simpleSplitMeta.values
 
   const [items, setItems] = useState<ItemDraft[]>([newItem()])
+  const [removeItemKey, setRemoveItemKey] = useState<string | null>(null)
 
   const simpleAmountNum = parseFloat(simpleAmount) || 0
+  const pendingRemoveLine = removeItemKey ? items.find((i) => i.key === removeItemKey) : undefined
   const itemizedTotal = items.reduce((sum, i) => sum + (parseFloat(i.amount) || 0), 0)
 
   const simpleSplitsOk =
@@ -765,7 +767,7 @@ export function AddBillDialog({
                             size="icon-xs"
                             type="button"
                             className="mt-1.5 rounded-full text-red-600"
-                            onClick={() => removeItem(item.key)}
+                            onClick={() => setRemoveItemKey(item.key)}
                           >
                             <Trash2 className="size-3.5" />
                           </Button>

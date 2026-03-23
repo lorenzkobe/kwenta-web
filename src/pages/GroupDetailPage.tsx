@@ -129,7 +129,10 @@ function ManageMembersDialog({
     }
   }
 
-  async function handleRemove(memberUserId: string) {
+  async function executeRemoveMember() {
+    if (!removeMemberTarget) return
+    const memberUserId = removeMemberTarget.userId
+    setRemoveMemberTarget(null)
     setRemoving(memberUserId)
     try {
       await removeGroupMember(groupId, memberUserId, currentUserId)
