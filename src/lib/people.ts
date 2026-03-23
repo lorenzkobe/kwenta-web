@@ -72,7 +72,7 @@ export async function resolveProfileDisplay(profileId: string): Promise<ProfileD
   }
 }
 
-/** Net balance per currency: positive = you should receive from them, negative = you should pay them. Same bill inclusion as `listBillsInvolvingPair`; per line only when both have splits; payer must be you or them for that line to affect pairwise (third-party payer lines do not imply direct debt). */
+/** Net balance per currency: positive = you should receive from them, negative = you should pay them. Same bill inclusion as `listBillsInvolvingPair`. Per line: if you paid (`created_by`) you are owed each other person’s share even when you are not on that line’s split; if they paid, only your split row counts. */
 export async function computePairwiseNet(
   meId: string,
   otherId: string,
@@ -97,7 +97,7 @@ export async function computePairwiseNet(
       const active = splits.filter((s) => !s.is_deleted)
       const mySplit = active.find((s) => meIds.has(s.user_id))
       const otherSplit = active.find((s) => otherIds.has(s.user_id))
-      if (!mySplit || !otherSplit) continue
+      if (!otherSplit) continue
 
       const cur = bill.currency
       const prev = byCurrency.get(cur) ?? 0
@@ -105,6 +105,7 @@ export async function computePairwiseNet(
       if (meIds.has(bill.created_by)) {
         byCurrency.set(cur, prev + otherSplit.computed_amount)
       } else if (otherIds.has(bill.created_by)) {
+        if (!mySplit) continue
         byCurrency.set(cur, prev - mySplit.computed_amount)
       }
     }
@@ -152,11 +153,12 @@ export async function computePairwiseNetForBill(
     const active = splits.filter((s) => !s.is_deleted)
     const mySplit = active.find((s) => meIds.has(s.user_id))
     const otherSplit = active.find((s) => otherIds.has(s.user_id))
-    if (!mySplit || !otherSplit) continue
+    if (!otherSplit) continue
 
     if (meIds.has(bill.created_by)) {
       net += otherSplit.computed_amount
     } else if (otherIds.has(bill.created_by)) {
+      if (!mySplit) continue
       net -= mySplit.computed_amount
     }
   }
@@ -201,7 +203,7 @@ export async function computePairwiseNetPersonalOnly(
       const active = splits.filter((s) => !s.is_deleted)
       const mySplit = active.find((s) => meIds.has(s.user_id))
       const otherSplit = active.find((s) => otherIds.has(s.user_id))
-      if (!mySplit || !otherSplit) continue
+      if (!otherSplit) continue
 
       const cur = bill.currency
       const prev = byCurrency.get(cur) ?? 0
@@ -209,6 +211,7 @@ export async function computePairwiseNetPersonalOnly(
       if (meIds.has(bill.created_by)) {
         byCurrency.set(cur, prev + otherSplit.computed_amount)
       } else if (otherIds.has(bill.created_by)) {
+        if (!mySplit) continue
         byCurrency.set(cur, prev - mySplit.computed_amount)
       }
     }
