@@ -2,6 +2,7 @@ import { db } from '@/db/db'
 import type { Bill } from '@/types'
 import type { SettlementHistoryItem } from '@/lib/settlement'
 import { computeGroupBalances } from '@/lib/settlement'
+import { supabase } from '@/lib/supabase'
 import { formatCurrency } from '@/lib/utils'
 
 const LINK_UUID_RE =
@@ -33,11 +34,18 @@ export async function findRemoteProfileIdForLinking(input: string): Promise<stri
     )
     .toArray()
 
-  if (matches.length === 0) return null
-  if (matches.length === 1) return matches[0].id
+  if (matches.length > 0) {
+    if (matches.length === 1) return matches[0].id
+    const nonLocal = matches.find((p) => !p.is_local)
+    return (nonLocal ?? matches[0]).id
+  }
 
-  const nonLocal = matches.find((p) => !p.is_local)
-  return (nonLocal ?? matches[0]).id
+  const { data: rpcId, error } = await supabase.rpc('kwenta_lookup_profile_id_by_email', {
+    p_email: raw,
+  })
+  if (!error && typeof rpcId === 'string' && rpcId) return rpcId
+
+  return null
 }
 
 export interface ProfileDisplay {
@@ -64,7 +72,7 @@ export async function resolveProfileDisplay(profileId: string): Promise<ProfileD
   }
 }
 
-/** Net balance per currency: positive = you should receive from them, negative = you should pay them. Bills count only when payer is you or them. */
+/** Net balance per currency: positive = you should receive from them, negative = you should pay them. Same bill inclusion as `listBillsInvolvingPair`; per line only when both have splits; payer must be you or them for that line to affect pairwise (third-party payer lines do not imply direct debt). */
 export async function computePairwiseNet(
   meId: string,
   otherId: string,
@@ -77,7 +85,10 @@ export async function computePairwiseNet(
   const bills = await db.bills.filter((b) => !b.is_deleted).toArray()
 
   for (const bill of bills) {
-    if (!meIds.has(bill.created_by) && !otherIds.has(bill.created_by)) continue
+    const participantUnion = await participantUnionForBill(bill.id)
+    const meOnBill = profileSetTouchesBill(meIds, bill, participantUnion)
+    const otherOnBill = profileSetTouchesBill(otherIds, bill, participantUnion)
+    if (!meOnBill || !otherOnBill) continue
 
     const items = await db.bill_items.where('bill_id').equals(bill.id).toArray()
     for (const item of items) {
@@ -93,7 +104,7 @@ export async function computePairwiseNet(
 
       if (meIds.has(bill.created_by)) {
         byCurrency.set(cur, prev + otherSplit.computed_amount)
-      } else {
+      } else if (otherIds.has(bill.created_by)) {
         byCurrency.set(cur, prev - mySplit.computed_amount)
       }
     }
@@ -117,6 +128,135 @@ export async function computePairwiseNet(
   }
 
   return byCurrency
+}
+
+/**
+ * Pairwise net for a single bill only (same line rules as `computePairwiseNet`),
+ * minus settlements tagged with `bill_id` for this bill. One currency (the bill's).
+ */
+export async function computePairwiseNetForBill(
+  billId: string,
+  meId: string,
+  otherId: string,
+): Promise<number> {
+  const meIds = await expandProfileIdsForSplitMatching(meId)
+  const otherIds = await expandProfileIdsForSplitMatching(otherId)
+  const bill = await db.bills.get(billId)
+  if (!bill || bill.is_deleted) return 0
+
+  let net = 0
+  const items = await db.bill_items.where('bill_id').equals(billId).toArray()
+  for (const item of items) {
+    if (item.is_deleted) continue
+    const splits = await db.item_splits.where('item_id').equals(item.id).toArray()
+    const active = splits.filter((s) => !s.is_deleted)
+    const mySplit = active.find((s) => meIds.has(s.user_id))
+    const otherSplit = active.find((s) => otherIds.has(s.user_id))
+    if (!mySplit || !otherSplit) continue
+
+    if (meIds.has(bill.created_by)) {
+      net += otherSplit.computed_amount
+    } else if (otherIds.has(bill.created_by)) {
+      net -= mySplit.computed_amount
+    }
+  }
+
+  const settlements = await db.settlements.filter((s) => !s.is_deleted && s.is_settled).toArray()
+  for (const s of settlements) {
+    if (s.bill_id !== billId) continue
+    const fromMe = meIds.has(s.from_user_id)
+    const toMe = meIds.has(s.to_user_id)
+    const fromOther = otherIds.has(s.from_user_id)
+    const toOther = otherIds.has(s.to_user_id)
+    if (!((fromMe && toOther) || (fromOther && toMe))) continue
+    if (fromOther && toMe) net += s.amount
+    else if (fromMe && toOther) net -= s.amount
+  }
+
+  return Math.round(net * 100) / 100
+}
+
+/** Like `computePairwiseNet` but only bills with `group_id == null` (personal). */
+export async function computePairwiseNetPersonalOnly(
+  meId: string,
+  otherId: string,
+): Promise<Map<string, number>> {
+  const meIds = await expandProfileIdsForSplitMatching(meId)
+  const otherIds = await expandProfileIdsForSplitMatching(otherId)
+
+  const byCurrency = new Map<string, number>()
+
+  const bills = await db.bills.filter((b) => !b.is_deleted && b.group_id === null).toArray()
+
+  for (const bill of bills) {
+    const participantUnion = await participantUnionForBill(bill.id)
+    const meOnBill = profileSetTouchesBill(meIds, bill, participantUnion)
+    const otherOnBill = profileSetTouchesBill(otherIds, bill, participantUnion)
+    if (!meOnBill || !otherOnBill) continue
+
+    const items = await db.bill_items.where('bill_id').equals(bill.id).toArray()
+    for (const item of items) {
+      if (item.is_deleted) continue
+      const splits = await db.item_splits.where('item_id').equals(item.id).toArray()
+      const active = splits.filter((s) => !s.is_deleted)
+      const mySplit = active.find((s) => meIds.has(s.user_id))
+      const otherSplit = active.find((s) => otherIds.has(s.user_id))
+      if (!mySplit || !otherSplit) continue
+
+      const cur = bill.currency
+      const prev = byCurrency.get(cur) ?? 0
+
+      if (meIds.has(bill.created_by)) {
+        byCurrency.set(cur, prev + otherSplit.computed_amount)
+      } else if (otherIds.has(bill.created_by)) {
+        byCurrency.set(cur, prev - mySplit.computed_amount)
+      }
+    }
+  }
+
+  const settlements = await db.settlements.filter((s) => !s.is_deleted && s.is_settled).toArray()
+  for (const s of settlements) {
+    if (s.group_id !== null) continue
+    const fromMe = meIds.has(s.from_user_id)
+    const toMe = meIds.has(s.to_user_id)
+    const fromOther = otherIds.has(s.from_user_id)
+    const toOther = otherIds.has(s.to_user_id)
+    if (!((fromMe && toOther) || (fromOther && toMe))) continue
+
+    const cur = s.currency
+    const prev = byCurrency.get(cur) ?? 0
+    if (fromOther && toMe) {
+      byCurrency.set(cur, prev + s.amount)
+    } else if (fromMe && toOther) {
+      byCurrency.set(cur, prev - s.amount)
+    }
+  }
+
+  return byCurrency
+}
+
+/** Aggregate personal-only pairwise nets (non-group bills + personal settlements) across contacts. */
+export async function computePersonalNetRollup(meId: string): Promise<{
+  toReceiveByCurrency: Map<string, number>
+  toPayByCurrency: Map<string, number>
+}> {
+  const related = await collectRelatedProfileIds(meId)
+  const toReceiveByCurrency = new Map<string, number>()
+  const toPayByCurrency = new Map<string, number>()
+
+  for (const oid of related) {
+    if (oid === meId) continue
+    const m = await computePairwiseNetPersonalOnly(meId, oid)
+    for (const [cur, v] of m) {
+      if (v > 0.005) {
+        toReceiveByCurrency.set(cur, (toReceiveByCurrency.get(cur) ?? 0) + v)
+      } else if (v < -0.005) {
+        toPayByCurrency.set(cur, (toPayByCurrency.get(cur) ?? 0) + Math.abs(v))
+      }
+    }
+  }
+
+  return { toReceiveByCurrency, toPayByCurrency }
 }
 
 export function formatPairwiseSummary(byCurrency: Map<string, number>): {
@@ -225,7 +365,7 @@ export async function expandProfileIdsForSplitMatching(profileId: string): Promi
 }
 
 /** Everyone selected on any line of the bill (active splits only). */
-async function participantUnionForBill(billId: string): Promise<Set<string>> {
+export async function participantUnionForBill(billId: string): Promise<Set<string>> {
   const union = new Set<string>()
   const items = await db.bill_items.where('bill_id').equals(billId).toArray()
   for (const item of items) {

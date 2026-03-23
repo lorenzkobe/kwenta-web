@@ -61,6 +61,8 @@ export interface ItemSplit extends SyncFields {
 export interface Settlement extends SyncFields {
   /** Null = personal payment between two people (no group) */
   group_id: string | null
+  /** When set, payment is attributed to this bill (Phase B allocation). */
+  bill_id: string | null
   from_user_id: string
   to_user_id: string
   amount: number

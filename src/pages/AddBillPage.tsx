@@ -1,10 +1,22 @@
 import { useEffect, useRef, useState } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
-import { ArrowLeft, LayoutList, Plus, Save, SplitSquareHorizontal, Trash2, UserPlus, Users } from 'lucide-react'
+import {
+  ArrowLeft,
+  ChevronDown,
+  ChevronRight,
+  LayoutList,
+  Plus,
+  Save,
+  SplitSquareHorizontal,
+  Trash2,
+  UserPlus,
+  Users,
+} from 'lucide-react'
 import { useLiveQuery } from 'dexie-react-hooks'
 import { db } from '@/db/db'
 import {
   createBill,
+  createLocalProfile,
   getBillWithDetails,
   updateBill,
   type CreateBillInput,
@@ -22,6 +34,7 @@ import {
 } from '@/lib/bill-split-form'
 import { BILL_BACK_QUERY, parseSafeAppPath, withBillBackQuery } from '@/lib/bill-navigation'
 import { collectRelatedProfileIds } from '@/lib/people'
+import { filterDecimalInput, stripLeadingZerosAmount } from '@/lib/amount-input'
 import { cn, formatCurrency } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -51,6 +64,21 @@ function newItem(): ItemDraft {
     splitValues: {},
     pinnedSplit: {},
   }
+}
+
+function isItemizedLineComplete(
+  item: ItemDraft,
+  hasMemberPicker: boolean,
+): boolean {
+  if (!item.name.trim() || parseFloat(item.amount) <= 0) return false
+  if (!hasMemberPicker) return true
+  if (item.selectedUserIds.length === 0) return false
+  return lineSplitsValid(
+    item.splitType,
+    parseFloat(item.amount) || 0,
+    item.selectedUserIds,
+    item.splitValues,
+  )
 }
 
 const CURRENCIES = [
@@ -89,6 +117,11 @@ export function AddBillPage() {
   const simpleSplitValues = simpleSplitMeta.values
 
   const [items, setItems] = useState<ItemDraft[]>([newItem()])
+  const [collapsedItemKeys, setCollapsedItemKeys] = useState<string[]>([])
+  const [addPersonOpen, setAddPersonOpen] = useState(false)
+  const [addPersonName, setAddPersonName] = useState('')
+  const [addPersonBusy, setAddPersonBusy] = useState(false)
+  const [addPersonTarget, setAddPersonTarget] = useState<'simple' | string>('simple')
 
   const groups = useLiveQuery(async () => {
     if (!userId) return []
@@ -325,6 +358,71 @@ export function AddBillPage() {
     setItems((prev) => prev.map((item) => (item.key === key ? { ...item, ...patch } : item)))
   }
 
+  function collapseItemLine(key: string) {
+    setCollapsedItemKeys((k) => (k.includes(key) ? k : [...k, key]))
+  }
+
+  function expandItemLine(key: string) {
+    setCollapsedItemKeys((k) => k.filter((x) => x !== key))
+  }
+
+  function openAddPerson(target: 'simple' | string) {
+    setAddPersonTarget(target)
+    setAddPersonName('')
+    setAddPersonOpen(true)
+  }
+
+  async function submitAddPerson() {
+    if (!userId || !addPersonName.trim()) return
+    setAddPersonBusy(true)
+    try {
+      const result = await createLocalProfile(addPersonName.trim(), userId)
+      const id = result.id
+      if (addPersonTarget === 'simple') {
+        if (!simpleSelectedUserIds.includes(id)) {
+          toggleSimpleUser(id)
+        }
+      } else if (!items.find((i) => i.key === addPersonTarget)?.selectedUserIds.includes(id)) {
+        toggleUserForItem(addPersonTarget, id)
+      }
+      setAddPersonOpen(false)
+      setAddPersonName('')
+    } finally {
+      setAddPersonBusy(false)
+    }
+  }
+
+  function commitItemLineAmount(key: string, raw: string) {
+    const v = stripLeadingZerosAmount(raw)
+    const amt = parseFloat(v) || 0
+    setItems((prev) =>
+      prev.map((i) => {
+        if (i.key !== key) return i
+        if (i.splitType !== 'custom' || i.selectedUserIds.length === 0 || amt <= 0) {
+          return { ...i, amount: v }
+        }
+        if (Object.keys(i.pinnedSplit).length === 0) {
+          return {
+            ...i,
+            amount: v,
+            splitValues: equalCustomMap(i.selectedUserIds, amt),
+            pinnedSplit: {},
+          }
+        }
+        return {
+          ...i,
+          amount: v,
+          splitValues: redistributeWithPinned(
+            i.selectedUserIds,
+            i.splitValues,
+            i.pinnedSplit,
+            amt,
+          ),
+        }
+      }),
+    )
+  }
+
   function removeItem(key: string) {
     setItems((prev) => {
       const next = prev.filter((i) => i.key !== key)
@@ -517,7 +615,8 @@ export function AddBillPage() {
   }
 
   return (
-    <div className="space-y-5">
+    <>
+    <div className="space-y-5 overscroll-y-contain pb-28 lg:pb-0">
       <div className="flex items-center justify-between">
         <Button asChild variant="ghost" size="sm" className="rounded-full gap-1">
           <Link
@@ -536,7 +635,7 @@ export function AddBillPage() {
         <Button
           onClick={handleSave}
           disabled={!canSave || saving || loadingEdit}
-          className="rounded-full"
+          className="hidden rounded-full lg:inline-flex"
         >
           <Save className="size-4" />
           {saving ? 'Saving…' : isEdit ? 'Save changes' : 'Save bill'}
@@ -672,13 +771,12 @@ export function AddBillPage() {
                 <div className="flex flex-col gap-2">
                   <label className="text-sm font-medium">Total amount</label>
                   <Input
-                    type="number"
+                    type="text"
+                    inputMode="decimal"
                     placeholder="0.00"
-                    min="0"
-                    step="0.01"
                     value={simpleAmount}
                     onChange={(e) => {
-                      const v = e.target.value
+                      const v = filterDecimalInput(e.target.value)
                       setSimpleAmount(v)
                       const amt = parseFloat(v) || 0
                       const ids = selectedIdsRef.current
@@ -694,6 +792,12 @@ export function AddBillPage() {
                         })
                       }
                     }}
+                    onBlur={() =>
+                      setSimpleAmount((prev) => {
+                        const next = stripLeadingZerosAmount(prev)
+                        return next === prev ? prev : next
+                      })
+                    }
                     className="text-lg font-semibold"
                   />
                 </div>
@@ -743,6 +847,57 @@ export function AddBillPage() {
                           )
                         })}
                       </div>
+
+                      {!groupId && userId && (
+                        <>
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            className="h-9 w-fit rounded-full px-2 text-teal-800"
+                            onClick={() => openAddPerson('simple')}
+                          >
+                            <UserPlus className="size-3.5" />
+                            Add person
+                          </Button>
+                          {addPersonOpen && addPersonTarget === 'simple' && (
+                            <div className="rounded-xl border border-teal-800/20 bg-teal-800/5 p-3">
+                              <p className="text-xs font-medium text-stone-700">New local contact</p>
+                              <div className="mt-2 flex flex-col gap-2 sm:flex-row sm:items-center">
+                                <Input
+                                  placeholder="Name"
+                                  value={addPersonName}
+                                  onChange={(e) => setAddPersonName(e.target.value)}
+                                  className="rounded-lg sm:flex-1"
+                                  onKeyDown={(e) => {
+                                    if (e.key === 'Enter') void submitAddPerson()
+                                  }}
+                                />
+                                <div className="flex gap-2">
+                                  <Button
+                                    type="button"
+                                    size="sm"
+                                    className="h-9 rounded-lg"
+                                    disabled={addPersonBusy || !addPersonName.trim()}
+                                    onClick={() => void submitAddPerson()}
+                                  >
+                                    {addPersonBusy ? '…' : 'Add'}
+                                  </Button>
+                                  <Button
+                                    type="button"
+                                    variant="ghost"
+                                    size="sm"
+                                    className="h-9 rounded-lg"
+                                    onClick={() => setAddPersonOpen(false)}
+                                  >
+                                    Cancel
+                                  </Button>
+                                </div>
+                              </div>
+                            </div>
+                          )}
+                        </>
+                      )}
 
                       <SplitValueRows
                         splitType={simpleSplitType}
@@ -795,28 +950,45 @@ export function AddBillPage() {
 
           {mode === 'itemized' && (
             <div className="rounded-3xl border border-stone-200 bg-white p-5 shadow-sm">
-              <div className="flex items-center justify-between">
-                <div>
-                  <h2 className="text-lg font-semibold">Items</h2>
-                  <p className="text-xs text-stone-500">
-                    {items.filter((i) => parseFloat(i.amount) > 0).length} item
-                    {items.filter((i) => parseFloat(i.amount) > 0).length !== 1 ? 's' : ''}
-                  </p>
-                </div>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="rounded-full"
-                  type="button"
-                  onClick={() => setItems((prev) => [...prev, newItem()])}
-                >
-                  <Plus className="size-4" />
-                  Add item
-                </Button>
+              <div>
+                <h2 className="text-lg font-semibold">Items</h2>
+                <p className="text-xs text-stone-500">
+                  {items.filter((i) => parseFloat(i.amount) > 0).length} item
+                  {items.filter((i) => parseFloat(i.amount) > 0).length !== 1 ? 's' : ''}
+                </p>
               </div>
 
               <div className="mt-4 space-y-3">
-                {items.map((item, index) => (
+                {items.map((item, index) => {
+                  const memberPicker = members.length > 0
+                  const lineComplete = isItemizedLineComplete(item, memberPicker)
+                  const collapsed = collapsedItemKeys.includes(item.key) && lineComplete
+                  if (collapsed) {
+                    return (
+                      <div
+                        key={item.key}
+                        className="rounded-2xl border border-stone-200 bg-stone-100/60 p-2"
+                      >
+                        <button
+                          type="button"
+                          onClick={() => expandItemLine(item.key)}
+                          className="flex w-full items-center gap-2 rounded-xl px-3 py-3 text-left transition-colors hover:bg-stone-100/80"
+                        >
+                          <span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-teal-800 text-[0.65rem] font-semibold text-white">
+                            {index + 1}
+                          </span>
+                          <span className="min-w-0 flex-1 truncate font-medium text-stone-800">
+                            {item.name.trim() || `Item ${index + 1}`}
+                          </span>
+                          <span className="shrink-0 tabular-nums text-sm font-semibold text-stone-700">
+                            {formatCurrency(parseFloat(item.amount) || 0, currency)}
+                          </span>
+                          <ChevronRight className="size-4 shrink-0 text-stone-400" aria-hidden />
+                        </button>
+                      </div>
+                    )
+                  }
+                  return (
                   <div
                     key={item.key}
                     className="rounded-2xl border border-stone-200 bg-stone-100/60 p-4"
@@ -834,14 +1006,13 @@ export function AddBillPage() {
                           onChange={(e) => updateItem(item.key, { name: e.target.value })}
                         />
                         <Input
-                          type="number"
+                          type="text"
+                          inputMode="decimal"
                           placeholder="0.00"
                           className="rounded-lg sm:w-32"
                           value={item.amount}
-                          min="0"
-                          step="0.01"
                           onChange={(e) => {
-                            const v = e.target.value
+                            const v = filterDecimalInput(e.target.value)
                             const amt = parseFloat(v) || 0
                             const key = item.key
                             setItems((prev) =>
@@ -875,19 +1046,34 @@ export function AddBillPage() {
                               }),
                             )
                           }}
+                          onBlur={() => commitItemLineAmount(item.key, item.amount)}
                         />
                       </div>
-                      {items.length > 1 && (
-                        <Button
-                          variant="ghost"
-                          size="icon-xs"
-                          type="button"
-                          className="mt-1.5 rounded-full text-red-600"
-                          onClick={() => removeItem(item.key)}
-                        >
-                          <Trash2 className="size-3.5" />
-                        </Button>
-                      )}
+                      <div className="flex shrink-0 gap-0.5">
+                        {lineComplete && (
+                          <Button
+                            variant="ghost"
+                            size="icon-xs"
+                            type="button"
+                            className="mt-1.5 rounded-full text-stone-500"
+                            onClick={() => collapseItemLine(item.key)}
+                            aria-label="Collapse line"
+                          >
+                            <ChevronDown className="size-4" />
+                          </Button>
+                        )}
+                        {items.length > 1 && (
+                          <Button
+                            variant="ghost"
+                            size="icon-xs"
+                            type="button"
+                            className="mt-1.5 rounded-full text-red-600"
+                            onClick={() => removeItem(item.key)}
+                          >
+                            <Trash2 className="size-3.5" />
+                          </Button>
+                        )}
+                      </div>
                     </div>
 
                     {members.length > 0 && (
@@ -934,6 +1120,57 @@ export function AddBillPage() {
                           })}
                         </div>
 
+                        {!groupId && userId && (
+                          <>
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="sm"
+                              className="mt-1 h-8 w-fit rounded-full px-2 text-xs text-teal-800"
+                              onClick={() => openAddPerson(item.key)}
+                            >
+                              <UserPlus className="size-3" />
+                              Add person
+                            </Button>
+                            {addPersonOpen && addPersonTarget === item.key && (
+                              <div className="mt-2 rounded-xl border border-teal-800/20 bg-teal-800/5 p-3">
+                                <p className="text-xs font-medium text-stone-700">New local contact</p>
+                                <div className="mt-2 flex flex-col gap-2 sm:flex-row sm:items-center">
+                                  <Input
+                                    placeholder="Name"
+                                    value={addPersonName}
+                                    onChange={(e) => setAddPersonName(e.target.value)}
+                                    className="h-9 rounded-lg sm:flex-1"
+                                    onKeyDown={(e) => {
+                                      if (e.key === 'Enter') void submitAddPerson()
+                                    }}
+                                  />
+                                  <div className="flex gap-2">
+                                    <Button
+                                      type="button"
+                                      size="sm"
+                                      className="h-9 rounded-lg"
+                                      disabled={addPersonBusy || !addPersonName.trim()}
+                                      onClick={() => void submitAddPerson()}
+                                    >
+                                      {addPersonBusy ? '…' : 'Add'}
+                                    </Button>
+                                    <Button
+                                      type="button"
+                                      variant="ghost"
+                                      size="sm"
+                                      className="h-9 rounded-lg"
+                                      onClick={() => setAddPersonOpen(false)}
+                                    >
+                                      Cancel
+                                    </Button>
+                                  </div>
+                                </div>
+                              </div>
+                            )}
+                          </>
+                        )}
+
                         <SplitValueRows
                           splitType={item.splitType}
                           currency={currency}
@@ -959,7 +1196,20 @@ export function AddBillPage() {
                       </div>
                     )}
                   </div>
-                ))}
+                )
+                })}
+              </div>
+
+              <div className="mt-4">
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="h-11 w-full rounded-xl border-dashed border-stone-300"
+                  onClick={() => setItems((prev) => [...prev, newItem()])}
+                >
+                  <Plus className="size-4" />
+                  Add item
+                </Button>
               </div>
 
               {itemizedTotal > 0 && (
@@ -975,5 +1225,19 @@ export function AddBillPage() {
         </>
       )}
     </div>
+
+    {!loadingEdit && (
+      <div className="fixed inset-x-0 bottom-[calc(3.5rem+env(safe-area-inset-bottom))] z-50 border-t border-stone-200/90 bg-white/95 px-4 py-3 backdrop-blur lg:hidden">
+        <Button
+          onClick={handleSave}
+          disabled={!canSave || saving}
+          className="h-11 w-full rounded-xl"
+        >
+          <Save className="size-4" />
+          {saving ? 'Saving…' : isEdit ? 'Save changes' : 'Save bill'}
+        </Button>
+      </div>
+    )}
+    </>
   )
 }

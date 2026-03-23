@@ -1,21 +1,7 @@
-import { useMemo, useState } from 'react'
-import {
-  ArrowUpRight,
-  ChevronRight,
-  CreditCard,
-  History,
-  Plus,
-  ReceiptText,
-  Sparkles,
-  Users,
-} from 'lucide-react'
+import { ChevronRight, Plus, ReceiptText, Sparkles, UserRound, Users } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { useLiveQuery } from 'dexie-react-hooks'
-import { SettlementHistoryList } from '@/components/common/SettlementHistoryList'
-import { EditSettlementDialog } from '@/components/common/EditSettlementDialog'
 import { db } from '@/db/db'
-import { useUserSettlementHistory } from '@/db/hooks'
-import type { SettlementHistoryItem } from '@/lib/settlement'
 import { useCurrentUser } from '@/hooks/useCurrentUser'
 import { formatCurrency, timeAgo } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
@@ -23,15 +9,6 @@ import { Badge } from '@/components/ui/badge'
 
 export function HomePage() {
   const { userId, profile } = useCurrentUser()
-
-  const settlementHistory = useUserSettlementHistory(userId ?? undefined)
-  const [editingSettlement, setEditingSettlement] = useState<SettlementHistoryItem | null>(null)
-  const paymentsInvolvingYou = useMemo(() => {
-    if (!userId || !settlementHistory?.length) return []
-    return settlementHistory
-      .filter((h) => h.fromUserId === userId || h.toUserId === userId)
-      .slice(0, 6)
-  }, [userId, settlementHistory])
 
   const stats = useLiveQuery(async () => {
     if (!userId) return { billCount: 0, totalSpent: 0, groupCount: 0 }
@@ -68,12 +45,6 @@ export function HomePage() {
     )
   }, [userId])
 
-  const recentActivity = useLiveQuery(async () => {
-    if (!userId) return []
-    const logs = await db.activity_log.orderBy('created_at').reverse().limit(5).toArray()
-    return logs.filter((l) => !l.is_deleted)
-  }, [userId])
-
   function greeting() {
     const hour = new Date().getHours()
     if (hour < 12) return 'Good morning'
@@ -83,6 +54,13 @@ export function HomePage() {
 
   return (
     <div className="space-y-5">
+      <p className="text-center text-xs text-stone-500 lg:text-left">
+        <Link to="/app/settings" className="font-medium text-teal-800 underline-offset-2 hover:underline">
+          Profile
+        </Link>{' '}
+        has balances and recent activity.
+      </p>
+
       <section className="rounded-[2rem] border border-stone-900/15 bg-stone-900 p-5 text-white shadow-[0_20px_70px_rgba(28,25,23,0.14)] lg:p-8">
         <Badge className="border-none bg-white/12 text-white">
           <Sparkles className="mr-1 size-3.5" />
@@ -124,7 +102,7 @@ export function HomePage() {
           {[
             { title: 'Add bill', detail: 'Restaurant, utilities, or debt', icon: ReceiptText, to: '/app/bills/new' },
             { title: 'New group', detail: 'Invite housemates or friends', icon: Users, to: '/app/groups' },
-            { title: 'Balances', detail: 'See who should receive or pay', icon: CreditCard, to: '/app/balances' },
+            { title: 'Profile', detail: 'Balances, payments, account', icon: UserRound, to: '/app/settings' },
           ].map((action) => (
             <Link
               key={action.title}
@@ -204,58 +182,6 @@ export function HomePage() {
         )}
       </section>
 
-      {paymentsInvolvingYou.length > 0 && (
-        <section className="rounded-3xl border border-stone-200 bg-white p-5 shadow-sm">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <History className="size-4 text-teal-800" />
-              <h3 className="text-base font-semibold">Your payments</h3>
-            </div>
-            <Button asChild variant="ghost" size="xs" className="rounded-full text-teal-800">
-              <Link to="/app/balances">Balances</Link>
-            </Button>
-          </div>
-          <p className="mt-1 text-xs text-stone-500">
-            Recorded settlements across your groups (you paid or were paid).
-          </p>
-          <div className="mt-4">
-            <SettlementHistoryList
-              items={paymentsInvolvingYou}
-              currentUserId={userId}
-              showGroupName
-              onEdit={(item) => setEditingSettlement(item)}
-            />
-          </div>
-        </section>
-      )}
-
-      {editingSettlement && (
-        <EditSettlementDialog
-          item={editingSettlement}
-          onClose={() => setEditingSettlement(null)}
-          onSaved={() => setEditingSettlement(null)}
-        />
-      )}
-
-      {(recentActivity?.length ?? 0) > 0 && (
-        <section className="rounded-3xl border border-stone-200 bg-white p-5 shadow-sm">
-          <div className="flex items-center gap-2">
-            <ArrowUpRight className="size-4 text-teal-800" />
-            <h3 className="text-base font-semibold">Recent activity</h3>
-          </div>
-          <div className="mt-4 space-y-2">
-            {recentActivity!.map((log) => (
-              <div
-                key={log.id}
-                className="rounded-xl border border-stone-200 bg-stone-100/60 px-4 py-3"
-              >
-                <p className="text-sm text-stone-600">{log.description}</p>
-                <p className="mt-0.5 text-xs text-stone-400">{timeAgo(log.created_at)}</p>
-              </div>
-            ))}
-          </div>
-        </section>
-      )}
     </div>
   )
 }

@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import {
   LayoutList,
   ListOrdered,
@@ -8,13 +8,12 @@ import {
   UserPlus,
   Users,
 } from 'lucide-react'
+import { filterDecimalInput, stripLeadingZerosAmount } from '@/lib/amount-input'
 import { cn, formatCurrency } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 
-const DEMO_PEOPLE = ['You', 'Alex', 'Sam'] as const
-type DemoPerson = (typeof DEMO_PEOPLE)[number]
-const N = DEMO_PEOPLE.length
+const DEFAULT_ROSTER = ['You', 'Alex', 'Sam'] as const
 
 type DemoMode = 'simple' | 'itemized'
 
@@ -22,7 +21,7 @@ type DemoLineItem = {
   id: string
   name: string
   amount: number
-  splitAmong?: readonly DemoPerson[]
+  splitAmong?: readonly string[]
 }
 
 type DemoBill = {
@@ -30,16 +29,56 @@ type DemoBill = {
   title: string
   currency: string
   items: DemoLineItem[]
+  /** For itemized user bills: people new lines default to (subset of roster). */
+  defaultSplitAmong?: readonly string[]
 }
 
 function billTotal(bill: DemoBill): number {
   return bill.items.reduce((sum, line) => sum + line.amount, 0)
 }
 
-function lineParticipants(line: DemoLineItem): readonly DemoPerson[] {
+function lineParticipants(line: DemoLineItem, roster: string[]): string[] {
   const s = line.splitAmong
-  if (s && s.length > 0) return s
-  return DEMO_PEOPLE
+  if (s && s.length > 0) return [...s]
+  return [...roster]
+}
+
+function orderedParticipants(set: Set<string>, roster: string[]): string[] {
+  return roster.filter((p) => set.has(p))
+}
+
+function DemoPersonChipToggle({
+  roster,
+  selected,
+  onToggle,
+}: {
+  roster: string[]
+  selected: readonly string[]
+  onToggle: (person: string) => void
+}) {
+  return (
+    <div className="flex flex-wrap gap-2" role="group" aria-label="Who splits this amount">
+      {roster.map((p) => {
+        const on = selected.includes(p)
+        return (
+          <button
+            key={p}
+            type="button"
+            onClick={() => onToggle(p)}
+            className={cn(
+              'inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-medium transition-colors',
+              on
+                ? 'bg-teal-800 text-white shadow-sm'
+                : 'border border-stone-200 bg-white text-stone-600 hover:border-stone-300 hover:bg-stone-50',
+            )}
+          >
+            <Users className="size-3 shrink-0 opacity-90" aria-hidden />
+            {p}
+          </button>
+        )
+      })}
+    </div>
+  )
 }
 
 /** Shown only in the itemized preview (not in the bill list). */
@@ -71,13 +110,13 @@ const SIMPLE_SEED_BILLS: DemoBill[] = [
     id: 'simp-1',
     title: 'Coffee run',
     currency: 'PHP',
-    items: [{ id: 'simp-1a', name: 'Total', amount: 450 }],
+    items: [{ id: 'simp-1a', name: 'Total', amount: 450, splitAmong: ['You', 'Alex', 'Sam'] }],
   },
   {
     id: 'simp-2',
     title: 'Parking',
     currency: 'PHP',
-    items: [{ id: 'simp-2a', name: 'Total', amount: 200 }],
+    items: [{ id: 'simp-2a', name: 'Total', amount: 200, splitAmong: ['You', 'Alex', 'Sam'] }],
   },
 ]
 
@@ -85,12 +124,18 @@ function ItemizedItemCard({
   index,
   line,
   currency,
+  roster,
+  editableParticipants,
+  onToggleParticipant,
 }: {
   index: number
   line: DemoLineItem
   currency: string
+  roster: string[]
+  editableParticipants?: boolean
+  onToggleParticipant?: (person: string) => void
 }) {
-  const group = lineParticipants(line)
+  const group = lineParticipants(line, roster)
   const amt = line.amount
   const each = group.length > 0 ? amt / group.length : 0
 
@@ -115,24 +160,30 @@ function ItemizedItemCard({
         <div className="flex items-center justify-between gap-3">
           <div className="flex min-w-0 items-center gap-1.5 text-xs font-medium text-stone-500">
             <UserPlus className="size-3.5 shrink-0 text-stone-400" aria-hidden />
-            <span>Split with</span>
+            <span>{editableParticipants ? 'Split with (tap to toggle)' : 'Split with'}</span>
           </div>
           <span className="inline-flex h-7 shrink-0 items-center rounded-md border border-stone-200 bg-white px-2.5 text-xs font-medium text-stone-700 shadow-sm">
             Equal
           </span>
         </div>
 
-        <div className="mt-3 flex flex-wrap gap-1.5">
-          {group.map((name) => (
-            <span
-              key={name}
-              className="inline-flex items-center gap-1.5 rounded-full bg-teal-800 px-2.5 py-1.5 text-xs font-medium text-white"
-            >
-              <Users className="size-3 shrink-0 opacity-95" aria-hidden />
-              {name}
-            </span>
-          ))}
-        </div>
+        {editableParticipants && onToggleParticipant ? (
+          <div className="mt-3">
+            <DemoPersonChipToggle roster={roster} selected={group} onToggle={onToggleParticipant} />
+          </div>
+        ) : (
+          <div className="mt-3 flex flex-wrap gap-1.5">
+            {group.map((name) => (
+              <span
+                key={name}
+                className="inline-flex items-center gap-1.5 rounded-full bg-teal-800 px-2.5 py-1.5 text-xs font-medium text-white"
+              >
+                <Users className="size-3 shrink-0 opacity-95" aria-hidden />
+                {name}
+              </span>
+            ))}
+          </div>
+        )}
 
         {group.length > 0 && amt > 0 && (
           <p className="mt-2 text-xs text-stone-400">
@@ -148,12 +199,16 @@ function ItemizedItemCard({
 
 function ItemizedBillAppPreview({
   bill,
+  roster,
   editableTitle,
   onTitleChange,
+  onToggleLineParticipant,
 }: {
   bill: DemoBill
+  roster: string[]
   editableTitle?: boolean
   onTitleChange?: (title: string) => void
+  onToggleLineParticipant?: (lineId: string, person: string) => void
 }) {
   const total = billTotal(bill)
   const titleInputId = `demo-itemized-title-${bill.id}`
@@ -192,7 +247,17 @@ function ItemizedBillAppPreview({
         ) : (
           <div className="space-y-3">
             {bill.items.map((line, index) => (
-              <ItemizedItemCard key={line.id} index={index} line={line} currency={bill.currency} />
+              <ItemizedItemCard
+                key={line.id}
+                index={index}
+                line={line}
+                currency={bill.currency}
+                roster={roster}
+                editableParticipants={Boolean(editableTitle && onToggleLineParticipant)}
+                onToggleParticipant={
+                  onToggleLineParticipant ? (p) => onToggleLineParticipant(line.id, p) : undefined
+                }
+              />
             ))}
           </div>
         )}
@@ -210,6 +275,8 @@ function ItemizedBillAppPreview({
   )
 }
 
+const DEMO_ROSTER: string[] = [...DEFAULT_ROSTER]
+
 export function LandingProductDemo() {
   const [mode, setMode] = useState<DemoMode>('simple')
 
@@ -217,13 +284,21 @@ export function LandingProductDemo() {
   const [simpleSelectedId, setSimpleSelectedId] = useState<string | null>(SIMPLE_SEED_BILLS[0]?.id ?? null)
 
   const [itemizedUserBills, setItemizedUserBills] = useState<DemoBill[]>([])
+  const [itemizedDraft, setItemizedDraft] = useState<DemoBill | null>(null)
   const [itemizedSelectedId, setItemizedSelectedId] = useState<string | null>(null)
 
   const [newBillTitle, setNewBillTitle] = useState('')
   const [newSimpleAmount, setNewSimpleAmount] = useState('')
+  const [newSimpleFormSplitAmong, setNewSimpleFormSplitAmong] = useState<string[]>(() => [...DEMO_ROSTER])
+  const [newItemizedFormSplitAmong, setNewItemizedFormSplitAmong] = useState<string[]>(() => [...DEMO_ROSTER])
 
   const [addItemName, setAddItemName] = useState('')
   const [addItemAmount, setAddItemAmount] = useState('')
+
+  const finalizedItemizedBills = useMemo(
+    () => itemizedUserBills.filter((b) => b.items.length > 0),
+    [itemizedUserBills],
+  )
 
   const simpleSelected = useMemo(
     () => simpleBills.find((b) => b.id === simpleSelectedId) ?? null,
@@ -235,10 +310,55 @@ export function LandingProductDemo() {
     [itemizedUserBills, itemizedSelectedId],
   )
 
-  const perPersonGrandTotal = useMemo(() => {
-    if (!simpleSelected) return 0
-    return billTotal(simpleSelected) / N
+  const itemizedLineTarget = itemizedDraft ?? itemizedSelected
+
+  useEffect(() => {
+    if (mode !== 'itemized') {
+      setItemizedDraft(null)
+    }
+  }, [mode])
+
+  useEffect(() => {
+    if (!itemizedSelectedId) return
+    if (finalizedItemizedBills.some((b) => b.id === itemizedSelectedId)) return
+    setItemizedSelectedId(finalizedItemizedBills[0]?.id ?? null)
+  }, [finalizedItemizedBills, itemizedSelectedId])
+
+  const simpleSplitGroup = useMemo((): string[] => {
+    if (!simpleSelected || simpleSelected.items.length === 0) return [...DEMO_ROSTER]
+    return lineParticipants(simpleSelected.items[0], DEMO_ROSTER)
   }, [simpleSelected])
+
+  const perPersonGrandTotal =
+    simpleSelected && simpleSplitGroup.length > 0
+      ? billTotal(simpleSelected) / simpleSplitGroup.length
+      : 0
+
+  function toggleNewSimpleFormParticipant(p: string) {
+    setNewSimpleFormSplitAmong((prev) => {
+      const set = new Set(prev)
+      if (set.has(p)) {
+        if (set.size <= 1) return prev
+        set.delete(p)
+      } else {
+        set.add(p)
+      }
+      return orderedParticipants(set, DEMO_ROSTER)
+    })
+  }
+
+  function toggleNewItemizedFormParticipant(p: string) {
+    setNewItemizedFormSplitAmong((prev) => {
+      const set = new Set(prev)
+      if (set.has(p)) {
+        if (set.size <= 1) return prev
+        set.delete(p)
+      } else {
+        set.add(p)
+      }
+      return orderedParticipants(set, DEMO_ROSTER)
+    })
+  }
 
   function addBill(e: React.FormEvent) {
     e.preventDefault()
@@ -248,12 +368,20 @@ export function LandingProductDemo() {
     if (mode === 'simple') {
       const n = Number.parseFloat(newSimpleAmount.replace(/,/g, ''))
       if (Number.isNaN(n) || n <= 0) return
+      if (newSimpleFormSplitAmong.length === 0) return
       const id = crypto.randomUUID()
       const bill: DemoBill = {
         id,
         title,
         currency: 'PHP',
-        items: [{ id: crypto.randomUUID(), name: 'Total', amount: n }],
+        items: [
+          {
+            id: crypto.randomUUID(),
+            name: 'Total',
+            amount: n,
+            splitAmong: [...newSimpleFormSplitAmong],
+          },
+        ],
       }
       setSimpleBills((prev) => [bill, ...prev])
       setSimpleSelectedId(id)
@@ -263,33 +391,99 @@ export function LandingProductDemo() {
     }
 
     const id = crypto.randomUUID()
-    const bill: DemoBill = {
+    if (newItemizedFormSplitAmong.length === 0) return
+    const draft: DemoBill = {
       id,
       title,
       currency: 'PHP',
       items: [],
+      defaultSplitAmong: [...newItemizedFormSplitAmong],
     }
-    setItemizedUserBills((prev) => [bill, ...prev])
-    setItemizedSelectedId(id)
+    setItemizedDraft(draft)
+    setItemizedSelectedId(null)
     setNewBillTitle('')
   }
 
   function addLineToSelected(e: React.FormEvent) {
     e.preventDefault()
-    if (!itemizedSelected) return
+    if (!itemizedLineTarget) return
     const name = addItemName.trim()
     const n = Number.parseFloat(addItemAmount.replace(/,/g, ''))
     if (!name || Number.isNaN(n) || n <= 0) return
-    const line: DemoLineItem = { id: crypto.randomUUID(), name, amount: n }
-    setItemizedUserBills((prev) =>
-      prev.map((b) => (b.id === itemizedSelected.id ? { ...b, items: [...b.items, line] } : b)),
-    )
+
+    const pool =
+      itemizedLineTarget.defaultSplitAmong && itemizedLineTarget.defaultSplitAmong.length > 0
+        ? [...itemizedLineTarget.defaultSplitAmong]
+        : [...DEMO_ROSTER]
+
+    const line: DemoLineItem = {
+      id: crypto.randomUUID(),
+      name,
+      amount: n,
+      splitAmong: [...pool],
+    }
+
+    if (itemizedDraft && itemizedDraft.id === itemizedLineTarget.id) {
+      const finalized: DemoBill = { ...itemizedDraft, items: [line] }
+      setItemizedUserBills((prev) => [finalized, ...prev])
+      setItemizedDraft(null)
+      setItemizedSelectedId(finalized.id)
+    } else if (itemizedSelected && itemizedSelected.id === itemizedLineTarget.id) {
+      setItemizedUserBills((prev) =>
+        prev.map((b) => (b.id === itemizedSelected.id ? { ...b, items: [...b.items, line] } : b)),
+      )
+    }
+
     setAddItemName('')
     setAddItemAmount('')
   }
 
   function setItemizedBillTitle(billId: string, title: string) {
     setItemizedUserBills((prev) => prev.map((b) => (b.id === billId ? { ...b, title } : b)))
+    setItemizedDraft((d) => (d && d.id === billId ? { ...d, title } : d))
+  }
+
+  function toggleSimpleBillParticipant(billId: string, person: string) {
+    setSimpleBills((prev) =>
+      prev.map((b) => {
+        if (b.id !== billId || b.items.length === 0) return b
+        const first = b.items[0]
+        const cur = new Set(lineParticipants(first, DEMO_ROSTER))
+        if (cur.has(person)) {
+          if (cur.size <= 1) return b
+          cur.delete(person)
+        } else {
+          cur.add(person)
+        }
+        const among = orderedParticipants(cur, DEMO_ROSTER)
+        return {
+          ...b,
+          items: [{ ...first, splitAmong: among }, ...b.items.slice(1)],
+        }
+      }),
+    )
+  }
+
+  function toggleItemizedLineParticipant(billId: string, lineId: string, person: string) {
+    const updater = (b: DemoBill): DemoBill => {
+      if (b.id !== billId) return b
+      return {
+        ...b,
+        items: b.items.map((line) => {
+          if (line.id !== lineId) return line
+          const cur = new Set(lineParticipants(line, DEMO_ROSTER))
+          if (cur.has(person)) {
+            if (cur.size <= 1) return line
+            cur.delete(person)
+          } else {
+            cur.add(person)
+          }
+          return { ...line, splitAmong: orderedParticipants(cur, DEMO_ROSTER) }
+        }),
+      }
+    }
+    setItemizedUserBills((prev) => prev.map(updater))
+    setItemizedDraft((d) => (d ? updater(d) : d))
   }
 
   return (
@@ -308,8 +502,8 @@ export function LandingProductDemo() {
             Simple total or itemized lines—same fair split.
           </h2>
           <p className="mt-3 text-base leading-relaxed text-stone-600">
-            Preview only—no account. Itemized layout matches the app: each item, then split with
-            people underneath. Sample bills on the right; use the left to add your own bill and items.
+            Preview only—no account. Pick who splits each bill or line (You, Alex, Sam), and use numbers only
+            for amounts. Itemized bills show in the list after you add the first line.
           </p>
         </div>
 
@@ -361,8 +555,8 @@ export function LandingProductDemo() {
               </div>
               <p className="mt-2 text-xs text-stone-500">
                 {mode === 'simple'
-                  ? 'One amount for the whole bill; split is even across the group.'
-                  : 'Add a bill title, then add items—the same flow as in the app.'}
+                  ? 'One amount for the whole bill; pick who splits it below, then divide evenly.'
+                  : 'Start a bill with a title and who’s included, add lines—list shows bills with at least one line.'}
               </p>
             </div>
 
@@ -377,11 +571,11 @@ export function LandingProductDemo() {
 
                 <form onSubmit={addBill} className="mt-4 space-y-3 rounded-xl border border-dashed border-stone-200 bg-stone-50/60 p-3">
                   <p className="text-xs font-medium text-stone-600">
-                    {mode === 'simple' ? 'New bill (simple)' : 'New bill — title only'}
+                    {mode === 'simple' ? 'New bill (simple)' : 'New itemized bill'}
                   </p>
                   {mode === 'simple' ? (
-                    <div className="grid gap-2 sm:grid-cols-6 sm:items-end">
-                      <div className="min-w-0 space-y-1 sm:col-span-3">
+                    <div className="flex flex-col gap-3">
+                      <div className="space-y-1">
                         <label htmlFor="demo-bill-title" className="text-xs font-medium text-stone-600">
                           Bill name
                         </label>
@@ -394,33 +588,44 @@ export function LandingProductDemo() {
                           autoComplete="off"
                         />
                       </div>
-                      <div className="min-w-0 space-y-1 sm:col-span-2">
+                      <div className="space-y-1">
                         <label htmlFor="demo-simple-amt" className="text-xs font-medium text-stone-600">
                           Total amount
                         </label>
                         <Input
                           id="demo-simple-amt"
+                          type="text"
                           inputMode="decimal"
+                          pattern="[0-9.]*"
                           value={newSimpleAmount}
-                          onChange={(e) => setNewSimpleAmount(e.target.value)}
+                          onChange={(e) => setNewSimpleAmount(filterDecimalInput(e.target.value))}
+                          onBlur={() =>
+                            setNewSimpleAmount((s) => {
+                              const next = stripLeadingZerosAmount(s)
+                              return next === s ? s : next
+                            })
+                          }
                           placeholder="0"
-                          className="rounded-lg border-stone-200 bg-white text-sm"
+                          className="rounded-lg border-stone-200 bg-white text-sm tabular-nums"
                           autoComplete="off"
                         />
                       </div>
-                      <div className="flex sm:col-span-1 sm:justify-end">
-                        <Button
-                          type="submit"
-                          className="h-10 w-full shrink-0 rounded-lg sm:w-auto"
-                        >
-                          <Plus className="size-4" />
-                          Add bill
-                        </Button>
+                      <div className="space-y-1">
+                        <p className="text-xs font-medium text-stone-600">Who’s on this bill?</p>
+                        <DemoPersonChipToggle
+                          roster={DEMO_ROSTER}
+                          selected={newSimpleFormSplitAmong}
+                          onToggle={toggleNewSimpleFormParticipant}
+                        />
                       </div>
+                      <Button type="submit" className="h-10 w-full rounded-lg">
+                        <Plus className="size-4" />
+                        Add bill
+                      </Button>
                     </div>
                   ) : (
-                    <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
-                      <div className="min-w-0 flex-1 space-y-1">
+                    <div className="flex flex-col gap-3">
+                      <div className="space-y-1">
                         <label htmlFor="demo-bill-title-itemized" className="text-xs font-medium text-stone-600">
                           Title
                         </label>
@@ -433,16 +638,30 @@ export function LandingProductDemo() {
                           autoComplete="off"
                         />
                       </div>
-                      <Button
-                        type="submit"
-                        className="h-10 w-full shrink-0 rounded-lg sm:w-auto"
-                      >
+                      <div className="space-y-1">
+                        <p className="text-xs font-medium text-stone-600">Who’s on this bill?</p>
+                        <p className="text-[0.65rem] text-stone-500">
+                          New lines start split among these people; you can change each line later.
+                        </p>
+                        <DemoPersonChipToggle
+                          roster={DEMO_ROSTER}
+                          selected={newItemizedFormSplitAmong}
+                          onToggle={toggleNewItemizedFormParticipant}
+                        />
+                      </div>
+                      <Button type="submit" className="h-10 w-full rounded-lg">
                         <Plus className="size-4" />
-                        Add bill
+                        Start bill
                       </Button>
                     </div>
                   )}
                 </form>
+
+                {itemizedDraft && (
+                  <p className="mt-3 rounded-lg border border-teal-800/25 bg-teal-800/5 px-3 py-2 text-xs text-teal-900">
+                    Draft: “{itemizedDraft.title}”—add your first line below to finish and show it in the list.
+                  </p>
+                )}
 
                 {mode === 'simple' ? (
                   <ul
@@ -452,6 +671,7 @@ export function LandingProductDemo() {
                   >
                     {simpleBills.map((b) => {
                       const total = billTotal(b)
+                      const sp = b.items[0] ? lineParticipants(b.items[0], DEMO_ROSTER) : DEMO_ROSTER
                       return (
                         <li key={b.id}>
                           <button
@@ -470,7 +690,9 @@ export function LandingProductDemo() {
                                 {formatCurrency(total, b.currency)}
                               </span>
                             </div>
-                            <p className="mt-1 text-xs text-stone-500">Even split · 3 people</p>
+                            <p className="mt-1 text-xs text-stone-500">
+                              Even split · {sp.length} {sp.length === 1 ? 'person' : 'people'}
+                            </p>
                           </button>
                         </li>
                       )
@@ -483,12 +705,12 @@ export function LandingProductDemo() {
                       aria-live="polite"
                       aria-label="Your itemized bills"
                     >
-                      {itemizedUserBills.length === 0 ? (
+                      {finalizedItemizedBills.length === 0 ? (
                         <li className="rounded-xl border border-stone-100 bg-stone-50/50 px-3 py-3 text-sm text-stone-500">
-                          No bills yet—add a title above, then add items here.
+                          No finished bills yet—start a bill above and add at least one line.
                         </li>
                       ) : (
-                        itemizedUserBills.map((b) => {
+                        finalizedItemizedBills.map((b) => {
                           const total = billTotal(b)
                           return (
                             <li key={b.id}>
@@ -518,7 +740,7 @@ export function LandingProductDemo() {
                       )}
                     </ul>
 
-                    {itemizedSelected && (
+                    {itemizedLineTarget && (
                       <form
                         onSubmit={addLineToSelected}
                         className="mt-4 space-y-3 rounded-xl border border-stone-200 bg-stone-50/50 p-3"
@@ -550,16 +772,27 @@ export function LandingProductDemo() {
                             </label>
                             <Input
                               id="demo-add-item-amt"
+                              type="text"
                               inputMode="decimal"
+                              pattern="[0-9.]*"
                               value={addItemAmount}
-                              onChange={(e) => setAddItemAmount(e.target.value)}
+                              onChange={(e) => setAddItemAmount(filterDecimalInput(e.target.value))}
+                              onBlur={() =>
+                                setAddItemAmount((s) => {
+                                  const next = stripLeadingZerosAmount(s)
+                                  return next === s ? s : next
+                                })
+                              }
                               placeholder="0.00"
-                              className="rounded-lg border-stone-200 bg-white text-sm"
+                              className="rounded-lg border-stone-200 bg-white text-sm tabular-nums"
                               autoComplete="off"
                             />
                           </div>
                         </div>
-                        <p className="text-xs text-stone-500">Adding to “{itemizedSelected.title}”</p>
+                        <p className="text-xs text-stone-500">
+                          Adding to “{itemizedLineTarget.title}”
+                          {itemizedDraft ? ' (draft)' : ''}
+                        </p>
                       </form>
                     )}
                   </>
@@ -575,7 +808,10 @@ export function LandingProductDemo() {
                     </div>
                     <p className="mt-1 flex flex-wrap items-center gap-x-1 text-xs text-stone-500">
                       <Users className="inline size-3.5 shrink-0 text-stone-400" aria-hidden />
-                      <span>Whole bill ÷ {N} — same as the Simple flow in the app.</span>
+                      <span>
+                        Whole bill ÷ {simpleSplitGroup.length} — adjust people on the left or in the new-bill
+                        form.
+                      </span>
                     </p>
 
                     {simpleSelected ? (
@@ -589,13 +825,27 @@ export function LandingProductDemo() {
                           </p>
                         </div>
 
+                        <div className="rounded-xl border border-stone-200 bg-white p-3">
+                          <p className="text-xs font-medium text-stone-600">Who’s splitting?</p>
+                          <p className="mt-0.5 text-[0.65rem] text-stone-500">
+                            Tap to include or remove. At least one person stays on the bill.
+                          </p>
+                          <div className="mt-3">
+                            <DemoPersonChipToggle
+                              roster={DEMO_ROSTER}
+                              selected={simpleSplitGroup}
+                              onToggle={(p) => toggleSimpleBillParticipant(simpleSelected.id, p)}
+                            />
+                          </div>
+                        </div>
+
                         <div className="rounded-xl border border-teal-800/20 bg-teal-800/6 p-3">
                           <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-teal-900">
                             <Users className="size-3.5" aria-hidden />
                             Each person pays
                           </div>
                           <ul className="mt-2 space-y-1">
-                            {DEMO_PEOPLE.map((name) => (
+                            {simpleSplitGroup.map((name) => (
                               <li
                                 key={name}
                                 className="flex items-center justify-between text-sm text-stone-800"
@@ -620,7 +870,7 @@ export function LandingProductDemo() {
                       <h3 className="text-sm font-semibold">Itemized (in-app layout)</h3>
                     </div>
                     <p className="mt-1 text-xs text-stone-500">
-                      Sample bills below. Your bill appears above them when you add one and select it.
+                      Sample bills below. Your finished bill appears above examples when you select it.
                     </p>
 
                     <div className="mt-4 max-h-[min(72vh,640px)] space-y-8 overflow-y-auto pr-1">
@@ -631,8 +881,12 @@ export function LandingProductDemo() {
                           </p>
                           <ItemizedBillAppPreview
                             bill={itemizedSelected}
+                            roster={DEMO_ROSTER}
                             editableTitle
                             onTitleChange={(t) => setItemizedBillTitle(itemizedSelected.id, t)}
+                            onToggleLineParticipant={(lineId, person) =>
+                              toggleItemizedLineParticipant(itemizedSelected.id, lineId, person)
+                            }
                           />
                         </div>
                       )}
@@ -643,7 +897,11 @@ export function LandingProductDemo() {
                         </p>
                         <div className="space-y-8">
                           {ITEMIZED_EXAMPLE_BILLS.map((bill) => (
-                            <ItemizedBillAppPreview key={bill.id} bill={bill} />
+                            <ItemizedBillAppPreview
+                              key={bill.id}
+                              bill={bill}
+                              roster={['You', 'Alex', 'Sam']}
+                            />
                           ))}
                         </div>
                       </div>

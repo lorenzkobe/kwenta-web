@@ -693,6 +693,24 @@ export function GroupDetailPage() {
         </div>
 
         <div className="rounded-3xl border border-stone-200 bg-white p-5 shadow-sm">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <h2 className="text-lg font-semibold">Group payments</h2>
+              <p className="mt-0.5 text-xs text-stone-500">Recorded settlements for this group</p>
+            </div>
+            <Button
+              type="button"
+              variant="outline"
+              className="h-11 w-full shrink-0 rounded-xl sm:w-auto"
+              onClick={() => setShowPaymentHistory(true)}
+            >
+              <History className="size-4" />
+              View payment history
+            </Button>
+          </div>
+        </div>
+
+        <div className="rounded-3xl border border-stone-200 bg-white p-5 shadow-sm">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
               <ReceiptText className="size-4 text-teal-800" />
@@ -700,7 +718,7 @@ export function GroupDetailPage() {
             </div>
             <Button
               size="sm"
-              className="rounded-full"
+              className="h-10 rounded-full px-4"
               onClick={() => {
                 setEditBillId(null)
                 setShowAddBill(true)

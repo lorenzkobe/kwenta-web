@@ -91,7 +91,7 @@ export function PeoplePage() {
             Phonebook, balances, and payments across all groups and personal bills
           </p>
         </div>
-        <Button className="shrink-0 rounded-full" onClick={() => setShowAdd(true)}>
+        <Button className="h-10 shrink-0 rounded-full px-4" onClick={() => setShowAdd(true)}>
           <UserPlus className="size-4" />
           Add
         </Button>

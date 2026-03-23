@@ -2,6 +2,7 @@ import { Lock } from 'lucide-react'
 import type { SplitType } from '@/types'
 import type { PinnedSplits } from '@/lib/bill-split-form'
 import { parseSplitNumber } from '@/lib/bill-split-form'
+import { filterDecimalInput, stripLeadingZerosAmount } from '@/lib/amount-input'
 import { cn, formatCurrency } from '@/lib/utils'
 import { Input } from '@/components/ui/input'
 
@@ -55,13 +56,17 @@ export function SplitValueRows({
               {m?.isCurrentUser ? 'You' : m?.displayName}
             </span>
             <Input
-              type="number"
+              type="text"
+              inputMode="decimal"
               className="h-9 flex-1 rounded-lg text-sm"
-              min={splitType === 'percentage' ? 0 : undefined}
-              step={splitType === 'percentage' ? 0.1 : 0.01}
               placeholder={splitType === 'percentage' ? '%' : '0.00'}
               value={values[uid] ?? ''}
-              onChange={(e) => onChange(uid, e.target.value)}
+              onChange={(e) => onChange(uid, filterDecimalInput(e.target.value))}
+              onBlur={() => {
+                const v = values[uid] ?? ''
+                const next = stripLeadingZerosAmount(v)
+                if (next !== v) onChange(uid, next)
+              }}
             />
           </div>
         )

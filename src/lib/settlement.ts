@@ -189,6 +189,9 @@ export interface SettlementHistoryItem {
   groupId: string | null
   /** Set when listing across groups (e.g. home / balances). */
   groupName?: string
+  /** When set, payment was attributed to this bill */
+  billId?: string | null
+  billTitle?: string | null
   fromUserId: string
   toUserId: string
   fromName: string
@@ -213,9 +216,12 @@ export async function listSettlementHistoryForGroup(
       db.profiles.get(s.from_user_id),
       db.profiles.get(s.to_user_id),
     ])
+    const billRow = s.bill_id ? await db.bills.get(s.bill_id) : null
     items.push({
       id: s.id,
       groupId: groupId,
+      billId: s.bill_id ?? null,
+      billTitle: billRow && !billRow.is_deleted ? billRow.title : null,
       fromUserId: s.from_user_id,
       toUserId: s.to_user_id,
       fromName: fromP?.display_name ?? 'Someone',
@@ -257,10 +263,13 @@ export async function listSettlementHistoryForUser(
       db.profiles.get(s.from_user_id),
       db.profiles.get(s.to_user_id),
     ])
+    const billRow = s.bill_id ? await db.bills.get(s.bill_id) : null
     out.push({
       id: s.id,
       groupId: null,
       groupName: 'Personal',
+      billId: s.bill_id ?? null,
+      billTitle: billRow && !billRow.is_deleted ? billRow.title : null,
       fromUserId: s.from_user_id,
       toUserId: s.to_user_id,
       fromName: fromP?.display_name ?? 'Someone',

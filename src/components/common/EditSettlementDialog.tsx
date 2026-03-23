@@ -9,6 +9,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@/components/ui/select'
 import { ConfirmDialog } from '@/components/common/ConfirmDialog'
+import { filterDecimalInput, stripLeadingZerosAmount } from '@/lib/amount-input'
 
 export function EditSettlementDialog({
   item,
@@ -148,12 +149,16 @@ export function EditSettlementDialog({
             </label>
             <Input
               id="edit-settlement-amount"
-              type="number"
+              type="text"
               inputMode="decimal"
-              min={0}
-              step="0.01"
               value={amountStr}
-              onChange={(e) => setAmountStr(e.target.value)}
+              onChange={(e) => setAmountStr(filterDecimalInput(e.target.value))}
+              onBlur={() =>
+                setAmountStr((s) => {
+                  const next = stripLeadingZerosAmount(s)
+                  return next === s ? s : next
+                })
+              }
               className="rounded-lg"
             />
             {sameParty && (

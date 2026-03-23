@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo } from 'react'
-import { ArrowLeftRight, ArrowRight, X } from 'lucide-react'
+import { ArrowRight, X } from 'lucide-react'
 import { createSettlement } from '@/db/operations'
+import { filterDecimalInput, stripLeadingZerosAmount } from '@/lib/amount-input'
 import { formatCurrency } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -21,10 +22,13 @@ export function RecordSettlementDialog({
   title = 'Record payment',
   confirmLabel,
   partyPicker,
+  billId = null,
 }: {
   open: boolean
   onOpenChange: (open: boolean) => void
   groupId: string | null
+  /** When set, stored on the settlement for bill-level allocation (Phase B). */
+  billId?: string | null
   currency: string
   fromUserId: string
   toUserId: string
@@ -86,6 +90,7 @@ export function RecordSettlementDialog({
         currency,
         markedBy,
         label.trim() || undefined,
+        billId,
       )
       onRecorded()
       onOpenChange(false)
@@ -125,12 +130,15 @@ export function RecordSettlementDialog({
 
             {pickerOn ? (
               <div className="mt-3">
-                <p className="text-xs text-stone-500">Left paid right · swap if it’s reversed</p>
+                <p className="text-xs text-stone-500">
+                  From → to · tap the arrow if payer and recipient should be reversed
+                </p>
                 <div className="mt-2 flex items-center gap-2 sm:gap-3">
                   <span
                     className="min-w-0 flex-1 truncate text-end text-sm font-semibold text-stone-900"
                     title={displayFromName}
                   >
+                    <span className="text-[0.65rem] font-normal text-stone-400">From </span>
                     {displayFromName}
                   </span>
                   <Button
@@ -140,14 +148,15 @@ export function RecordSettlementDialog({
                     className="shrink-0 rounded-full"
                     disabled={saving}
                     onClick={swapParties}
-                    aria-label="Swap payer and payee"
+                    aria-label="Flip direction: swap who pays and who receives"
                   >
-                    <ArrowLeftRight className="size-4" aria-hidden />
+                    <ArrowRight className="size-4" aria-hidden />
                   </Button>
                   <span
                     className="min-w-0 flex-1 truncate text-start text-sm font-semibold text-stone-900"
                     title={displayToName}
                   >
+                    <span className="text-[0.65rem] font-normal text-stone-400">To </span>
                     {displayToName}
                   </span>
                 </div>
@@ -170,7 +179,13 @@ export function RecordSettlementDialog({
                   type="text"
                   inputMode="decimal"
                   value={amountStr}
-                  onChange={(e) => setAmountStr(e.target.value)}
+                  onChange={(e) => setAmountStr(filterDecimalInput(e.target.value))}
+                  onBlur={() =>
+                    setAmountStr((s) => {
+                      const next = stripLeadingZerosAmount(s)
+                      return next === s ? s : next
+                    })
+                  }
                   className="mt-1 rounded-lg"
                 />
               </div>

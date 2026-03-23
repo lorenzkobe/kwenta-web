@@ -1,7 +1,24 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { useLiveQuery } from 'dexie-react-hooks'
-import { useNavigate } from 'react-router-dom'
-import { Check, Copy, LogOut, Pencil, RefreshCcw, Shield, User } from 'lucide-react'
+import { Link, useNavigate } from 'react-router-dom'
+import {
+  ArrowUpRight,
+  Check,
+  ChevronRight,
+  Copy,
+  History,
+  LogOut,
+  Pencil,
+  RefreshCcw,
+  Scale,
+  Shield,
+  User,
+} from 'lucide-react'
+import { SettlementHistoryList } from '@/components/common/SettlementHistoryList'
+import { EditSettlementDialog } from '@/components/common/EditSettlementDialog'
+import { db } from '@/db/db'
+import { useUserSettlementHistory } from '@/db/hooks'
+import type { SettlementHistoryItem } from '@/lib/settlement'
 import { markVoluntarySignOut } from '@/lib/auth-session-flags'
 import { clearKwentaLocalData } from '@/lib/clear-kwenta-local'
 import { useAuth } from '@/hooks/useAuth'
@@ -11,11 +28,27 @@ import { supabase } from '@/lib/supabase'
 import { hasUnsyncedLocalDataForUser, fullSync } from '@/sync/sync-service'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { timeAgo } from '@/lib/utils'
 
 export function SettingsPage() {
   const navigate = useNavigate()
   const { user, isAuthenticated, updateDisplayName } = useAuth()
-  const { profile } = useCurrentUser()
+  const { profile, userId } = useCurrentUser()
+
+  const settlementHistory = useUserSettlementHistory(userId ?? undefined)
+  const [editingSettlement, setEditingSettlement] = useState<SettlementHistoryItem | null>(null)
+  const paymentsInvolvingYou = useMemo(() => {
+    if (!userId || !settlementHistory?.length) return []
+    return settlementHistory
+      .filter((h) => h.fromUserId === userId || h.toUserId === userId)
+      .slice(0, 8)
+  }, [userId, settlementHistory])
+
+  const recentActivity = useLiveQuery(async () => {
+    if (!userId) return []
+    const logs = await db.activity_log.orderBy('created_at').reverse().limit(8).toArray()
+    return logs.filter((l) => !l.is_deleted)
+  }, [userId])
   const isOnline = useAppStore((s) => s.isOnline)
   const syncStatus = useAppStore((s) => s.syncStatus)
   const setSyncStatus = useAppStore((s) => s.setSyncStatus)
@@ -91,8 +124,8 @@ export function SettingsPage() {
     <>
       <div className="space-y-5">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight">Settings</h1>
-          <p className="mt-1 text-sm text-stone-600">Account and app preferences</p>
+          <h1 className="text-2xl font-semibold tracking-tight">Profile</h1>
+          <p className="mt-1 text-sm text-stone-600">Balances, activity, account, and preferences</p>
         </div>
 
         <div className="rounded-3xl border border-stone-200 bg-white p-5 shadow-sm">
@@ -161,6 +194,72 @@ export function SettingsPage() {
             </div>
           )}
         </div>
+
+        <div className="rounded-3xl border border-stone-200 bg-white p-5 shadow-sm">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <h2 className="text-lg font-semibold">Balances</h2>
+              <p className="mt-1 text-sm text-stone-600">
+                Who should receive and who should pay across groups and personal bills.
+              </p>
+            </div>
+            <Scale className="size-5 shrink-0 text-teal-800" aria-hidden />
+          </div>
+          <Button asChild className="mt-4 h-10 w-full rounded-xl sm:w-auto">
+            <Link to="/app/balances" className="inline-flex items-center justify-center gap-2">
+              Open balances
+              <ChevronRight className="size-4" />
+            </Link>
+          </Button>
+        </div>
+
+        {paymentsInvolvingYou.length > 0 && (
+          <div className="rounded-3xl border border-stone-200 bg-white p-5 shadow-sm">
+            <div className="flex items-center gap-2">
+              <History className="size-4 text-teal-800" aria-hidden />
+              <h2 className="text-lg font-semibold">Your payments</h2>
+            </div>
+            <p className="mt-1 text-xs text-stone-500">
+              Recorded settlements where you paid or were paid (all groups).
+            </p>
+            <div className="mt-4">
+              <SettlementHistoryList
+                items={paymentsInvolvingYou}
+                currentUserId={userId}
+                showGroupName
+                onEdit={(item) => setEditingSettlement(item)}
+              />
+            </div>
+          </div>
+        )}
+
+        {(recentActivity?.length ?? 0) > 0 && (
+          <div className="rounded-3xl border border-stone-200 bg-white p-5 shadow-sm">
+            <div className="flex items-center gap-2">
+              <ArrowUpRight className="size-4 text-teal-800" aria-hidden />
+              <h2 className="text-lg font-semibold">Recent activity</h2>
+            </div>
+            <div className="mt-4 space-y-2">
+              {recentActivity!.map((log) => (
+                <div
+                  key={log.id}
+                  className="rounded-xl border border-stone-200 bg-stone-100/60 px-4 py-3"
+                >
+                  <p className="text-sm text-stone-600">{log.description}</p>
+                  <p className="mt-0.5 text-xs text-stone-400">{timeAgo(log.created_at)}</p>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {editingSettlement && (
+          <EditSettlementDialog
+            item={editingSettlement}
+            onClose={() => setEditingSettlement(null)}
+            onSaved={() => setEditingSettlement(null)}
+          />
+        )}
 
         <div className="rounded-3xl border border-stone-200 bg-white shadow-sm">
           <div className="divide-y divide-stone-200">

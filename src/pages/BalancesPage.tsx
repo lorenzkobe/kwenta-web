@@ -1,5 +1,5 @@
-import { useState, useEffect, useCallback } from 'react'
-import { ArrowRight, Check, History, Loader2, Scale, Users } from 'lucide-react'
+import { useState, useEffect, useCallback, useMemo } from 'react'
+import { ArrowRight, Check, History, Loader2, Scale, User, Users } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { useCurrentUser } from '@/hooks/useCurrentUser'
 import {
@@ -7,6 +7,7 @@ import {
   type GroupBalanceSummary,
   type SettlementHistoryItem,
 } from '@/lib/settlement'
+import { computePersonalNetRollup } from '@/lib/people'
 import { useUserSettlementHistory } from '@/db/hooks'
 import { SettlementHistoryList } from '@/components/common/SettlementHistoryList'
 import { EditSettlementDialog } from '@/components/common/EditSettlementDialog'
@@ -14,9 +15,28 @@ import { RecordSettlementDialog } from '@/components/common/RecordSettlementDial
 import { formatCurrency, cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 
+function mergeCurrencyTotals(
+  a: Map<string, number>,
+  b: Map<string, number>,
+): Map<string, number> {
+  const out = new Map(a)
+  for (const [cur, v] of b) {
+    out.set(cur, (out.get(cur) ?? 0) + v)
+  }
+  return out
+}
+
+function sumMapPositive(m: Map<string, number>): number {
+  let s = 0
+  for (const v of m.values()) s += v
+  return s
+}
+
 export function BalancesPage() {
   const { userId } = useCurrentUser()
   const [summaries, setSummaries] = useState<GroupBalanceSummary[]>([])
+  const [personalReceive, setPersonalReceive] = useState<Map<string, number>>(new Map())
+  const [personalPay, setPersonalPay] = useState<Map<string, number>>(new Map())
   const [loading, setLoading] = useState(true)
   const [editingSettlement, setEditingSettlement] = useState<SettlementHistoryItem | null>(null)
   const [recordSettlement, setRecordSettlement] = useState<{
@@ -32,8 +52,13 @@ export function BalancesPage() {
 
   const reloadSummaries = useCallback(async () => {
     if (!userId) return
-    const data = await computeAllGroupBalances(userId)
+    const [data, personal] = await Promise.all([
+      computeAllGroupBalances(userId),
+      computePersonalNetRollup(userId),
+    ])
     setSummaries(data)
+    setPersonalReceive(personal.toReceiveByCurrency)
+    setPersonalPay(personal.toPayByCurrency)
   }, [userId])
 
   useEffect(() => {
@@ -42,8 +67,37 @@ export function BalancesPage() {
     reloadSummaries().finally(() => setLoading(false))
   }, [userId, reloadSummaries])
 
-  const overallToReceive = summaries.reduce((sum, s) => sum + s.totalToReceive, 0)
-  const overallToPay = summaries.reduce((sum, s) => sum + s.totalToPay, 0)
+  const groupReceiveByCurrency = useMemo(() => {
+    const m = new Map<string, number>()
+    for (const s of summaries) {
+      if (s.totalToReceive <= 0) continue
+      m.set(s.currency, (m.get(s.currency) ?? 0) + s.totalToReceive)
+    }
+    return m
+  }, [summaries])
+
+  const groupPayByCurrency = useMemo(() => {
+    const m = new Map<string, number>()
+    for (const s of summaries) {
+      if (s.totalToPay <= 0) continue
+      m.set(s.currency, (m.get(s.currency) ?? 0) + s.totalToPay)
+    }
+    return m
+  }, [summaries])
+
+  const overallReceiveByCurrency = useMemo(
+    () => mergeCurrencyTotals(groupReceiveByCurrency, personalReceive),
+    [groupReceiveByCurrency, personalReceive],
+  )
+  const overallPayByCurrency = useMemo(
+    () => mergeCurrencyTotals(groupPayByCurrency, personalPay),
+    [groupPayByCurrency, personalPay],
+  )
+
+  const hasPersonalNet =
+    sumMapPositive(personalReceive) > 0.005 || sumMapPositive(personalPay) > 0.005
+  const hasGroupSummaries = summaries.length > 0
+  const showEmptyState = !hasGroupSummaries && !hasPersonalNet
 
   if (loading) {
     return (
@@ -65,19 +119,67 @@ export function BalancesPage() {
       <div className="grid gap-3 sm:grid-cols-2">
         <div className="rounded-2xl border border-emerald-500/20 bg-emerald-500/8 p-4">
           <p className="text-xs font-medium text-emerald-600/70">To receive</p>
-          <p className="mt-1 text-2xl font-semibold text-emerald-600">
-            {formatCurrency(overallToReceive)}
-          </p>
+          {(() => {
+            const lines = [...overallReceiveByCurrency.entries()].filter(([, v]) => v > 0.005)
+            if (lines.length === 0) {
+              return (
+                <p className="mt-1 text-2xl font-semibold text-emerald-600">
+                  {formatCurrency(0)}
+                </p>
+              )
+            }
+            if (lines.length === 1) {
+              const [cur, v] = lines[0]
+              return (
+                <p className="mt-1 text-2xl font-semibold text-emerald-600">
+                  {formatCurrency(v, cur)}
+                </p>
+              )
+            }
+            return (
+              <ul className="mt-1 space-y-0.5">
+                {lines.map(([cur, v]) => (
+                  <li key={cur} className="text-lg font-semibold text-emerald-600">
+                    {formatCurrency(v, cur)}
+                  </li>
+                ))}
+              </ul>
+            )
+          })()}
         </div>
         <div className="rounded-2xl border border-amber-500/20 bg-amber-500/8 p-4">
           <p className="text-xs font-medium text-amber-600/70">To pay</p>
-          <p className="mt-1 text-2xl font-semibold text-amber-600">
-            {formatCurrency(overallToPay)}
-          </p>
+          {(() => {
+            const lines = [...overallPayByCurrency.entries()].filter(([, v]) => v > 0.005)
+            if (lines.length === 0) {
+              return (
+                <p className="mt-1 text-2xl font-semibold text-amber-600">
+                  {formatCurrency(0)}
+                </p>
+              )
+            }
+            if (lines.length === 1) {
+              const [cur, v] = lines[0]
+              return (
+                <p className="mt-1 text-2xl font-semibold text-amber-600">
+                  {formatCurrency(v, cur)}
+                </p>
+              )
+            }
+            return (
+              <ul className="mt-1 space-y-0.5">
+                {lines.map(([cur, v]) => (
+                  <li key={cur} className="text-lg font-semibold text-amber-600">
+                    {formatCurrency(v, cur)}
+                  </li>
+                ))}
+              </ul>
+            )
+          })()}
         </div>
       </div>
 
-      {summaries.length === 0 ? (
+      {showEmptyState ? (
         <div className="rounded-3xl border border-stone-200 bg-white p-5 shadow-sm">
           <div className="flex flex-col items-center py-12 text-center">
             <div className="rounded-2xl bg-stone-100 p-4">
@@ -85,18 +187,104 @@ export function BalancesPage() {
             </div>
             <p className="mt-3 text-sm font-medium text-stone-500">No balances yet</p>
             <p className="mt-1 text-xs text-stone-400">
-              Join a group and add bills to see balances
+              Add a personal bill or join a group and split expenses to see balances
             </p>
-            <Button asChild size="sm" className="mt-4 rounded-full">
-              <Link to="/app/groups">
-                <Users className="size-3.5" />
-                Go to groups
-              </Link>
-            </Button>
+            <div className="mt-4 flex flex-wrap justify-center gap-2">
+              <Button asChild size="sm" className="rounded-full">
+                <Link to="/app/people">
+                  <User className="size-3.5" />
+                  People
+                </Link>
+              </Button>
+              <Button asChild size="sm" variant="secondary" className="rounded-full">
+                <Link to="/app/groups">
+                  <Users className="size-3.5" />
+                  Groups
+                </Link>
+              </Button>
+            </div>
           </div>
         </div>
       ) : (
-        summaries.map((summary) => {
+        <>
+        {(() => {
+          const personalPaymentHistory =
+            userSettlementHistory?.filter((h) => h.groupId === null) ?? []
+          const showPersonal =
+            hasPersonalNet || personalPaymentHistory.length > 0
+          if (!showPersonal) return null
+          return (
+            <div
+              key="personal"
+              className="rounded-3xl border border-stone-200 bg-white p-5 shadow-sm"
+            >
+              <div className="flex items-center justify-between">
+                <div>
+                  <Link
+                    to="/app/people"
+                    className="text-lg font-semibold text-stone-800 hover:text-teal-800"
+                  >
+                    Personal
+                  </Link>
+                  <p className="text-xs text-stone-400">{hasPersonalNet ? 'Outside groups' : 'Settlements'}</p>
+                </div>
+                <User className="size-4 text-teal-800" />
+              </div>
+              {hasPersonalNet && (
+                <div className="mt-4 grid gap-2 sm:grid-cols-2">
+                  <div className="rounded-xl border border-emerald-500/15 bg-emerald-500/8 px-3 py-2">
+                    <p className="text-xs font-medium text-emerald-600/70">To receive</p>
+                    <div className="mt-1 space-y-0.5">
+                      {[...personalReceive.entries()].filter(([, v]) => v > 0.005).length ===
+                      0 ? (
+                        <p className="text-sm font-semibold text-emerald-600">{formatCurrency(0)}</p>
+                      ) : (
+                        [...personalReceive.entries()]
+                          .filter(([, v]) => v > 0.005)
+                          .map(([cur, v]) => (
+                            <p key={cur} className="text-sm font-semibold text-emerald-600">
+                              {formatCurrency(v, cur)}
+                            </p>
+                          ))
+                      )}
+                    </div>
+                  </div>
+                  <div className="rounded-xl border border-amber-500/15 bg-amber-500/8 px-3 py-2">
+                    <p className="text-xs font-medium text-amber-600/70">To pay</p>
+                    <div className="mt-1 space-y-0.5">
+                      {[...personalPay.entries()].filter(([, v]) => v > 0.005).length === 0 ? (
+                        <p className="text-sm font-semibold text-amber-600">{formatCurrency(0)}</p>
+                      ) : (
+                        [...personalPay.entries()]
+                          .filter(([, v]) => v > 0.005)
+                          .map(([cur, v]) => (
+                            <p key={cur} className="text-sm font-semibold text-amber-600">
+                              {formatCurrency(v, cur)}
+                            </p>
+                          ))
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
+              {personalPaymentHistory.length > 0 && (
+                <div className="mt-4 border-t border-stone-100 pt-4">
+                  <div className="flex items-center gap-2">
+                    <History className="size-3.5 text-stone-400" />
+                    <p className="text-xs font-medium text-stone-500">Payment history</p>
+                  </div>
+                  <SettlementHistoryList
+                    className="mt-2"
+                    items={personalPaymentHistory}
+                    currentUserId={userId}
+                    onEdit={(item) => setEditingSettlement(item)}
+                  />
+                </div>
+              )}
+            </div>
+          )
+        })()}
+        {summaries.map((summary) => {
           const groupPaymentHistory =
             userSettlementHistory?.filter((h) => h.groupId === summary.groupId) ?? []
           return (
@@ -222,7 +410,8 @@ export function BalancesPage() {
             )}
           </div>
           )
-        })
+        })}
+        </>
       )}
 
       {editingSettlement && (

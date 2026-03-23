@@ -15,6 +15,7 @@ import {
   resolveRecipientProfileIdForNotify,
 } from '@/lib/kwenta-notifications'
 import { computeSplits, type SplitInput } from '@/lib/splits'
+import { participantUnionForBill } from '@/lib/people'
 
 function notifySyncAfterMutation() {
   triggerSync()
@@ -702,14 +703,27 @@ export async function createSettlement(
   currency: string,
   markedBy: string,
   label?: string,
+  billId?: string | null,
 ): Promise<string> {
   const settlementId = generateId()
   const labelTrim = (label ?? '').trim()
+
+  if (billId) {
+    const bill = await db.bills.get(billId)
+    if (!bill || bill.is_deleted) throw new Error('Bill not found')
+    if (bill.group_id !== groupId) throw new Error('Bill does not match this payment context')
+    const union = await participantUnionForBill(billId)
+    union.add(bill.created_by)
+    if (!union.has(fromUserId) || !union.has(toUserId)) {
+      throw new Error('Both people must be on this bill')
+    }
+  }
 
   await db.transaction('rw', [db.settlements, db.activity_log, db.profiles], async () => {
     await db.settlements.add({
       ...syncFields({ id: settlementId }),
       group_id: groupId,
+      bill_id: billId ?? null,
       from_user_id: fromUserId,
       to_user_id: toUserId,
       amount,

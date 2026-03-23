@@ -16,6 +16,7 @@ import {
   redistributeWithPinned,
   type PinnedSplits,
 } from '@/lib/bill-split-form'
+import { filterDecimalInput, stripLeadingZerosAmount } from '@/lib/amount-input'
 import { cn, formatCurrency } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -266,6 +267,37 @@ export function AddBillDialog({
 
   function updateItem(key: string, patch: Partial<ItemDraft>) {
     setItems((prev) => prev.map((i) => (i.key === key ? { ...i, ...patch } : i)))
+  }
+
+  function commitItemLineAmount(key: string, raw: string) {
+    const v = stripLeadingZerosAmount(raw)
+    const amt = parseFloat(v) || 0
+    setItems((prev) =>
+      prev.map((i) => {
+        if (i.key !== key) return i
+        if (i.splitType !== 'custom' || i.selectedUserIds.length === 0 || amt <= 0) {
+          return { ...i, amount: v }
+        }
+        if (Object.keys(i.pinnedSplit).length === 0) {
+          return {
+            ...i,
+            amount: v,
+            splitValues: equalCustomMap(i.selectedUserIds, amt),
+            pinnedSplit: {},
+          }
+        }
+        return {
+          ...i,
+          amount: v,
+          splitValues: redistributeWithPinned(
+            i.selectedUserIds,
+            i.splitValues,
+            i.pinnedSplit,
+            amt,
+          ),
+        }
+      }),
+    )
   }
 
   function removeItem(key: string) {
@@ -535,13 +567,12 @@ export function AddBillDialog({
                   <div className="flex flex-col gap-2">
                     <label className="text-sm font-medium">Total amount</label>
                     <Input
-                      type="number"
+                      type="text"
+                      inputMode="decimal"
                       placeholder="0.00"
-                      min="0"
-                      step="0.01"
                       value={simpleAmount}
                       onChange={(e) => {
-                        const v = e.target.value
+                        const v = filterDecimalInput(e.target.value)
                         setSimpleAmount(v)
                         const amt = parseFloat(v) || 0
                         const ids = selectedIdsRef.current
@@ -557,6 +588,12 @@ export function AddBillDialog({
                           })
                         }
                       }}
+                      onBlur={() =>
+                        setSimpleAmount((prev) => {
+                          const next = stripLeadingZerosAmount(prev)
+                          return next === prev ? prev : next
+                        })
+                      }
                       className="text-lg font-semibold"
                     />
                   </div>
@@ -677,14 +714,13 @@ export function AddBillDialog({
                             onChange={(e) => updateItem(item.key, { name: e.target.value })}
                           />
                           <Input
-                            type="number"
+                            type="text"
+                            inputMode="decimal"
                             placeholder="0.00"
                             className="rounded-lg sm:w-28"
                             value={item.amount}
-                            min="0"
-                            step="0.01"
                             onChange={(e) => {
-                              const v = e.target.value
+                              const v = filterDecimalInput(e.target.value)
                               const amt = parseFloat(v) || 0
                               const key = item.key
                               setItems((prev) =>
@@ -718,6 +754,7 @@ export function AddBillDialog({
                                 }),
                               )
                             }}
+                            onBlur={() => commitItemLineAmount(item.key, item.amount)}
                           />
                         </div>
                         {items.length > 1 && (
