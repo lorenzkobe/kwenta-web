@@ -5,6 +5,25 @@ import { computeGroupBalances } from '@/lib/settlement'
 import { supabase } from '@/lib/supabase'
 import { formatCurrency } from '@/lib/utils'
 
+/**
+ * Fetch a profile from the server and insert it into local Dexie if missing.
+ * Needed when RPC lookup finds a profile that hasn't been synced to this device.
+ */
+async function ensureProfileExistsLocally(profileId: string): Promise<void> {
+  const existing = await db.profiles.get(profileId)
+  if (existing) return
+
+  const { data, error } = await supabase.rpc('kwenta_fetch_profile_for_linking', {
+    p_id: profileId,
+  })
+  if (error || !data) {
+    console.warn('[linkLookup] Failed to fetch profile for local cache:', error?.message)
+    return
+  }
+  const row = data as Record<string, unknown>
+  await db.profiles.put({ ...row, synced_at: row.updated_at } as import('@/types').Profile)
+}
+
 const LINK_UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 
@@ -47,7 +66,10 @@ export async function findRemoteProfileIdForLinking(input: string): Promise<stri
     console.warn('[linkLookup] RPC error:', error.message)
     return null
   }
-  if (typeof rpcId === 'string' && rpcId) return rpcId
+  if (typeof rpcId === 'string' && rpcId) {
+    await ensureProfileExistsLocally(rpcId)
+    return rpcId
+  }
 
   return null
 }
