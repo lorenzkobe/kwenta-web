@@ -43,7 +43,11 @@ export async function findRemoteProfileIdForLinking(input: string): Promise<stri
   const { data: rpcId, error } = await supabase.rpc('kwenta_lookup_profile_id_by_email', {
     p_email: raw,
   })
-  if (!error && typeof rpcId === 'string' && rpcId) return rpcId
+  if (error) {
+    console.warn('[linkLookup] RPC error:', error.message)
+    return null
+  }
+  if (typeof rpcId === 'string' && rpcId) return rpcId
 
   return null
 }
