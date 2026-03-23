@@ -31,8 +31,10 @@ export function LandingFinalCta() {
             <div className="grid gap-3 sm:grid-cols-3 lg:grid-cols-1 lg:gap-4">
               <div className="rounded-2xl border border-white/10 bg-white/6 p-4">
                 <Users className="size-5 text-teal-300" />
-                <p className="mt-3 font-semibold">Groups & people</p>
-                <p className="mt-1 text-sm text-stone-400">Share bills with the people you actually split with.</p>
+                <p className="mt-3 font-semibold">Personal + groups</p>
+                <p className="mt-1 text-sm text-stone-400">
+                  Your own bills (you paid) and group spaces where everyone can add what they fronted.
+                </p>
               </div>
               <div className="rounded-2xl border border-white/10 bg-white/6 p-4">
                 <ReceiptText className="size-5 text-teal-300" />

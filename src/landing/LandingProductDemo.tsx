@@ -503,7 +503,8 @@ export function LandingProductDemo() {
           </h2>
           <p className="mt-3 text-base leading-relaxed text-stone-600">
             Preview only—no account. Pick who splits each bill or line (You, Alex, Sam), and use numbers only
-            for amounts. Itemized bills show in the list after you add the first line.
+            for amounts. Itemized bills show in the list after you add the first line. In the real app, personal
+            bills treat you as the payer; group bills let everyone in the group add what they paid.
           </p>
         </div>
 

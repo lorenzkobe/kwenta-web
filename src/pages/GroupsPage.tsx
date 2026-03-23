@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { ChevronRight, Layers3, Plus, Users, X } from 'lucide-react'
 import { useCurrentUser } from '@/hooks/useCurrentUser'
@@ -10,6 +10,9 @@ import { formatCurrency, cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@/components/ui/select'
+
+type GroupFilter = 'all' | 'has_balance' | 'balanced'
+type GroupSort = 'name_asc' | 'name_desc' | 'updated_desc' | 'updated_asc'
 
 function myBalanceLine(summary: GroupBalanceSummary) {
   const { totalToReceive, totalToPay, currency } = summary
@@ -34,6 +37,8 @@ export function GroupsPage() {
   const [name, setName] = useState('')
   const [currency, setCurrency] = useState('PHP')
   const [creating, setCreating] = useState(false)
+  const [filter, setFilter] = useState<GroupFilter>('all')
+  const [sort, setSort] = useState<GroupSort>('name_asc')
 
   const groupsWithBalances = useLiveQuery(async () => {
     if (!userId) return []
@@ -43,6 +48,7 @@ export function GroupsPage() {
       name: string
       currency: string
       memberCount: number
+      updated_at: string
       summary: GroupBalanceSummary
     }> = []
     for (const s of summaries) {
@@ -50,11 +56,50 @@ export function GroupsPage() {
       if (!g || g.is_deleted) continue
       const members = await db.group_members.where('group_id').equals(g.id).toArray()
       const memberCount = members.filter((m) => !m.is_deleted).length
-      rows.push({ id: g.id, name: g.name, currency: g.currency, memberCount, summary: s })
+      rows.push({
+        id: g.id,
+        name: g.name,
+        currency: g.currency,
+        memberCount,
+        updated_at: g.updated_at,
+        summary: s,
+      })
     }
-    rows.sort((a, b) => a.name.localeCompare(b.name))
     return rows
   }, [userId])
+
+  const groups = useMemo(() => {
+    const list = groupsWithBalances ?? []
+    let out = list
+    if (filter === 'has_balance') {
+      out = out.filter(({ summary }) => {
+        const { totalToReceive, totalToPay } = summary
+        return totalToReceive >= 0.01 || totalToPay >= 0.01
+      })
+    }
+    if (filter === 'balanced') {
+      out = out.filter(({ summary }) => {
+        const { totalToReceive, totalToPay } = summary
+        return totalToReceive < 0.01 && totalToPay < 0.01
+      })
+    }
+    const copy = [...out]
+    copy.sort((a, b) => {
+      switch (sort) {
+        case 'name_asc':
+          return a.name.localeCompare(b.name, undefined, { sensitivity: 'base' })
+        case 'name_desc':
+          return b.name.localeCompare(a.name, undefined, { sensitivity: 'base' })
+        case 'updated_desc':
+          return b.updated_at.localeCompare(a.updated_at)
+        case 'updated_asc':
+          return a.updated_at.localeCompare(b.updated_at)
+        default:
+          return 0
+      }
+    })
+    return copy
+  }, [groupsWithBalances, filter, sort])
 
   async function handleCreate() {
     if (!userId || !name.trim()) return
@@ -77,11 +122,43 @@ export function GroupsPage() {
             {groupsWithBalances?.length ?? 0} group{(groupsWithBalances?.length ?? 0) !== 1 ? 's' : ''}
           </p>
         </div>
-        <Button className="rounded-full" onClick={() => setShowCreate(true)}>
+        <Button className="h-10 rounded-full" onClick={() => setShowCreate(true)}>
           <Plus className="size-4" />
           New group
         </Button>
       </div>
+
+      {groupsWithBalances && groupsWithBalances.length > 0 && (
+        <div className="flex flex-col gap-2 rounded-2xl border border-stone-200 bg-white p-3 shadow-sm sm:flex-row sm:flex-wrap sm:items-center">
+          <div className="flex min-w-0 flex-1 flex-col gap-1 sm:max-w-48">
+            <span className="text-xs font-medium text-stone-500">Filter</span>
+            <Select value={filter} onValueChange={(v) => setFilter(v as GroupFilter)}>
+              <SelectTrigger className="h-10 rounded-xl">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All</SelectItem>
+                <SelectItem value="has_balance">Has balance</SelectItem>
+                <SelectItem value="balanced">Balanced</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="flex min-w-0 flex-1 flex-col gap-1 sm:max-w-56">
+            <span className="text-xs font-medium text-stone-500">Sort</span>
+            <Select value={sort} onValueChange={(v) => setSort(v as GroupSort)}>
+              <SelectTrigger className="h-10 rounded-xl">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="name_asc">Name · A → Z</SelectItem>
+                <SelectItem value="name_desc">Name · Z → A</SelectItem>
+                <SelectItem value="updated_desc">Updated · Newest first</SelectItem>
+                <SelectItem value="updated_asc">Updated · Oldest first</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+        </div>
+      )}
 
       {showCreate && (
         <div className="rounded-3xl border border-teal-800/20 bg-teal-800/5 p-5 shadow-sm">
@@ -146,9 +223,13 @@ export function GroupsPage() {
             </p>
           </div>
         </div>
+      ) : groups.length === 0 ? (
+        <div className="rounded-3xl border border-stone-200 bg-white p-5 text-center text-sm text-stone-500 shadow-sm">
+          No groups match this filter.
+        </div>
       ) : (
         <div className="space-y-3">
-          {groupsWithBalances.map((group) => {
+          {groups.map((group) => {
             const { text, className } = myBalanceLine(group.summary)
             return (
             <Link

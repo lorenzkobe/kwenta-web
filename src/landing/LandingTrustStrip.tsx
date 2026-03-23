@@ -2,7 +2,7 @@ import { ReceiptText, RefreshCcw, Users, WifiOff } from 'lucide-react'
 
 const items = [
   { icon: ReceiptText, label: 'Split by item or total' },
-  { icon: Users, label: 'Groups & shared bills' },
+  { icon: Users, label: 'Personal bills + group circles' },
   { icon: WifiOff, label: 'Offline-first storage' },
   { icon: RefreshCcw, label: 'Cloud sync when online' },
 ] as const

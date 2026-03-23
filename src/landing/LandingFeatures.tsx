@@ -38,7 +38,8 @@ export function LandingFeatures() {
           </h2>
           <p className="mt-4 text-base leading-relaxed text-stone-600">
             From mixed restaurant orders to recurring group bills, Kwenta is built for situations where
-            “split evenly” isn’t enough.
+            “split evenly” isn’t enough. Personal bills assume you’re the payer; group bills are for
+            collaborative circles where each member can add their own expenses.
           </p>
         </div>
 

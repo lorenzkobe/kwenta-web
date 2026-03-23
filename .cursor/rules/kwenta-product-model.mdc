@@ -1,0 +1,11 @@
+---
+description: Kwenta product model — who paid (personal vs group)
+alwaysApply: true
+---
+
+# Product model
+
+- **Personal bills** (no group): treat every bill as **paid by the current user**. The app is for *their* ledger—what they fronted and who owes them or how they split it. Do not design flows that assume “someone else paid” on a personal bill.
+- **Group bills**: shared context where **any member** can add expenses; those entries can be attributed to whoever paid within the group flow. If another person paid for something in real life and it is **not** in this user’s Kwenta, they record it on **their** account.
+
+When writing copy, defaults, or UX: personal = “you paid”; group = collaborative ledger for that circle.

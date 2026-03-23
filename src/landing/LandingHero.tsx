@@ -30,6 +30,13 @@ export function LandingHero() {
             locally first, then let your account sync it when you’re online.
           </p>
 
+          <p className="mt-4 max-w-2xl text-base leading-relaxed text-stone-700">
+            <span className="font-semibold text-stone-900">Personal bills</span> are your ledger—expenses{' '}
+            <span className="font-semibold text-stone-900">you</span> paid for.{' '}
+            <span className="font-semibold text-stone-900">Group bills</span> are shared: anyone in the group can add
+            what they fronted; if someone else paid in real life, they record it on their account.
+          </p>
+
           <div className="mt-8 flex flex-wrap gap-3">
             <Button
               asChild

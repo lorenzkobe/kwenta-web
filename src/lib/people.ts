@@ -287,6 +287,7 @@ export function formatPairwiseSummary(byCurrency: Map<string, number>): {
 /** Profile ids you share expenses with (groups, bills, settlements). */
 export async function collectRelatedProfileIds(meId: string): Promise<Set<string>> {
   const ids = new Set<string>()
+  const meIds = await expandProfileIdsForSplitMatching(meId)
 
   const memberships = await db.group_members.where('user_id').equals(meId).toArray()
   const myGroupIds = new Set(
@@ -310,7 +311,7 @@ export async function collectRelatedProfileIds(meId: string): Promise<Set<string
     if (bill.group_id && !myGroupIds.has(bill.group_id)) continue
 
     const items = await db.bill_items.where('bill_id').equals(bill.id).toArray()
-    let iParticipate = false
+    let iParticipate = meIds.has(bill.created_by)
     const participantIds = new Set<string>()
     for (const item of items) {
       if (item.is_deleted) continue
@@ -318,7 +319,7 @@ export async function collectRelatedProfileIds(meId: string): Promise<Set<string
       for (const s of splits) {
         if (s.is_deleted) continue
         participantIds.add(s.user_id)
-        if (s.user_id === meId) iParticipate = true
+        if (meIds.has(s.user_id)) iParticipate = true
       }
     }
     if (!iParticipate) continue
@@ -364,9 +365,13 @@ export async function expandProfileIdsForSplitMatching(profileId: string): Promi
   return ids
 }
 
-/** Everyone selected on any line of the bill (active splits only). */
+/** Payer plus everyone on a line split (active splits only). Payer may not appear on splits if they fronted the whole bill. */
 export async function participantUnionForBill(billId: string): Promise<Set<string>> {
+  const bill = await db.bills.get(billId)
   const union = new Set<string>()
+  if (bill && !bill.is_deleted) {
+    union.add(bill.created_by)
+  }
   const items = await db.bill_items.where('bill_id').equals(billId).toArray()
   for (const item of items) {
     if (item.is_deleted) continue
