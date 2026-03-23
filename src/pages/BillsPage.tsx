@@ -9,6 +9,7 @@ import { participantUnionForBill } from '@/lib/people'
 import { useCurrentUser } from '@/hooks/useCurrentUser'
 import { formatCurrency, timeAgo, cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
+import { ConfirmDialog } from '@/components/common/ConfirmDialog'
 import {
   Select,
   SelectContent,
@@ -35,6 +36,7 @@ export function BillsPage() {
   const { userId } = useCurrentUser()
   const [filter, setFilter] = useState<BillFilter>('all')
   const [sort, setSort] = useState<BillSort>('date_desc')
+  const [deleteTarget, setDeleteTarget] = useState<{ id: string; title: string } | null>(null)
 
   const enrichedBills = useLiveQuery(async () => {
     if (!userId) return [] as EnrichedBill[]
@@ -100,12 +102,13 @@ export function BillsPage() {
     return copy
   }, [enrichedBills, filter, sort])
 
-  async function handleDelete(billId: string) {
-    if (!userId) return
-    await deleteBill(billId, userId)
+  async function executeDeleteBill() {
+    if (!userId || !deleteTarget) return
+    await deleteBill(deleteTarget.id, userId)
   }
 
   return (
+    <>
     <div className="space-y-5">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div>
@@ -242,7 +245,7 @@ export function BillsPage() {
                     variant="ghost"
                     size="icon-xs"
                     className="rounded-full text-stone-400 hover:text-red-600"
-                    onClick={() => handleDelete(bill.id)}
+                    onClick={() => setDeleteTarget({ id: bill.id, title: bill.title })}
                   >
                     <Trash2 className="size-3.5" />
                   </Button>
@@ -253,5 +256,20 @@ export function BillsPage() {
         </div>
       )}
     </div>
+
+    <ConfirmDialog
+      open={deleteTarget !== null}
+      onOpenChange={(open) => !open && setDeleteTarget(null)}
+      title="Delete this bill?"
+      description={
+        deleteTarget
+          ? `“${deleteTarget.title}” will be removed. This cannot be undone on this device.`
+          : 'This bill will be removed. This cannot be undone on this device.'
+      }
+      confirmLabel="Delete bill"
+      variant="danger"
+      onConfirm={executeDeleteBill}
+    />
+    </>
   )
 }

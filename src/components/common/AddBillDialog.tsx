@@ -23,6 +23,7 @@ import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@/components/ui/select'
 import { SplitValueRows } from '@/components/common/SplitValueRows'
+import { ConfirmDialog } from '@/components/common/ConfirmDialog'
 
 type BillMode = 'simple' | 'itemized'
 
@@ -490,6 +491,7 @@ export function AddBillDialog({
   const isEdit = Boolean(editBillId)
 
   return (
+    <>
     <div className="fixed inset-0 z-50 flex items-end justify-center sm:items-center">
       <div className="fixed inset-0 bg-black/30 backdrop-blur-sm" onClick={onClose} />
 
@@ -867,5 +869,24 @@ export function AddBillDialog({
         </div>
       </div>
     </div>
+
+    <ConfirmDialog
+      open={removeItemKey !== null}
+      onOpenChange={(open) => !open && setRemoveItemKey(null)}
+      title="Remove this line?"
+      description={
+        pendingRemoveLine?.name.trim()
+          ? `“${pendingRemoveLine.name.trim()}” will be removed from this bill.`
+          : 'This line will be removed from this bill.'
+      }
+      confirmLabel="Remove line"
+      variant="danger"
+      onConfirm={() => {
+        if (!removeItemKey) return
+        removeItem(removeItemKey)
+        setRemoveItemKey(null)
+      }}
+    />
+    </>
   )
 }

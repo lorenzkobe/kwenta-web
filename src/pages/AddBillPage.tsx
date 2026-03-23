@@ -41,6 +41,7 @@ import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@/components/ui/select'
 import { SplitValueRows } from '@/components/common/SplitValueRows'
+import { ConfirmDialog } from '@/components/common/ConfirmDialog'
 
 type BillMode = 'simple' | 'itemized'
 
@@ -122,6 +123,7 @@ export function AddBillPage() {
   const [addPersonName, setAddPersonName] = useState('')
   const [addPersonBusy, setAddPersonBusy] = useState(false)
   const [addPersonTarget, setAddPersonTarget] = useState<'simple' | string>('simple')
+  const [removeItemKey, setRemoveItemKey] = useState<string | null>(null)
 
   const groups = useLiveQuery(async () => {
     if (!userId) return []
@@ -429,6 +431,8 @@ export function AddBillPage() {
       return next.length === 0 ? [newItem()] : next
     })
   }
+
+  const pendingRemoveLine = removeItemKey ? items.find((i) => i.key === removeItemKey) : undefined
 
   function toggleUserForItem(itemKey: string, uid: string) {
     setItems((prev) =>
@@ -1068,7 +1072,7 @@ export function AddBillPage() {
                             size="icon-xs"
                             type="button"
                             className="mt-1.5 rounded-full text-red-600"
-                            onClick={() => removeItem(item.key)}
+                            onClick={() => setRemoveItemKey(item.key)}
                           >
                             <Trash2 className="size-3.5" />
                           </Button>
@@ -1238,6 +1242,24 @@ export function AddBillPage() {
         </Button>
       </div>
     )}
+
+    <ConfirmDialog
+      open={removeItemKey !== null}
+      onOpenChange={(open) => !open && setRemoveItemKey(null)}
+      title="Remove this line?"
+      description={
+        pendingRemoveLine?.name.trim()
+          ? `“${pendingRemoveLine.name.trim()}” will be removed from this bill.`
+          : 'This line will be removed from this bill.'
+      }
+      confirmLabel="Remove line"
+      variant="danger"
+      onConfirm={() => {
+        if (!removeItemKey) return
+        removeItem(removeItemKey)
+        setRemoveItemKey(null)
+      }}
+    />
     </>
   )
 }

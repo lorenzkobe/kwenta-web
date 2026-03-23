@@ -12,6 +12,7 @@ import { useCurrentUser } from '@/hooks/useCurrentUser'
 import { formatCurrency } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { RecordSettlementDialog } from '@/components/common/RecordSettlementDialog'
+import { ConfirmDialog } from '@/components/common/ConfirmDialog'
 
 type BillDetails = Awaited<ReturnType<typeof getBillWithDetails>>
 
@@ -37,6 +38,7 @@ export function BillDetailPage() {
     fromName: string
     toName: string
   } | null>(null)
+  const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false)
 
   const reloadBill = useCallback(() => {
     if (!billId) return
@@ -75,7 +77,7 @@ export function BillDetailPage() {
     void reloadBillPairs()
   }, [reloadBillPairs])
 
-  async function handleDelete() {
+  async function executeDeleteBill() {
     if (!billId || !userId) return
     await deleteBill(billId, userId)
     navigate(backPath)
@@ -106,6 +108,7 @@ export function BillDetailPage() {
   }
 
   return (
+    <>
     <div className="space-y-5">
       <div className="flex items-center justify-between">
         <Button asChild variant="ghost" size="sm" className="rounded-full gap-1">
@@ -125,7 +128,7 @@ export function BillDetailPage() {
             variant="ghost"
             size="sm"
             className="rounded-full text-red-600"
-            onClick={handleDelete}
+            onClick={() => setDeleteConfirmOpen(true)}
           >
             <Trash2 className="size-4" />
             Delete
@@ -282,5 +285,20 @@ export function BillDetailPage() {
         />
       )}
     </div>
+
+    <ConfirmDialog
+      open={deleteConfirmOpen}
+      onOpenChange={setDeleteConfirmOpen}
+      title="Delete this bill?"
+      description={
+        bill
+          ? `“${bill.title}” will be removed. This cannot be undone on this device.`
+          : 'This bill will be removed. This cannot be undone on this device.'
+      }
+      confirmLabel="Delete bill"
+      variant="danger"
+      onConfirm={executeDeleteBill}
+    />
+    </>
   )
 }

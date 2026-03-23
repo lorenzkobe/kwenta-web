@@ -87,6 +87,10 @@ function ManageMembersDialog({
   const [newName, setNewName] = useState('')
   const [adding, setAdding] = useState(false)
   const [removing, setRemoving] = useState<string | null>(null)
+  const [removeMemberTarget, setRemoveMemberTarget] = useState<{
+    userId: string
+    profileName: string
+  } | null>(null)
   const [suggestions, setSuggestions] = useState<
     Awaited<ReturnType<typeof getMemberSuggestions>>
   >([])
@@ -148,6 +152,7 @@ function ManageMembersDialog({
   }
 
   return (
+    <>
     <div className="fixed inset-0 z-50 flex items-end justify-center p-4 sm:items-center">
       {sheetBackdrop(onClose)}
       <div className="relative w-full max-w-sm animate-[slideUp_0.25s_ease-out] rounded-3xl border border-stone-200 bg-white shadow-[0_20px_60px_rgba(28,25,23,0.18)]">
@@ -186,7 +191,9 @@ function ManageMembersDialog({
                       size="icon-xs"
                       className="rounded-full text-stone-400 hover:text-red-600"
                       disabled={removing === m.userId}
-                      onClick={() => handleRemove(m.userId)}
+                      onClick={() =>
+                        setRemoveMemberTarget({ userId: m.userId, profileName: m.profileName })
+                      }
                     >
                       {removing === m.userId ? (
                         <span className="size-3.5 animate-spin rounded-full border-2 border-stone-300 border-t-stone-600" />
@@ -255,6 +262,21 @@ function ManageMembersDialog({
         </div>
       </div>
     </div>
+
+    <ConfirmDialog
+      open={removeMemberTarget !== null}
+      onOpenChange={(open) => !open && setRemoveMemberTarget(null)}
+      title="Remove from group?"
+      description={
+        removeMemberTarget
+          ? `${removeMemberTarget.profileName} will be removed from this group. Their splits on group bills will be cleared or adjusted.`
+          : 'This member will be removed from the group.'
+      }
+      confirmLabel="Remove member"
+      variant="danger"
+      onConfirm={executeRemoveMember}
+    />
+    </>
   )
 }
 
