@@ -67,6 +67,15 @@ function syncErrMessage(err: unknown): string {
   }
 }
 
+function isDatabaseClosedError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false
+  return (
+    err.name === 'DatabaseClosedError' ||
+    err.message.includes('DatabaseClosedError') ||
+    err.message.includes('Database has been closed')
+  )
+}
+
 type PushFilterContext = {
   groupsICreated: Set<string>
   memberGroupIds: Set<string>
@@ -305,6 +314,10 @@ export async function pullChanges(userId: string): Promise<{ pulled: number; err
 
       pulled += rows.length
     } catch (err) {
+      if (isDatabaseClosedError(err)) {
+        // Sign-out/local clear can close Dexie while a pull is in-flight. Treat as cancelled.
+        return { pulled, errors }
+      }
       errors.push(`Pull ${tableName}: ${syncErrMessage(err)}`)
     }
   }
@@ -482,12 +495,24 @@ export async function syncRoundTrip(userId: string): Promise<{
 
   const lastPull = localStorage.getItem(KWENTA_LAST_PULL_STORAGE_KEY) ?? '1970-01-01T00:00:00.000Z'
 
-  const ctx = await buildPushFilterContext(userId)
+  let ctx: PushFilterContext
+  try {
+    ctx = await buildPushFilterContext(userId)
+  } catch (err) {
+    if (isDatabaseClosedError(err)) return { pushed: 0, pulled: 0, errors: [] }
+    return { pushed: 0, pulled: 0, errors: [syncErrMessage(err)] }
+  }
   const pPush: Record<string, SyncFields[]> = {}
 
   for (const tableName of TABLE_NAMES) {
     const table = getLocalTable(tableName)
-    const allRecords = await table.toArray()
+    let allRecords: SyncFields[]
+    try {
+      allRecords = await table.toArray()
+    } catch (err) {
+      if (isDatabaseClosedError(err)) return { pushed: 0, pulled: 0, errors: [] }
+      return { pushed: 0, pulled: 0, errors: [syncErrMessage(err)] }
+    }
     const unsyncedRaw = allRecords.filter((r: SyncFields) => {
       if (r.synced_at === null) return true
       return r.updated_at > r.synced_at

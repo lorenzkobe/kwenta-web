@@ -25,6 +25,15 @@ let debounceTimer: ReturnType<typeof setTimeout> | null = null
 let isSyncing = false
 let backoffMs = BACKOFF_INITIAL_MS
 
+function isDatabaseClosedError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false
+  return (
+    err.name === 'DatabaseClosedError' ||
+    err.message.includes('DatabaseClosedError') ||
+    err.message.includes('Database has been closed')
+  )
+}
+
 function clearRetryTimer() {
   if (retryTimer) {
     clearTimeout(retryTimer)
@@ -118,6 +127,11 @@ async function runSync(reason: SyncRunReason) {
       await hydrateLinkedRemoteProfilesForActor(userId)
     }
   } catch (err) {
+    if (isDatabaseClosedError(err)) {
+      // Expected during sign-out/local wipe races; don't escalate/retry.
+      useAppStore.getState().setSyncStatus('idle')
+      return
+    }
     console.warn('[sync] failed:', err)
     useAppStore.getState().setSyncStatus('error')
     scheduleRetry()
