@@ -11,7 +11,9 @@ import type {
 import { generateId, getDeviceId, now } from '@/lib/utils'
 import { syncRoundTrip } from '@/sync/sync-service'
 import {
+  notifyAddedToGroup,
   notifyBillParticipantsCreated,
+  notifyPaymentRecorded,
   notifyProfileLinked,
   resolveRecipientProfileIdForNotify,
 } from '@/lib/kwenta-notifications'
@@ -407,6 +409,19 @@ export async function addGroupMember(
     })
   })
 
+  const group = await db.groups.get(groupId)
+  const actor = await db.profiles.get(addedBy)
+  const recipient = await resolveRecipientProfileIdForNotify(userId!)
+  if (recipient && recipient !== addedBy && group && !group.is_deleted) {
+    void notifyAddedToGroup({
+      actorId: addedBy,
+      actorName: actor?.display_name?.trim() || 'Someone',
+      recipientId: recipient,
+      groupId,
+      groupName: group.name,
+    })
+  }
+
   notifySyncAfterMutation()
   return userId!
 }
@@ -480,6 +495,18 @@ export async function addExistingGroupMember(
       description: `Added "${p.display_name}" to group`,
     })
   })
+  const group = await db.groups.get(groupId)
+  const actor = await db.profiles.get(addedBy)
+  const recipient = await resolveRecipientProfileIdForNotify(memberUserId)
+  if (recipient && recipient !== addedBy && group && !group.is_deleted) {
+    void notifyAddedToGroup({
+      actorId: addedBy,
+      actorName: actor?.display_name?.trim() || 'Someone',
+      recipientId: recipient,
+      groupId,
+      groupName: group.name,
+    })
+  }
   notifySyncAfterMutation()
 }
 
@@ -776,6 +803,33 @@ export async function createSettlement(
       description: `${fromProfile?.display_name ?? 'Someone'} settled ${new Intl.NumberFormat('en-PH', { style: 'currency', currency, minimumFractionDigits: 0 }).format(amount)} with ${toProfile?.display_name ?? 'someone'}${labelSuffix}`,
     })
   })
+
+  const actor = await db.profiles.get(markedBy)
+  const fromProfile = await db.profiles.get(fromUserId)
+  const toProfile = await db.profiles.get(toUserId)
+  let groupName: string | null = null
+  if (groupId) {
+    const g = await db.groups.get(groupId)
+    if (g && !g.is_deleted) groupName = g.name
+  }
+
+  const recipientCandidates = [fromUserId, toUserId].filter((id) => id !== markedBy)
+  for (const candidate of recipientCandidates) {
+    const recipientId = await resolveRecipientProfileIdForNotify(candidate)
+    if (!recipientId || recipientId === markedBy) continue
+    void notifyPaymentRecorded({
+      actorId: markedBy,
+      actorName: actor?.display_name?.trim() || 'Someone',
+      recipientId,
+      amount,
+      currency,
+      fromName: fromProfile?.display_name?.trim() || 'Someone',
+      toName: toProfile?.display_name?.trim() || 'Someone',
+      groupId,
+      groupName,
+      settlementId,
+    })
+  }
 
   notifySyncAfterMutation()
   return settlementId

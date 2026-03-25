@@ -51,6 +51,7 @@ Required variables:
 ```env
 VITE_SUPABASE_URL=https://your-project.supabase.co
 VITE_SUPABASE_PUBLISHABLE_DEFAULT_KEY=your-publishable-key
+VITE_APP_ORIGIN=https://your-production-domain
 ```
 
 ### 3. Run the app
@@ -86,7 +87,7 @@ This project expects:
 - `http://localhost:5173/login` (Vite dev)
 - `https://your-production-domain/login`
 
-Sign-up uses `emailRedirectTo` → `/login` so the confirmation link opens the Kwenta app instead of a blank or unrelated page. If a redirect URL is missing from the allow list, Supabase will show an error or redirect incorrectly.
+Sign-up uses `emailRedirectTo` → `/login`, and reset-password uses `/app/settings`. These are built from `VITE_APP_ORIGIN` (fallback is `window.location.origin`). Set `VITE_APP_ORIGIN` per environment to avoid production emails pointing to localhost.
 
 **Security notification emails** (for example “password changed”) must be **enabled in the Supabase project** (Authentication settings / notifications) or they will not be sent. HTML for the password-changed template lives in `supabase/email-templates/password-changed.html` for copy-paste into the dashboard.
 

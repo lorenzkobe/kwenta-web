@@ -2,7 +2,11 @@ import { db } from '@/db/db'
 import { supabase } from '@/lib/supabase'
 import { useAppStore } from '@/store/app-store'
 
-export type KwentaNotificationKind = 'profile_linked' | 'bill_participant'
+export type KwentaNotificationKind =
+  | 'profile_linked'
+  | 'bill_participant'
+  | 'payment_recorded'
+  | 'added_to_group'
 
 export interface KwentaNotificationRow {
   id: string
@@ -81,6 +85,61 @@ export async function notifyBillParticipantsCreated(params: {
 
   const { error } = await supabase.from('kwenta_notifications').insert(rows)
   if (error) console.warn('[kwenta-notifications] bill_participant:', error.message)
+}
+
+export async function notifyPaymentRecorded(params: {
+  actorId: string
+  actorName: string
+  recipientId: string
+  amount: number
+  currency: string
+  fromName: string
+  toName: string
+  groupId: string | null
+  groupName: string | null
+  settlementId: string
+}): Promise<void> {
+  if (!shouldSendCloudNotification()) return
+  const scope =
+    params.groupId && params.groupName
+      ? `Group · ${params.groupName}`
+      : 'Personal payment'
+  const amountLabel = new Intl.NumberFormat('en-PH', {
+    style: 'currency',
+    currency: params.currency,
+    minimumFractionDigits: 0,
+  }).format(params.amount)
+
+  const { error } = await supabase.from('kwenta_notifications').insert({
+    recipient_id: params.recipientId,
+    actor_id: params.actorId,
+    kind: 'payment_recorded',
+    title: 'Payment recorded',
+    body: `${params.actorName} recorded ${amountLabel} (${params.fromName} -> ${params.toName}) · ${scope}.`,
+    entity_id: params.settlementId,
+    group_id: params.groupId,
+  })
+  if (error) console.warn('[kwenta-notifications] payment_recorded:', error.message)
+}
+
+export async function notifyAddedToGroup(params: {
+  actorId: string
+  actorName: string
+  recipientId: string
+  groupId: string
+  groupName: string
+}): Promise<void> {
+  if (!shouldSendCloudNotification()) return
+  const { error } = await supabase.from('kwenta_notifications').insert({
+    recipient_id: params.recipientId,
+    actor_id: params.actorId,
+    kind: 'added_to_group',
+    title: 'Added to a group',
+    body: `${params.actorName} added you to “${params.groupName}”.`,
+    entity_id: params.groupId,
+    group_id: params.groupId,
+  })
+  if (error) console.warn('[kwenta-notifications] added_to_group:', error.message)
 }
 
 export async function fetchKwentaNotifications(recipientId: string, limit = 50): Promise<KwentaNotificationRow[]> {

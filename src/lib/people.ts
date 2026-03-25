@@ -302,14 +302,33 @@ async function iterCanonicalPeerIds(meId: string): Promise<string[]> {
   const out: string[] = []
   for (const oid of related) {
     if (oid === meId || meIds.has(oid)) continue
+    let canonical = oid
     const p = await db.profiles.get(oid)
-    const canonical = p?.linked_profile_id ?? oid
+    if (p && !p.is_deleted && p.is_local && p.owner_id === meId) {
+      canonical = p.id
+    } else {
+      const localLinked = await db.profiles
+        .where('owner_id')
+        .equals(meId)
+        .filter((x) => !x.is_deleted && x.is_local && x.linked_profile_id === oid)
+        .first()
+      if (localLinked) {
+        canonical = localLinked.id
+      } else if (p?.linked_profile_id) {
+        canonical = p.linked_profile_id
+      }
+    }
     if (meIds.has(canonical)) continue
     if (seenPeer.has(canonical)) continue
     seenPeer.add(canonical)
     out.push(canonical)
   }
   return out
+}
+
+/** Related people de-duplicated across local and linked account IDs. */
+export async function listCanonicalRelatedProfileIds(meId: string): Promise<string[]> {
+  return iterCanonicalPeerIds(meId)
 }
 
 /** Aggregate personal-only pairwise nets (non-group bills + personal settlements) across contacts. */

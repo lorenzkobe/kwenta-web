@@ -1,6 +1,7 @@
 import { lazy, Suspense } from 'react'
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom'
 import { Loader2 } from 'lucide-react'
+import { Toaster } from 'sonner'
 import { LandingPage } from '@/landing/LandingPage'
 import { AppShell } from '@/components/layout/AppShell'
 import { RequireAuth } from '@/components/auth/RequireAuth'
@@ -33,6 +34,14 @@ function App() {
   return (
     <BrowserRouter>
       <AuthProvider>
+        <Toaster
+          richColors
+          position="bottom-right"
+          duration={6000}
+          closeButton
+          expand={false}
+          offset={{ bottom: '5rem', right: '1rem' }}
+        />
         <Suspense fallback={<PageLoader />}>
           <Routes>
             <Route path="/" element={<LandingPage />} />

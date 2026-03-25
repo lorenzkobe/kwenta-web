@@ -1,11 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { BellRing, RefreshCw } from 'lucide-react'
+import { BellRing, CheckCheck, RefreshCw } from 'lucide-react'
+import { toast } from 'sonner'
 import {
+  fetchUnreadKwentaNotificationCount,
   fetchKwentaNotifications,
   markKwentaNotificationRead,
   type KwentaNotificationRow,
 } from '@/lib/kwenta-notifications'
+import { supabase } from '@/lib/supabase'
 import { useAppStore } from '@/store/app-store'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
@@ -41,6 +44,51 @@ export function NotificationsBell({ userId }: { userId: string }) {
   }, [open, loadList])
 
   useEffect(() => {
+    void (async () => {
+      if (!isOnline) return
+      const count = await fetchUnreadKwentaNotificationCount(userId)
+      setUnread(count)
+    })()
+  }, [userId, isOnline])
+
+  useEffect(() => {
+    if (!isOnline) return
+    const channel = supabase
+      .channel(`kwenta_notifications:${userId}`)
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'kwenta_notifications',
+          filter: `recipient_id=eq.${userId}`,
+        },
+        (payload) => {
+          const next = payload.new as KwentaNotificationRow | null
+          if (!next) return
+          if (payload.eventType === 'INSERT') {
+            setItems((prev) => [next, ...prev.filter((p) => p.id !== next.id)].slice(0, 50))
+            if (!next.read_at) {
+              setUnread((n) => n + 1)
+              toast(next.title, { description: next.body, id: next.id })
+            }
+          } else if (payload.eventType === 'UPDATE') {
+            setItems((prev) => prev.map((p) => (p.id === next.id ? next : p)))
+            void (async () => {
+              const count = await fetchUnreadKwentaNotificationCount(userId)
+              setUnread(count)
+            })()
+          }
+        },
+      )
+      .subscribe()
+
+    return () => {
+      void supabase.removeChannel(channel)
+    }
+  }, [userId, isOnline])
+
+  useEffect(() => {
     if (!open) return
     function onDoc(e: MouseEvent) {
       if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) setOpen(false)
@@ -55,9 +103,18 @@ export function NotificationsBell({ userId }: { userId: string }) {
     setOpen(false)
     if (row.kind === 'bill_participant' && row.entity_id) {
       navigate(`/app/bills/${row.entity_id}`)
+    } else if (row.kind === 'added_to_group' && row.group_id) {
+      navigate(`/app/groups/${row.group_id}`)
     } else {
       navigate('/app/people')
     }
+  }
+
+  async function markAllRead() {
+    const pending = items.filter((row) => !row.read_at)
+    if (pending.length === 0) return
+    await Promise.all(pending.map((row) => markKwentaNotificationRead(row.id, userId)))
+    void loadList()
   }
 
   return (
@@ -88,21 +145,32 @@ export function NotificationsBell({ userId }: { userId: string }) {
             <p className="text-xs font-semibold uppercase tracking-wide text-stone-400">
               Notifications
             </p>
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon-xs"
-              className="rounded-full text-stone-500"
-              aria-label="Refresh notifications"
-              disabled={!isOnline || loading}
-              onClick={() => void loadList()}
-            >
-              <RefreshCw className={cn('size-3.5', loading && 'animate-spin')} />
-            </Button>
+            <div className="flex items-center gap-1">
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-xs"
+                className="rounded-full text-stone-500"
+                aria-label="Mark all as read"
+                disabled={!isOnline || loading || unread === 0}
+                onClick={() => void markAllRead()}
+              >
+                <CheckCheck className="size-3.5" />
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-xs"
+                className="rounded-full text-stone-500"
+                aria-label="Refresh notifications"
+                disabled={!isOnline || loading}
+                onClick={() => void loadList()}
+              >
+                <RefreshCw className={cn('size-3.5', loading && 'animate-spin')} />
+              </Button>
+            </div>
           </div>
-          <p className="px-4 pt-2 text-[0.65rem] text-stone-400">
-            Refreshes when you open this panel — not polled in the background.
-          </p>
+          <p className="px-4 pt-2 text-[0.65rem] text-stone-400">Realtime updates when online.</p>
           {!isOnline && (
             <p className="px-4 py-6 text-center text-sm text-stone-500">Connect to the internet to load alerts.</p>
           )}

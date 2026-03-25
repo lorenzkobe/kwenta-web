@@ -1,3 +1,4 @@
+/* eslint-disable react-refresh/only-export-components */
 import {
   createContext,
   useCallback,
@@ -8,7 +9,7 @@ import {
   type ReactNode,
 } from 'react'
 import type { User } from '@supabase/supabase-js'
-import { supabase } from '@/lib/supabase'
+import { authRedirectUrl, supabase } from '@/lib/supabase'
 import { consumeVoluntarySignOut, SESSION_EXPIRED_MESSAGE_KEY } from '@/lib/auth-session-flags'
 import { db } from '@/db/db'
 import { useAppStore } from '@/store/app-store'
@@ -63,7 +64,10 @@ type AuthContextValue = {
   loading: boolean
   isAuthenticated: boolean
   signIn: (email: string, password: string) => Promise<{ error: Error | null }>
-  signUp: (email: string, password: string) => Promise<{ error: Error | null }>
+  signUp: (
+    email: string,
+    password: string,
+  ) => Promise<{ error: Error | null; requiresEmailConfirmation: boolean }>
   resetPassword: (email: string) => Promise<{ error: Error | null }>
   updateDisplayName: (displayName: string) => Promise<void>
 }
@@ -144,20 +148,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [])
 
   const signUp = useCallback(async (email: string, password: string) => {
-    const { error } = await supabase.auth.signUp({
+    const { data, error } = await supabase.auth.signUp({
       email,
       password,
       options: {
         // Must match an entry under Supabase → Authentication → URL Configuration → Redirect URLs
-        emailRedirectTo: `${window.location.origin}/login`,
+        emailRedirectTo: authRedirectUrl('/login'),
       },
     })
-    return { error }
+    return { error, requiresEmailConfirmation: !data.session }
   }, [])
 
   const resetPassword = useCallback(async (email: string) => {
     const { error } = await supabase.auth.resetPasswordForEmail(email, {
-      redirectTo: `${window.location.origin}/app/settings`,
+      redirectTo: authRedirectUrl('/app/settings'),
     })
     return { error }
   }, [])
@@ -177,6 +181,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       updated_at: timestamp,
       synced_at: null,
     })
+
+    const memberships = await db.group_members.where('user_id').equals(userId).toArray()
+    for (const m of memberships) {
+      if (m.is_deleted) continue
+      await db.group_members.update(m.id, {
+        display_name: trimmed,
+        updated_at: timestamp,
+        synced_at: null,
+      })
+    }
 
     const {
       data: { session },

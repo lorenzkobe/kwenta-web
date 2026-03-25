@@ -81,11 +81,15 @@ export function LoginPage() {
           setError(error.message)
         }
       } else if (mode === 'signup') {
-        const { error } = await signUp(email, password)
+        const { error, requiresEmailConfirmation } = await signUp(email, password)
         if (error) {
           setError(error.message)
         } else {
-          setSuccess('Account created! Check your email to confirm, then sign in.')
+          setSuccess(
+            requiresEmailConfirmation
+              ? 'Account created! Check your email to confirm, then sign in.'
+              : 'Account created! You can sign in now.',
+          )
           setMode('login')
         }
       } else {

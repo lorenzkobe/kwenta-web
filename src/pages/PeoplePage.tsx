@@ -3,9 +3,9 @@ import { Link } from 'react-router-dom'
 import { BookUser, ChevronRight, Loader2, Plus, UserPlus } from 'lucide-react'
 import { useLiveQuery } from 'dexie-react-hooks'
 import {
-  collectRelatedProfileIds,
   computePairwiseNet,
   formatPairwiseSummary,
+  listCanonicalRelatedProfileIds,
   resolveProfileDisplay,
 } from '@/lib/people'
 import { createLocalProfile } from '@/db/operations'
@@ -23,8 +23,7 @@ export function PeoplePage() {
 
   const rows = useLiveQuery(async () => {
     if (!userId) return []
-    const ids = await collectRelatedProfileIds(userId)
-    ids.delete(userId)
+    const ids = await listCanonicalRelatedProfileIds(userId)
     const out: {
       id: string
       displayName: string
