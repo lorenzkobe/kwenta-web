@@ -10,6 +10,9 @@ export default defineConfig({
     tailwindcss(),
     VitePWA({
       registerType: 'autoUpdate',
+      strategies: 'injectManifest',
+      srcDir: 'src',
+      filename: 'sw.ts',
       includeAssets: ['favicon.svg', 'icons.svg'],
       manifest: {
         name: 'Kwenta — Bill Splitter',
@@ -25,11 +28,15 @@ export default defineConfig({
           { src: '/pwa-512x512.png', sizes: '512x512', type: 'image/png', purpose: 'any maskable' },
         ],
       },
-      workbox: {
+      injectManifest: {
         globPatterns: ['**/*.{js,css,html,ico,png,svg,woff2}'],
       },
     }),
   ],
+  build: {
+    // Prevent occasional workbox SW generation failures caused by terser renderChunk hanging.
+    minify: 'esbuild',
+  },
   resolve: {
     alias: {
       '@': path.resolve(__dirname, './src'),

@@ -135,8 +135,14 @@ export function AddBillDialog({
     let cancelled = false
     setLoadingEdit(true)
     getBillWithDetails(editBillId).then((d) => {
-      if (cancelled || !d) {
+      if (cancelled) return
+      if (!d) {
         setLoadingEdit(false)
+        return
+      }
+      if (d.created_by !== currentUserId) {
+        setLoadingEdit(false)
+        onClose()
         return
       }
       setTitle(d.title)
@@ -179,7 +185,7 @@ export function AddBillDialog({
     return () => {
       cancelled = true
     }
-  }, [editBillId])
+  }, [editBillId, currentUserId, onClose])
 
   function setSimpleSplitTypeAndValues(t: SplitType) {
     setSimpleSplitType(t)

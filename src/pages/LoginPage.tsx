@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Link, useLocation, useNavigate } from 'react-router-dom'
+import { Link, useLocation, useNavigate, useSearchParams } from 'react-router-dom'
 import { ArrowRight, Eye, EyeOff, Loader2, Wallet } from 'lucide-react'
 import { SESSION_EXPIRED_MESSAGE_KEY } from '@/lib/auth-session-flags'
 import { useAuth } from '@/hooks/useAuth'
@@ -11,6 +11,7 @@ type Mode = 'login' | 'signup' | 'forgot'
 export function LoginPage() {
   const navigate = useNavigate()
   const location = useLocation()
+  const [searchParams] = useSearchParams()
   const from = (location.state as { from?: string } | null)?.from ?? '/app'
   const { signIn, signUp, resetPassword, isAuthenticated } = useAuth()
   const [mode, setMode] = useState<Mode>('login')
@@ -28,6 +29,22 @@ export function LoginPage() {
       setSessionExpiredNotice(true)
     }
   }, [])
+
+  useEffect(() => {
+    const err = searchParams.get('error')
+    const desc = searchParams.get('error_description')
+    if (!err && !desc) return
+    const message = (() => {
+      const raw = desc || err || 'Something went wrong'
+      try {
+        return decodeURIComponent(raw.replace(/\+/g, ' '))
+      } catch {
+        return raw
+      }
+    })()
+    setError(message)
+    navigate('/login', { replace: true })
+  }, [searchParams, navigate])
 
   useEffect(() => {
     if (isAuthenticated) {

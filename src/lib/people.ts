@@ -8,8 +8,12 @@ import { formatCurrency } from '@/lib/utils'
 /**
  * Fetch a profile from the server and insert it into local Dexie if missing.
  * Needed when RPC lookup finds a profile that hasn't been synced to this device.
+ *
+ * After sign-out / sign-in, normal sync pulls your own rows and owned local contacts, but not other
+ * users’ account rows (RLS). Linked contacts still need the remote row for display — this RPC is
+ * allowed to return that for linking.
  */
-async function ensureProfileExistsLocally(profileId: string): Promise<void> {
+export async function fetchRemoteProfileIntoDexie(profileId: string): Promise<void> {
   const existing = await db.profiles.get(profileId)
   if (existing) return
 
@@ -22,6 +26,20 @@ async function ensureProfileExistsLocally(profileId: string): Promise<void> {
   }
   const row = data as Record<string, unknown>
   await db.profiles.put({ ...row, synced_at: row.updated_at } as import('@/types').Profile)
+}
+
+/** After pull/sync, load remote rows for any owned local contacts that reference `linked_profile_id`. */
+export async function hydrateLinkedRemoteProfilesForActor(actorUserId: string): Promise<void> {
+  const locals = await db.profiles
+    .where('owner_id')
+    .equals(actorUserId)
+    .filter((p) => p.is_local && !p.is_deleted && Boolean(p.linked_profile_id))
+    .toArray()
+  for (const p of locals) {
+    if (p.linked_profile_id) {
+      await fetchRemoteProfileIntoDexie(p.linked_profile_id)
+    }
+  }
 }
 
 const LINK_UUID_RE =
@@ -67,7 +85,7 @@ export async function findRemoteProfileIdForLinking(input: string): Promise<stri
     return null
   }
   if (typeof rpcId === 'string' && rpcId) {
-    await ensureProfileExistsLocally(rpcId)
+    await fetchRemoteProfileIntoDexie(rpcId)
     return rpcId
   }
 
@@ -81,15 +99,27 @@ export interface ProfileDisplay {
 
 /** Resolved label for UI (linked accounts show remote name). */
 export async function resolveProfileDisplay(profileId: string): Promise<ProfileDisplay> {
-  const p = await db.profiles.get(profileId)
+  let p = await db.profiles.get(profileId)
+  if (!p) {
+    await fetchRemoteProfileIntoDexie(profileId)
+    p = await db.profiles.get(profileId)
+  }
   if (!p || p.is_deleted) return { displayName: 'Unknown' }
   if (p.linked_profile_id) {
-    const linked = await db.profiles.get(p.linked_profile_id)
+    let linked = await db.profiles.get(p.linked_profile_id)
+    if (!linked) {
+      await fetchRemoteProfileIntoDexie(p.linked_profile_id)
+      linked = await db.profiles.get(p.linked_profile_id)
+    }
     if (linked && !linked.is_deleted) {
       return {
         displayName: linked.display_name,
         subtitle: `Linked · Saved as ${p.display_name}`,
       }
+    }
+    return {
+      displayName: p.display_name,
+      subtitle: 'Linked · Loading their profile…',
     }
   }
   return {
@@ -123,12 +153,12 @@ export async function computePairwiseNet(
       const active = splits.filter((s) => !s.is_deleted)
       const mySplit = active.find((s) => meIds.has(s.user_id))
       const otherSplit = active.find((s) => otherIds.has(s.user_id))
-      if (!otherSplit) continue
-
       const cur = bill.currency
       const prev = byCurrency.get(cur) ?? 0
 
+      // Payer is often not on a line split; only require the split row that exists for that side.
       if (meIds.has(bill.created_by)) {
+        if (!otherSplit) continue
         byCurrency.set(cur, prev + otherSplit.computed_amount)
       } else if (otherIds.has(bill.created_by)) {
         if (!mySplit) continue
@@ -180,9 +210,9 @@ export async function computePairwiseNetForBill(
     const active = splits.filter((s) => !s.is_deleted)
     const mySplit = active.find((s) => meIds.has(s.user_id))
     const otherSplit = active.find((s) => otherIds.has(s.user_id))
-    if (!otherSplit) continue
 
     if (meIds.has(bill.created_by)) {
+      if (!otherSplit) continue
       net += otherSplit.computed_amount
     } else if (otherIds.has(bill.created_by)) {
       if (!mySplit) continue
@@ -230,12 +260,11 @@ export async function computePairwiseNetPersonalOnly(
       const active = splits.filter((s) => !s.is_deleted)
       const mySplit = active.find((s) => meIds.has(s.user_id))
       const otherSplit = active.find((s) => otherIds.has(s.user_id))
-      if (!otherSplit) continue
-
       const cur = bill.currency
       const prev = byCurrency.get(cur) ?? 0
 
       if (meIds.has(bill.created_by)) {
+        if (!otherSplit) continue
         byCurrency.set(cur, prev + otherSplit.computed_amount)
       } else if (otherIds.has(bill.created_by)) {
         if (!mySplit) continue
@@ -265,17 +294,34 @@ export async function computePairwiseNetPersonalOnly(
   return byCurrency
 }
 
+/** One logical peer per person (dedupes local contact + linked remote). */
+async function iterCanonicalPeerIds(meId: string): Promise<string[]> {
+  const related = await collectRelatedProfileIds(meId)
+  const meIds = await expandProfileIdsForSplitMatching(meId)
+  const seenPeer = new Set<string>()
+  const out: string[] = []
+  for (const oid of related) {
+    if (oid === meId || meIds.has(oid)) continue
+    const p = await db.profiles.get(oid)
+    const canonical = p?.linked_profile_id ?? oid
+    if (meIds.has(canonical)) continue
+    if (seenPeer.has(canonical)) continue
+    seenPeer.add(canonical)
+    out.push(canonical)
+  }
+  return out
+}
+
 /** Aggregate personal-only pairwise nets (non-group bills + personal settlements) across contacts. */
 export async function computePersonalNetRollup(meId: string): Promise<{
   toReceiveByCurrency: Map<string, number>
   toPayByCurrency: Map<string, number>
 }> {
-  const related = await collectRelatedProfileIds(meId)
+  const peers = await iterCanonicalPeerIds(meId)
   const toReceiveByCurrency = new Map<string, number>()
   const toPayByCurrency = new Map<string, number>()
 
-  for (const oid of related) {
-    if (oid === meId) continue
+  for (const oid of peers) {
     const m = await computePairwiseNetPersonalOnly(meId, oid)
     for (const [cur, v] of m) {
       if (v > 0.005) {
@@ -287,6 +333,23 @@ export async function computePersonalNetRollup(meId: string): Promise<{
   }
 
   return { toReceiveByCurrency, toPayByCurrency }
+}
+
+/** Per-contact personal nets for Balances UI (non-zero only). */
+export async function getPersonalBalanceContactRows(meId: string): Promise<
+  { otherId: string; displayName: string; netByCurrency: Map<string, number> }[]
+> {
+  const peers = await iterCanonicalPeerIds(meId)
+  const rows: { otherId: string; displayName: string; netByCurrency: Map<string, number> }[] = []
+  for (const oid of peers) {
+    const m = await computePairwiseNetPersonalOnly(meId, oid)
+    const has = [...m.values()].some((v) => Math.abs(v) > 0.005)
+    if (!has) continue
+    const disp = await resolveProfileDisplay(oid)
+    rows.push({ otherId: oid, displayName: disp.displayName, netByCurrency: m })
+  }
+  rows.sort((a, b) => a.displayName.localeCompare(b.displayName))
+  return rows
 }
 
 export function formatPairwiseSummary(byCurrency: Map<string, number>): {
@@ -332,7 +395,7 @@ export async function collectRelatedProfileIds(meId: string): Promise<Set<string
   for (const gid of myGroupIds) {
     const members = await db.group_members.where('group_id').equals(gid).toArray()
     for (const m of members) {
-      if (!m.is_deleted && m.user_id !== meId) ids.add(m.user_id)
+      if (!m.is_deleted && !meIds.has(m.user_id)) ids.add(m.user_id)
     }
   }
 
@@ -342,28 +405,30 @@ export async function collectRelatedProfileIds(meId: string): Promise<Set<string
 
     const items = await db.bill_items.where('bill_id').equals(bill.id).toArray()
     let iParticipate = meIds.has(bill.created_by)
-    const participantIds = new Set<string>()
     for (const item of items) {
       if (item.is_deleted) continue
       const splits = await db.item_splits.where('item_id').equals(item.id).toArray()
       for (const s of splits) {
         if (s.is_deleted) continue
-        participantIds.add(s.user_id)
         if (meIds.has(s.user_id)) iParticipate = true
       }
     }
     if (!iParticipate) continue
-    for (const uid of participantIds) {
-      if (uid !== meId) ids.add(uid)
+
+    // Include payer (created_by) even when not on any line — otherwise the other party’s
+    // personal balances omit the person who paid.
+    const union = await participantUnionForBill(bill.id)
+    for (const uid of union) {
+      if (!meIds.has(uid)) ids.add(uid)
     }
   }
 
   const settlements = await db.settlements.filter((s) => !s.is_deleted && s.is_settled).toArray()
   for (const s of settlements) {
-    if (s.from_user_id === meId || s.to_user_id === meId) {
-      if (s.from_user_id !== meId) ids.add(s.from_user_id)
-      if (s.to_user_id !== meId) ids.add(s.to_user_id)
-    }
+    const involvesMe = meIds.has(s.from_user_id) || meIds.has(s.to_user_id)
+    if (!involvesMe) continue
+    if (!meIds.has(s.from_user_id)) ids.add(s.from_user_id)
+    if (!meIds.has(s.to_user_id)) ids.add(s.to_user_id)
   }
 
   return ids

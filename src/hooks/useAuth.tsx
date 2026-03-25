@@ -1,58 +1,116 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from 'react'
 import type { User } from '@supabase/supabase-js'
 import { supabase } from '@/lib/supabase'
 import { consumeVoluntarySignOut, SESSION_EXPIRED_MESSAGE_KEY } from '@/lib/auth-session-flags'
 import { db } from '@/db/db'
 import { useAppStore } from '@/store/app-store'
 import { triggerSync } from '@/sync/sync-manager'
+import type { Profile } from '@/types'
 import { getDeviceId, now } from '@/lib/utils'
 
+/**
+ * Seed Dexie with the server profile when possible. Avoid inserting a local stub before the first
+ * sync: kwenta_sync applies pushes before pulls, and a stub would overwrite Postgres display_name.
+ * Uses put() so parallel callers don't race on add().
+ */
 async function ensureProfile(userId: string, email: string) {
   const existing = await db.profiles.get(userId)
-  if (!existing) {
-    const timestamp = now()
-    await db.profiles.add({
-      id: userId,
-      email,
-      display_name: email.split('@')[0] || 'User',
-      avatar_url: null,
-      is_local: false,
-      linked_profile_id: null,
-      owner_id: null,
-      created_at: timestamp,
-      updated_at: timestamp,
-      synced_at: null,
-      is_deleted: false,
-      device_id: getDeviceId(),
-    })
-    triggerSync()
+  if (existing) return
+
+  const { data: remote, error } = await supabase.from('profiles').select('*').eq('id', userId).maybeSingle()
+
+  if (error) {
+    console.warn('[auth] could not load profile from cloud', error)
   }
+
+  if (remote) {
+    const r = remote as Profile
+    await db.profiles.put({
+      ...r,
+      synced_at: r.updated_at,
+    })
+    return
+  }
+
+  const timestamp = now()
+  await db.profiles.put({
+    id: userId,
+    email,
+    display_name: email.split('@')[0] || 'User',
+    avatar_url: null,
+    is_local: false,
+    linked_profile_id: null,
+    owner_id: null,
+    created_at: timestamp,
+    updated_at: timestamp,
+    synced_at: null,
+    is_deleted: false,
+    device_id: getDeviceId(),
+  })
+  triggerSync()
 }
 
-export function useAuth() {
+type AuthContextValue = {
+  user: User | null
+  loading: boolean
+  isAuthenticated: boolean
+  signIn: (email: string, password: string) => Promise<{ error: Error | null }>
+  signUp: (email: string, password: string) => Promise<{ error: Error | null }>
+  resetPassword: (email: string) => Promise<{ error: Error | null }>
+  updateDisplayName: (displayName: string) => Promise<void>
+}
+
+const AuthContext = createContext<AuthContextValue | null>(null)
+
+/**
+ * Single source of truth for session + profile bootstrap. Must wrap any tree that calls `useAuth`.
+ * (Previously each `useAuth()` call had its own state, so AppShell re-entered `loading: true` after
+ * RequireAuth and could spin forever if `ensureProfile` threw.)
+ */
+export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null)
   const [loading, setLoading] = useState(true)
   const setCurrentUserId = useAppStore((s) => s.setCurrentUserId)
   const prevAuthUserIdRef = useRef<string | null>(null)
 
   useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      const u = session?.user ?? null
-      setUser(u)
-      if (u) {
-        void ensureProfile(u.id, u.email ?? '')
-        setCurrentUserId(u.id)
-        prevAuthUserIdRef.current = u.id
-      } else {
-        setCurrentUserId(null)
-        prevAuthUserIdRef.current = null
+    void (async () => {
+      try {
+        const {
+          data: { session },
+        } = await supabase.auth.getSession()
+        const u = session?.user ?? null
+        setUser(u)
+        if (u) {
+          try {
+            await ensureProfile(u.id, u.email ?? '')
+          } catch (e) {
+            console.warn('[auth] ensureProfile failed during bootstrap', e)
+          }
+          setCurrentUserId(u.id)
+          prevAuthUserIdRef.current = u.id
+        } else {
+          setCurrentUserId(null)
+          prevAuthUserIdRef.current = null
+        }
+      } catch (e) {
+        console.warn('[auth] session bootstrap failed', e)
+      } finally {
+        setLoading(false)
       }
-      setLoading(false)
-    })
+    })()
 
     const {
       data: { subscription },
-    } = supabase.auth.onAuthStateChange((event, session) => {
+    } = supabase.auth.onAuthStateChange(async (event, session) => {
       const u = session?.user ?? null
       const nextId = u?.id ?? null
 
@@ -66,7 +124,11 @@ export function useAuth() {
 
       setUser(u)
       if (u) {
-        void ensureProfile(u.id, u.email ?? '')
+        try {
+          await ensureProfile(u.id, u.email ?? '')
+        } catch (e) {
+          console.warn('[auth] ensureProfile failed on auth change', e)
+        }
         setCurrentUserId(u.id)
       } else {
         setCurrentUserId(null)
@@ -82,7 +144,14 @@ export function useAuth() {
   }, [])
 
   const signUp = useCallback(async (email: string, password: string) => {
-    const { error } = await supabase.auth.signUp({ email, password })
+    const { error } = await supabase.auth.signUp({
+      email,
+      password,
+      options: {
+        // Must match an entry under Supabase → Authentication → URL Configuration → Redirect URLs
+        emailRedirectTo: `${window.location.origin}/login`,
+      },
+    })
     return { error }
   }, [])
 
@@ -151,7 +220,7 @@ export function useAuth() {
     triggerSync()
   }, [])
 
-  return {
+  const value: AuthContextValue = {
     user,
     loading,
     isAuthenticated: !!user,
@@ -160,4 +229,14 @@ export function useAuth() {
     resetPassword,
     updateDisplayName,
   }
+
+  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>
+}
+
+export function useAuth(): AuthContextValue {
+  const ctx = useContext(AuthContext)
+  if (!ctx) {
+    throw new Error('useAuth must be used within AuthProvider')
+  }
+  return ctx
 }

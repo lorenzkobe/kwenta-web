@@ -15,6 +15,7 @@ import { useLiveQuery } from 'dexie-react-hooks'
 import { db } from '@/db/db'
 import {
   computePairwiseNet,
+  fetchRemoteProfileIntoDexie,
   findRemoteProfileIdForLinking,
   formatPairwiseSummary,
   listBillsInvolvingPair,
@@ -33,6 +34,7 @@ import { SettlementHistoryList } from '@/components/common/SettlementHistoryList
 import { EditSettlementDialog } from '@/components/common/EditSettlementDialog'
 import { RecordSettlementDialog } from '@/components/common/RecordSettlementDialog'
 import type { SettlementHistoryItem } from '@/lib/settlement'
+import type { Profile } from '@/types'
 import {
   Select,
   SelectContent,
@@ -200,7 +202,16 @@ export function PersonDetailPage() {
   const [billsScope, setBillsScope] = useState<'personal' | 'groups'>('personal')
 
   const profile = useLiveQuery(
-    () => (personId ? db.profiles.get(personId) : undefined),
+    async (): Promise<Profile | null | undefined> => {
+      if (!personId) return null
+      let p = await db.profiles.get(personId)
+      if (p && !p.is_deleted) return p
+      if (p?.is_deleted) return null
+      await fetchRemoteProfileIntoDexie(personId)
+      p = await db.profiles.get(personId)
+      if (p && !p.is_deleted) return p
+      return null
+    },
     [personId],
   )
 
@@ -307,7 +318,7 @@ export function PersonDetailPage() {
     )
   }
 
-  if (!profile || profile.is_deleted) {
+  if (profile === null) {
     return (
       <div className="space-y-4">
         <Button asChild variant="ghost" size="sm" className="rounded-full gap-1">
@@ -322,6 +333,7 @@ export function PersonDetailPage() {
   }
 
   const canLink = profile.is_local && !profile.linked_profile_id
+  const isLinked = Boolean(profile.linked_profile_id)
 
   async function handleLink(remoteId: string) {
     if (!userId || !personId) return
@@ -415,7 +427,11 @@ export function PersonDetailPage() {
             </h1>
             {display?.subtitle && <p className="mt-1 text-sm text-stone-500">{display.subtitle}</p>}
           </div>
-          {canLink && (
+          {isLinked ? (
+            <span className="shrink-0 rounded-full border border-emerald-200/90 bg-emerald-50 px-3 py-1.5 text-xs font-medium text-emerald-900">
+              Linked
+            </span>
+          ) : canLink ? (
             <Button
               type="button"
               variant="outline"
@@ -426,9 +442,9 @@ export function PersonDetailPage() {
               aria-controls="link-account-dialog"
               onClick={() => setLinkAccountOpen(true)}
             >
-              Unlinked
+              Link account
             </Button>
-          )}
+          ) : null}
         </div>
         {summary && (
           <p

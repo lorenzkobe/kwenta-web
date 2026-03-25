@@ -9,6 +9,7 @@ import {
   resolveProfileDisplay,
 } from '@/lib/people'
 import { useCurrentUser } from '@/hooks/useCurrentUser'
+import { fullSync } from '@/sync/sync-service'
 import { formatCurrency } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { RecordSettlementDialog } from '@/components/common/RecordSettlementDialog'
@@ -50,9 +51,29 @@ export function BillDetailPage() {
 
   useEffect(() => {
     if (!billId) return
-    setLoading(true)
-    reloadBill()
-  }, [billId, reloadBill])
+    const id = billId
+    let cancelled = false
+
+    async function load() {
+      setLoading(true)
+      let data = await getBillWithDetails(id)
+      if (!data && userId && !cancelled) {
+        await fullSync(userId)
+        if (!cancelled) {
+          data = await getBillWithDetails(id)
+        }
+      }
+      if (!cancelled) {
+        setBill(data)
+        setLoading(false)
+      }
+    }
+
+    void load()
+    return () => {
+      cancelled = true
+    }
+  }, [billId, userId])
 
   const reloadBillPairs = useCallback(async () => {
     if (!billId || !userId || !bill) {
@@ -107,6 +128,8 @@ export function BillDetailPage() {
     )
   }
 
+  const canEdit = Boolean(userId && bill.created_by === userId)
+
   return (
     <>
     <div className="space-y-5">
@@ -117,23 +140,27 @@ export function BillDetailPage() {
             Back
           </Link>
         </Button>
-        <div className="flex items-center gap-1">
-          <Button asChild variant="ghost" size="sm" className="rounded-full">
-            <Link to={withBillBackQuery(`/app/bills/new?edit=${billId}`, backPath)}>
-              <Pencil className="size-4" />
-              Edit
-            </Link>
-          </Button>
-          <Button
-            variant="ghost"
-            size="sm"
-            className="rounded-full text-red-600"
-            onClick={() => setDeleteConfirmOpen(true)}
-          >
-            <Trash2 className="size-4" />
-            Delete
-          </Button>
-        </div>
+        {canEdit ? (
+          <div className="flex items-center gap-1">
+            <Button asChild variant="ghost" size="sm" className="rounded-full">
+              <Link to={withBillBackQuery(`/app/bills/new?edit=${billId}`, backPath)}>
+                <Pencil className="size-4" />
+                Edit
+              </Link>
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="rounded-full text-red-600"
+              onClick={() => setDeleteConfirmOpen(true)}
+            >
+              <Trash2 className="size-4" />
+              Delete
+            </Button>
+          </div>
+        ) : (
+          <p className="text-xs text-stone-500">View only</p>
+        )}
       </div>
 
       <div className="rounded-3xl border border-stone-200 bg-white p-5 shadow-sm">

@@ -217,12 +217,23 @@ export function AddBillPage() {
   simpleAmountStrRef.current = simpleAmount
 
   useEffect(() => {
-    if (!editBillId) return
+    if (!editBillId || !userId) return
     let cancelled = false
     setLoadingEdit(true)
     getBillWithDetails(editBillId).then((d) => {
-      if (cancelled || !d) {
+      if (cancelled) return
+      if (!d) {
         setLoadingEdit(false)
+        return
+      }
+      if (d.created_by !== userId) {
+        setLoadingEdit(false)
+        navigate(
+          returnBack
+            ? withBillBackQuery(`/app/bills/${editBillId}`, returnBack)
+            : `/app/bills/${editBillId}`,
+          { replace: true },
+        )
         return
       }
       setTitle(d.title)
@@ -267,7 +278,7 @@ export function AddBillPage() {
     return () => {
       cancelled = true
     }
-  }, [editBillId])
+  }, [editBillId, userId, navigate, returnBack])
 
   function setSimpleSplitTypeAndValues(t: SplitType) {
     setSimpleSplitType(t)

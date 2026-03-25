@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Loader2, Pencil, ReceiptText, Trash2, Users, X } from 'lucide-react'
 import { deleteBill, getBillWithDetails } from '@/db/operations'
+import { fullSync } from '@/sync/sync-service'
 import { formatCurrency } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { ConfirmDialog } from '@/components/common/ConfirmDialog'
@@ -26,12 +27,28 @@ export function BillDetailModal({
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false)
 
   useEffect(() => {
-    setLoading(true)
-    getBillWithDetails(billId).then((data) => {
-      setBill(data)
-      setLoading(false)
-    })
-  }, [billId])
+    let cancelled = false
+
+    async function load() {
+      setLoading(true)
+      let data = await getBillWithDetails(billId)
+      if (!data && currentUserId && !cancelled) {
+        await fullSync(currentUserId)
+        if (!cancelled) {
+          data = await getBillWithDetails(billId)
+        }
+      }
+      if (!cancelled) {
+        setBill(data)
+        setLoading(false)
+      }
+    }
+
+    void load()
+    return () => {
+      cancelled = true
+    }
+  }, [billId, currentUserId])
 
   async function executeDelete() {
     setDeleting(true)
@@ -141,7 +158,7 @@ export function BillDetailModal({
           )}
         </div>
 
-        {!loading && bill && (
+        {!loading && bill && currentUserId === bill.created_by && (
           <div className="shrink-0 space-y-2 border-t border-stone-100 px-5 py-4">
             <Button className="w-full rounded-xl" variant="outline" onClick={() => onEdit(billId)}>
               <Pencil className="size-4" />
@@ -157,6 +174,11 @@ export function BillDetailModal({
               <Trash2 className="size-4" />
               {deleting ? 'Deleting…' : 'Delete bill'}
             </Button>
+          </div>
+        )}
+        {!loading && bill && currentUserId !== bill.created_by && (
+          <div className="shrink-0 border-t border-stone-100 px-5 py-4">
+            <p className="text-center text-xs text-stone-500">View only — only the person who created this bill can edit or delete it.</p>
           </div>
         )}
       </div>

@@ -81,6 +81,15 @@ This project expects:
 - Postgres tables for profiles, groups, bills, items, splits, settlements, and activity logs
 - Row Level Security policies defined by the included migration
 
+**Auth URLs (email confirmation and OAuth):** In the Supabase dashboard, open **Authentication → URL Configuration**. Set **Site URL** to your deployed app origin (for example `https://your-app.vercel.app`). Under **Redirect URLs**, add every origin you use, including the login route used after confirming email:
+
+- `http://localhost:5173/login` (Vite dev)
+- `https://your-production-domain/login`
+
+Sign-up uses `emailRedirectTo` → `/login` so the confirmation link opens the Kwenta app instead of a blank or unrelated page. If a redirect URL is missing from the allow list, Supabase will show an error or redirect incorrectly.
+
+**Security notification emails** (for example “password changed”) must be **enabled in the Supabase project** (Authentication settings / notifications) or they will not be sent. HTML for the password-changed template lives in `supabase/email-templates/password-changed.html` for copy-paste into the dashboard.
+
 ## Offline-First Behavior
 
 - Guests can use the app immediately with local IndexedDB storage

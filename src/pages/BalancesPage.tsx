@@ -7,7 +7,7 @@ import {
   type GroupBalanceSummary,
   type SettlementHistoryItem,
 } from '@/lib/settlement'
-import { computePersonalNetRollup } from '@/lib/people'
+import { computePersonalNetRollup, getPersonalBalanceContactRows } from '@/lib/people'
 import { useUserSettlementHistory } from '@/db/hooks'
 import { SettlementHistoryList } from '@/components/common/SettlementHistoryList'
 import { EditSettlementDialog } from '@/components/common/EditSettlementDialog'
@@ -37,6 +37,9 @@ export function BalancesPage() {
   const [summaries, setSummaries] = useState<GroupBalanceSummary[]>([])
   const [personalReceive, setPersonalReceive] = useState<Map<string, number>>(new Map())
   const [personalPay, setPersonalPay] = useState<Map<string, number>>(new Map())
+  const [personalRows, setPersonalRows] = useState<
+    Awaited<ReturnType<typeof getPersonalBalanceContactRows>>
+  >([])
   const [loading, setLoading] = useState(true)
   const [editingSettlement, setEditingSettlement] = useState<SettlementHistoryItem | null>(null)
   const [recordSettlement, setRecordSettlement] = useState<{
@@ -52,13 +55,15 @@ export function BalancesPage() {
 
   const reloadSummaries = useCallback(async () => {
     if (!userId) return
-    const [data, personal] = await Promise.all([
+    const [data, personal, rows] = await Promise.all([
       computeAllGroupBalances(userId),
       computePersonalNetRollup(userId),
+      getPersonalBalanceContactRows(userId),
     ])
     setSummaries(data)
     setPersonalReceive(personal.toReceiveByCurrency)
     setPersonalPay(personal.toPayByCurrency)
+    setPersonalRows(rows)
   }, [userId])
 
   useEffect(() => {
@@ -97,7 +102,7 @@ export function BalancesPage() {
   const hasPersonalNet =
     sumMapPositive(personalReceive) > 0.005 || sumMapPositive(personalPay) > 0.005
   const hasGroupSummaries = summaries.length > 0
-  const showEmptyState = !hasGroupSummaries && !hasPersonalNet
+  const showEmptyState = !hasGroupSummaries && !hasPersonalNet && personalRows.length === 0
 
   if (loading) {
     return (
@@ -211,7 +216,7 @@ export function BalancesPage() {
           const personalPaymentHistory =
             userSettlementHistory?.filter((h) => h.groupId === null) ?? []
           const showPersonal =
-            hasPersonalNet || personalPaymentHistory.length > 0
+            hasPersonalNet || personalPaymentHistory.length > 0 || personalRows.length > 0
           if (!showPersonal) return null
           return (
             <div
@@ -264,6 +269,38 @@ export function BalancesPage() {
                           ))
                       )}
                     </div>
+                  </div>
+                </div>
+              )}
+              {personalRows.length > 0 && (
+                <div className="mt-4 space-y-2">
+                  <p className="text-xs font-medium text-stone-400">Per person (personal)</p>
+                  <div className="space-y-1.5">
+                    {personalRows.map((row) => (
+                      <Link
+                        key={row.otherId}
+                        to={`/app/people/${row.otherId}`}
+                        className="flex items-center justify-between gap-3 rounded-xl border border-stone-200 bg-stone-100/60 px-4 py-2.5 text-sm transition-colors hover:bg-stone-100"
+                      >
+                        <span className="font-medium text-stone-800">{row.displayName}</span>
+                        <div className="flex flex-wrap justify-end gap-x-2 gap-y-0.5 text-xs">
+                          {[...row.netByCurrency.entries()]
+                            .filter(([, v]) => Math.abs(v) > 0.005)
+                            .map(([cur, v]) => (
+                              <span
+                                key={cur}
+                                className={cn(
+                                  'font-semibold',
+                                  v > 0 ? 'text-emerald-600' : 'text-amber-600',
+                                )}
+                              >
+                                {v > 0 ? '+' : ''}
+                                {formatCurrency(v, cur)}
+                              </span>
+                            ))}
+                        </div>
+                      </Link>
+                    ))}
                   </div>
                 </div>
               )}

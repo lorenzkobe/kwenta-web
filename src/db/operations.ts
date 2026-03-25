@@ -9,6 +9,7 @@ import type {
   SplitType,
 } from '@/types'
 import { generateId, getDeviceId, now } from '@/lib/utils'
+import { syncRoundTrip } from '@/sync/sync-service'
 import {
   notifyBillParticipantsCreated,
   notifyProfileLinked,
@@ -118,6 +119,17 @@ export async function createBill(input: CreateBillInput): Promise<string> {
     if (g && !g.is_deleted) groupName = g.name
   }
   const actor = await db.profiles.get(input.createdBy)
+
+  // Single kwenta_sync RPC (push + pull bundle) instead of one HTTP request per table.
+  try {
+    const { errors } = await syncRoundTrip(input.createdBy)
+    if (errors.length > 0) {
+      console.warn('[createBill] sync errors:', errors)
+    }
+  } catch (e) {
+    console.warn('[createBill] sync failed', e)
+  }
+
   void notifyBillParticipantsCreated({
     actorId: input.createdBy,
     actorName: actor?.display_name?.trim() || 'Someone',
@@ -128,7 +140,6 @@ export async function createBill(input: CreateBillInput): Promise<string> {
     groupName,
   })
 
-  notifySyncAfterMutation()
   return billId
 }
 
@@ -147,6 +158,7 @@ export async function updateBill(
   const timestamp = now()
   const bill = await db.bills.get(billId)
   if (!bill || bill.is_deleted) return
+  if (bill.created_by !== editorUserId) return
 
   const totalAmount = patch.items.reduce((sum, item) => sum + item.amount, 0)
 
@@ -212,11 +224,12 @@ export async function updateBill(
 }
 
 export async function deleteBill(billId: string, userId: string) {
+  const bill = await db.bills.get(billId)
+  if (!bill || bill.is_deleted) return
+  if (bill.created_by !== userId) return
+
   const timestamp = now()
   await db.transaction('rw', [db.bills, db.bill_items, db.item_splits, db.activity_log], async () => {
-    const bill = await db.bills.get(billId)
-    if (!bill) return
-
     await db.bills.update(billId, { is_deleted: true, updated_at: timestamp })
 
     const items = await db.bill_items.where('bill_id').equals(billId).toArray()

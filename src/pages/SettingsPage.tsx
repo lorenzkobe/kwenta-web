@@ -91,7 +91,17 @@ export function SettingsPage() {
     }
   }
 
-  async function runSignOutAndClearLocal() {
+  async function runSignOutAndClearLocal(options?: { skipFinalSync?: boolean }) {
+    if (!options?.skipFinalSync && navigator.onLine && user?.id) {
+      try {
+        const result = await fullSync(user.id)
+        if (result.errors.length > 0) {
+          console.warn('[sign-out] push sync failed', result.errors)
+        }
+      } catch (e) {
+        console.warn('[sign-out] push sync failed', e)
+      }
+    }
     markVoluntarySignOut()
     await supabase.auth.signOut()
     await clearKwentaLocalData()
@@ -115,7 +125,7 @@ export function SettingsPage() {
       const stillUnsynced = await hasUnsyncedLocalDataForUser(user.id)
       setSignOutHasUnsynced(stillUnsynced)
       if (!stillUnsynced) {
-        await runSignOutAndClearLocal()
+        await runSignOutAndClearLocal({ skipFinalSync: true })
       }
     } finally {
       setSignOutBusy(false)
