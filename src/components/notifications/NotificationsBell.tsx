@@ -53,6 +53,22 @@ export function NotificationsBell({ userId }: { userId: string }) {
 
   useEffect(() => {
     if (!isOnline) return
+    const refresh = () => {
+      void (async () => {
+        const count = await fetchUnreadKwentaNotificationCount(userId)
+        setUnread(count)
+      })()
+    }
+    window.addEventListener('focus', refresh)
+    document.addEventListener('visibilitychange', refresh)
+    return () => {
+      window.removeEventListener('focus', refresh)
+      document.removeEventListener('visibilitychange', refresh)
+    }
+  }, [userId, isOnline])
+
+  useEffect(() => {
+    if (!isOnline) return
     const channel = supabase
       .channel(`kwenta_notifications:${userId}`)
       .on(

@@ -4,7 +4,6 @@ import { BottomNav } from './BottomNav'
 import { AppHeader } from './AppHeader'
 import { InstallPrompt } from '@/components/common/InstallPrompt'
 import { OfflineBanner } from '@/components/common/OfflineBanner'
-import { RealtimeNoticeBanner } from '@/components/common/RealtimeNoticeBanner'
 import { useOnlineStatus } from '@/hooks/useOnlineStatus'
 import { useAuth } from '@/hooks/useAuth'
 import { useSync } from '@/hooks/useSync'
@@ -30,7 +29,6 @@ export function AppShell() {
       <AppHeader />
 
       <main className="mx-auto w-full max-w-7xl px-4 pb-[calc(4.25rem+env(safe-area-inset-bottom))] pt-4 sm:px-6 lg:px-8 lg:pb-8">
-        <RealtimeNoticeBanner />
         <Outlet />
       </main>
 

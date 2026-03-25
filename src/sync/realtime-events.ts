@@ -3,7 +3,6 @@ import { db } from '@/db/db'
 import { now } from '@/lib/utils'
 import type { SyncFields, Bill, BillItem, ItemSplit, Group, GroupMember, Settlement } from '@/types'
 import { pullChanges } from '@/sync/sync-service'
-import { useAppStore } from '@/store/app-store'
 
 type UserEventRow = {
   id: string
@@ -61,14 +60,6 @@ async function applySettlementBundle(bundle: unknown): Promise<void> {
 }
 
 async function processEvent(userId: string, ev: UserEventRow): Promise<void> {
-  if (ev.event_type === 'bill_changed') {
-    useAppStore.getState().setRealtimeNotice('Bill updated')
-  } else if (ev.event_type === 'settlement_changed') {
-    useAppStore.getState().setRealtimeNotice('Payment updated')
-  } else if (ev.event_type === 'group_member_changed') {
-    useAppStore.getState().setRealtimeNotice('Group membership updated')
-  }
-
   // Deletes are tricky to represent without updated_at; safest is to pull changes.
   if (ev.op === 'DELETE') {
     await pullChanges(userId)

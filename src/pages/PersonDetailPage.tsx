@@ -14,6 +14,7 @@ import {
 import { useLiveQuery } from 'dexie-react-hooks'
 import { db } from '@/db/db'
 import {
+  computePairwiseNetForBill,
   computePairwiseNet,
   fetchRemoteProfileIntoDexie,
   findRemoteProfileIdForLinking,
@@ -270,6 +271,16 @@ export function PersonDetailPage() {
     () => (bills ?? []).filter((b) => !b.group_id),
     [bills],
   )
+
+  const personalBillDirection = useLiveQuery(async () => {
+    if (!userId || !personId) return new Map<string, number>()
+    const out = new Map<string, number>()
+    for (const bill of personalBills) {
+      const net = await computePairwiseNetForBill(bill.id, userId, personId)
+      out.set(bill.id, net)
+    }
+    return out
+  }, [userId, personId, personalBills])
 
   const defaultCurrency = useMemo(() => {
     const pb = personalBills[0]
@@ -533,14 +544,32 @@ export function PersonDetailPage() {
               <ul className="mt-3 space-y-2">
                 {personalBills.map((bill) => (
                   <li key={bill.id}>
+                    {(() => {
+                      const net = personalBillDirection?.get(bill.id) ?? 0
+                      const settled = Math.abs(net) < 0.005
+                      const direction = net > 0 ? 'Receive' : 'Pay'
+                      const badgeClass = settled
+                        ? 'bg-stone-200 text-stone-600'
+                        : net > 0
+                          ? 'bg-emerald-100 text-emerald-800'
+                          : 'bg-amber-100 text-amber-800'
+                      return (
                     <Link
                       to={withBillBackQuery(`/app/bills/${bill.id}`, `/app/people/${personId}`)}
                       className="flex items-center justify-between rounded-xl border border-stone-200 bg-stone-100/60 px-4 py-3 transition-colors hover:bg-stone-100"
                     >
                       <div className="min-w-0">
                         <p className="font-medium text-stone-800">{bill.title}</p>
-                        <p className="text-xs text-stone-500">
-                          Personal · {bill.creatorName}
+                        <p className="mt-0.5 flex items-center gap-2 text-xs text-stone-500">
+                          <span>Personal · {bill.creatorName}</span>
+                          <span
+                            className={cn(
+                              'rounded-full px-2 py-0.5 text-[0.65rem] font-semibold uppercase tracking-wide',
+                              badgeClass,
+                            )}
+                          >
+                            {settled ? 'Even' : direction}
+                          </span>
                         </p>
                       </div>
                       <div className="flex items-center gap-2">
@@ -550,6 +579,8 @@ export function PersonDetailPage() {
                         <ChevronRight className="size-4 text-stone-400" />
                       </div>
                     </Link>
+                      )
+                    })()}
                   </li>
                 ))}
               </ul>

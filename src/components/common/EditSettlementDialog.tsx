@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { Trash2, X } from 'lucide-react'
+import { ArrowRight, Trash2, X } from 'lucide-react'
 import { useLiveQuery } from 'dexie-react-hooks'
 import { db } from '@/db/db'
 import { updateSettlement, deleteSettlement } from '@/db/operations'
@@ -7,7 +7,6 @@ import type { SettlementHistoryItem } from '@/lib/settlement'
 import { useCurrentUser } from '@/hooks/useCurrentUser'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@/components/ui/select'
 import { ConfirmDialog } from '@/components/common/ConfirmDialog'
 import { normalizeAmountInput, stripLeadingZerosAmount } from '@/lib/amount-input'
 
@@ -21,8 +20,6 @@ export function EditSettlementDialog({
   onSaved: () => void
 }) {
   const { userId } = useCurrentUser()
-  const [fromId, setFromId] = useState(item.fromUserId)
-  const [toId, setToId] = useState(item.toUserId)
   const [amountStr, setAmountStr] = useState(() => String(item.amount))
   const [label, setLabel] = useState(item.label ?? '')
   const [saving, setSaving] = useState(false)
@@ -30,45 +27,32 @@ export function EditSettlementDialog({
   const [removeConfirmOpen, setRemoveConfirmOpen] = useState(false)
 
   useEffect(() => {
-    setFromId(item.fromUserId)
-    setToId(item.toUserId)
     setAmountStr(String(item.amount))
     setLabel(item.label ?? '')
   }, [item])
 
   const members = useLiveQuery(async () => {
-    if (item.groupId == null) {
-      const [fromP, toP] = await Promise.all([
-        db.profiles.get(item.fromUserId),
-        db.profiles.get(item.toUserId),
-      ])
-      return [
-        { userId: item.fromUserId, name: fromP?.display_name ?? '?' },
-        { userId: item.toUserId, name: toP?.display_name ?? '?' },
-      ]
+    const [fromP, toP] = await Promise.all([
+      db.profiles.get(item.fromUserId),
+      db.profiles.get(item.toUserId),
+    ])
+    return {
+      fromName: fromP?.display_name ?? '?',
+      toName: toP?.display_name ?? '?',
     }
-    const all = await db.group_members.where('group_id').equals(item.groupId).toArray()
-    const active = all.filter((m) => !m.is_deleted)
-    return Promise.all(
-      active.map(async (m) => {
-        const p = await db.profiles.get(m.user_id)
-        return { userId: m.user_id, name: p?.display_name ?? m.display_name }
-      }),
-    )
-  }, [item.groupId, item.fromUserId, item.toUserId])
+  }, [item.fromUserId, item.toUserId])
 
   async function handleSave() {
     if (!userId) return
     const amount = parseFloat(amountStr.replace(',', '.'))
     if (!Number.isFinite(amount) || amount <= 0) return
-    if (fromId === toId) return
     setSaving(true)
     try {
       await updateSettlement(
         item.id,
         {
-          fromUserId: fromId,
-          toUserId: toId,
+          fromUserId: item.fromUserId,
+          toUserId: item.toUserId,
           amount,
           currency: item.currency,
           label: label.trim(),
@@ -98,7 +82,6 @@ export function EditSettlementDialog({
     !amountStr.trim() ||
     !Number.isFinite(parseFloat(amountStr.replace(',', '.'))) ||
     parseFloat(amountStr.replace(',', '.')) <= 0
-  const sameParty = fromId === toId
 
   return (
     <>
@@ -113,35 +96,14 @@ export function EditSettlementDialog({
         </div>
 
         <div className="space-y-4 px-5 py-4">
-          <div className="flex flex-col gap-2">
-            <span className="text-sm font-medium text-stone-800">Paid by</span>
-            <Select value={fromId} onValueChange={setFromId}>
-              <SelectTrigger className="rounded-lg">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {(members ?? []).map((m) => (
-                  <SelectItem key={m.userId} value={m.userId}>
-                    {m.name}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-          <div className="flex flex-col gap-2">
-            <span className="text-sm font-medium text-stone-800">Received by</span>
-            <Select value={toId} onValueChange={setToId}>
-              <SelectTrigger className="rounded-lg">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {(members ?? []).map((m) => (
-                  <SelectItem key={m.userId} value={m.userId}>
-                    {m.name}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+          <div className="rounded-xl border border-stone-200 bg-stone-50 px-4 py-3">
+            <p className="text-xs font-medium text-stone-500">Payment direction</p>
+            <div className="mt-2 flex flex-wrap items-center gap-2 text-sm">
+              <span className="font-medium text-stone-800">{members?.fromName ?? '?'}</span>
+              <ArrowRight className="size-3.5 text-stone-400" />
+              <span className="font-medium text-stone-800">{members?.toName ?? '?'}</span>
+            </div>
+            <p className="mt-1 text-xs text-stone-400">Payer and receiver are fixed when editing.</p>
           </div>
           <div className="flex flex-col gap-2">
             <label htmlFor="edit-settlement-amount" className="text-sm font-medium text-stone-800">
@@ -161,9 +123,6 @@ export function EditSettlementDialog({
               }
               className="rounded-lg"
             />
-            {sameParty && (
-              <p className="text-xs text-amber-600">Payer and recipient must be different.</p>
-            )}
           </div>
 
           <div className="flex flex-col gap-2">
@@ -195,7 +154,7 @@ export function EditSettlementDialog({
             <Button
               className="order-1 w-full rounded-xl sm:order-2 sm:min-w-32"
               onClick={handleSave}
-              disabled={!userId || saving || deleting || invalidAmount || sameParty || !members?.length}
+              disabled={!userId || saving || deleting || invalidAmount}
             >
               {saving ? 'Saving…' : 'Save'}
             </Button>
