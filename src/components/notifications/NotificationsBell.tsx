@@ -3,11 +3,12 @@ import { useNavigate } from 'react-router-dom'
 import { BellRing, CheckCheck, RefreshCw } from 'lucide-react'
 import { toast } from 'sonner'
 import {
-  fetchUnreadKwentaNotificationCount,
   fetchKwentaNotifications,
   markKwentaNotificationRead,
   type KwentaNotificationRow,
 } from '@/lib/kwenta-notifications'
+import { captureMetric, withMetric } from '@/lib/client-metrics'
+import { isRuntimeFlagEnabled } from '@/lib/runtime-flags'
 import { supabase } from '@/lib/supabase'
 import { useAppStore } from '@/store/app-store'
 import { cn } from '@/lib/utils'
@@ -22,21 +23,25 @@ export function NotificationsBell({ userId }: { userId: string }) {
   const [loading, setLoading] = useState(false)
   const [listError, setListError] = useState<string | null>(null)
   const wrapRef = useRef<HTMLDivElement>(null)
+  const initializedRef = useRef(false)
+  const unreadCacheKey = `kwenta_notifications_unread:${userId}`
 
   const loadList = useCallback(async () => {
     if (!isOnline) return
     setListError(null)
     setLoading(true)
     try {
-      const rows = await fetchKwentaNotifications(userId)
+      const rows = await withMetric('notifications.fetchList', () => fetchKwentaNotifications(userId), { trigger: 'open_or_manual' })
       setItems(rows)
-      setUnread(rows.filter((r) => !r.read_at).length)
+      const nextUnread = rows.filter((r) => !r.read_at).length
+      setUnread(nextUnread)
+      localStorage.setItem(unreadCacheKey, String(nextUnread))
     } catch (e) {
       setListError(e instanceof Error ? e.message : 'Could not load notifications')
     } finally {
       setLoading(false)
     }
-  }, [userId, isOnline])
+  }, [userId, isOnline, unreadCacheKey])
 
   useEffect(() => {
     if (!open) return
@@ -44,28 +49,13 @@ export function NotificationsBell({ userId }: { userId: string }) {
   }, [open, loadList])
 
   useEffect(() => {
-    void (async () => {
-      if (!isOnline) return
-      const count = await fetchUnreadKwentaNotificationCount(userId)
-      setUnread(count)
-    })()
-  }, [userId, isOnline])
-
-  useEffect(() => {
-    if (!isOnline) return
-    const refresh = () => {
-      void (async () => {
-        const count = await fetchUnreadKwentaNotificationCount(userId)
-        setUnread(count)
-      })()
+    if (initializedRef.current) return
+    initializedRef.current = true
+    const cached = Number(localStorage.getItem(unreadCacheKey) ?? '0')
+    if (Number.isFinite(cached) && cached >= 0) {
+      setUnread(cached)
     }
-    window.addEventListener('focus', refresh)
-    document.addEventListener('visibilitychange', refresh)
-    return () => {
-      window.removeEventListener('focus', refresh)
-      document.removeEventListener('visibilitychange', refresh)
-    }
-  }, [userId, isOnline])
+  }, [unreadCacheKey])
 
   useEffect(() => {
     if (!isOnline) return
@@ -89,20 +79,35 @@ export function NotificationsBell({ userId }: { userId: string }) {
               toast(next.title, { description: next.body, id: next.id })
             }
           } else if (payload.eventType === 'UPDATE') {
-            setItems((prev) => prev.map((p) => (p.id === next.id ? next : p)))
-            void (async () => {
-              const count = await fetchUnreadKwentaNotificationCount(userId)
-              setUnread(count)
-            })()
+            setItems((prev) => {
+              const before = prev.find((p) => p.id === next.id)
+              if (!before) return prev
+              if (!before.read_at && next.read_at) setUnread((n) => Math.max(0, n - 1))
+              if (before.read_at && !next.read_at) setUnread((n) => n + 1)
+              return prev.map((p) => (p.id === next.id ? next : p))
+            })
           }
         },
       )
-      .subscribe()
+      .subscribe((status) => {
+        captureMetric('notifications.realtime.status', status !== 'CHANNEL_ERROR' && status !== 'TIMED_OUT', 0, { status })
+        if (status === 'SUBSCRIBED' && !isRuntimeFlagEnabled('notificationPushOnlyMode')) {
+          void loadList()
+        }
+        if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
+          // Guarded fallback: only reconcile from server when realtime health degrades.
+          void loadList()
+        }
+      })
 
     return () => {
       void supabase.removeChannel(channel)
     }
-  }, [userId, isOnline])
+  }, [userId, isOnline, loadList])
+
+  useEffect(() => {
+    localStorage.setItem(unreadCacheKey, String(unread))
+  }, [unread, unreadCacheKey])
 
   useEffect(() => {
     if (!open) return
@@ -114,7 +119,9 @@ export function NotificationsBell({ userId }: { userId: string }) {
   }, [open])
 
   async function onPick(row: KwentaNotificationRow) {
-    await markKwentaNotificationRead(row.id, userId)
+    await withMetric('notifications.markRead', () => markKwentaNotificationRead(row.id, userId))
+    setItems((prev) => prev.map((p) => (p.id === row.id ? { ...p, read_at: new Date().toISOString() } : p)))
+    setUnread((n) => Math.max(0, n - (row.read_at ? 0 : 1)))
     void loadList()
     setOpen(false)
     if (row.kind === 'bill_participant' && row.entity_id) {
@@ -129,7 +136,9 @@ export function NotificationsBell({ userId }: { userId: string }) {
   async function markAllRead() {
     const pending = items.filter((row) => !row.read_at)
     if (pending.length === 0) return
-    await Promise.all(pending.map((row) => markKwentaNotificationRead(row.id, userId)))
+    await Promise.all(pending.map((row) => withMetric('notifications.markRead', () => markKwentaNotificationRead(row.id, userId))))
+    setItems((prev) => prev.map((row) => ({ ...row, read_at: row.read_at ?? new Date().toISOString() })))
+    setUnread(0)
     void loadList()
   }
 

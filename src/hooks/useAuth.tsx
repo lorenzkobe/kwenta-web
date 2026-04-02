@@ -11,6 +11,7 @@ import {
 import type { User } from '@supabase/supabase-js'
 import { authRedirectUrl, supabase } from '@/lib/supabase'
 import { consumeVoluntarySignOut, SESSION_EXPIRED_MESSAGE_KEY } from '@/lib/auth-session-flags'
+import { withMetric } from '@/lib/client-metrics'
 import { db } from '@/db/db'
 import { useAppStore } from '@/store/app-store'
 import { triggerSync } from '@/sync/sync-manager'
@@ -23,10 +24,20 @@ import { getDeviceId, now } from '@/lib/utils'
  * Uses put() so parallel callers don't race on add().
  */
 async function ensureProfile(userId: string, email: string) {
+  const cacheKey = `${userId}:${email}`
+  if (ensureProfileInFlight.has(cacheKey)) {
+    await ensureProfileInFlight.get(cacheKey)
+    return
+  }
+
+  const task = (async () => {
   const existing = await db.profiles.get(userId)
   if (existing) return
 
-  const { data: remote, error } = await supabase.from('profiles').select('*').eq('id', userId).maybeSingle()
+  const { data: remote, error } = await withMetric(
+    'auth.ensureProfile.fetch',
+    () => supabase.from('profiles').select('*').eq('id', userId).maybeSingle(),
+  )
 
   if (error) {
     console.warn('[auth] could not load profile from cloud', error)
@@ -57,7 +68,17 @@ async function ensureProfile(userId: string, email: string) {
     device_id: getDeviceId(),
   })
   triggerSync()
+  })()
+
+  ensureProfileInFlight.set(cacheKey, task)
+  try {
+    await task
+  } finally {
+    ensureProfileInFlight.delete(cacheKey)
+  }
 }
+
+const ensureProfileInFlight = new Map<string, Promise<void>>()
 
 type AuthContextValue = {
   user: User | null

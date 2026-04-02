@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
+import { useLiveQuery } from 'dexie-react-hooks'
 import { ArrowLeft, Check, Loader2, Pencil, ReceiptText, Trash2, Users } from 'lucide-react'
 import { Link, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { getBillWithDetails, deleteBill } from '@/db/operations'
@@ -27,8 +28,12 @@ export function BillDetailPage() {
     backSearchParam: searchParams.get(BILL_BACK_QUERY),
     locationState: location.state,
   })
-  const [bill, setBill] = useState<BillDetails>(null)
-  const [loading, setLoading] = useState(true)
+  const [billState, setBillState] = useState<BillDetails>(null)
+  const [loadingState, setLoadingState] = useState(true)
+  const liveBill = useLiveQuery(async () => {
+    if (!billId) return null
+    return getBillWithDetails(billId)
+  }, [billId])
   const [billPairRows, setBillPairRows] = useState<
     { otherId: string; displayName: string; net: number }[]
   >([])
@@ -44,8 +49,8 @@ export function BillDetailPage() {
   const reloadBill = useCallback(() => {
     if (!billId) return
     getBillWithDetails(billId).then((data) => {
-      setBill(data)
-      setLoading(false)
+      setBillState(data)
+      setLoadingState(false)
     })
   }, [billId])
 
@@ -55,7 +60,7 @@ export function BillDetailPage() {
     let cancelled = false
 
     async function load() {
-      setLoading(true)
+      setLoadingState(true)
       let data = await getBillWithDetails(id)
       if (!data && userId && !cancelled) {
         await fullSync(userId)
@@ -64,8 +69,8 @@ export function BillDetailPage() {
         }
       }
       if (!cancelled) {
-        setBill(data)
-        setLoading(false)
+        setBillState(data)
+        setLoadingState(false)
       }
     }
 
@@ -74,6 +79,9 @@ export function BillDetailPage() {
       cancelled = true
     }
   }, [billId, userId])
+
+  const bill = liveBill === undefined ? billState : liveBill
+  const loading = liveBill === undefined ? loadingState : false
 
   const reloadBillPairs = useCallback(async () => {
     if (!billId || !userId || !bill) {

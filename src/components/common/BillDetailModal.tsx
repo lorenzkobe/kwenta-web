@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { useLiveQuery } from 'dexie-react-hooks'
 import { Loader2, Pencil, ReceiptText, Trash2, Users, X } from 'lucide-react'
 import { deleteBill, getBillWithDetails } from '@/db/operations'
 import { fullSync } from '@/sync/sync-service'
@@ -21,16 +22,17 @@ export function BillDetailModal({
   onUpdated: () => void
   onEdit: (billId: string) => void
 }) {
-  const [bill, setBill] = useState<BillDetails | null>(null)
-  const [loading, setLoading] = useState(true)
+  const [billState, setBillState] = useState<BillDetails | null>(null)
+  const [loadingState, setLoadingState] = useState(true)
   const [deleting, setDeleting] = useState(false)
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false)
+  const liveBill = useLiveQuery(async () => getBillWithDetails(billId), [billId])
 
   useEffect(() => {
     let cancelled = false
 
     async function load() {
-      setLoading(true)
+      setLoadingState(true)
       let data = await getBillWithDetails(billId)
       if (!data && currentUserId && !cancelled) {
         await fullSync(currentUserId)
@@ -39,8 +41,8 @@ export function BillDetailModal({
         }
       }
       if (!cancelled) {
-        setBill(data)
-        setLoading(false)
+        setBillState(data)
+        setLoadingState(false)
       }
     }
 
@@ -60,6 +62,9 @@ export function BillDetailModal({
       setDeleting(false)
     }
   }
+
+  const bill = liveBill === undefined ? billState : liveBill
+  const loading = liveBill === undefined ? loadingState : false
 
   return (
     <>

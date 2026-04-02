@@ -1,6 +1,8 @@
 import { type Table } from 'dexie'
 import { db } from '@/db/db'
 import { supabase } from '@/lib/supabase'
+import { captureMetric, withMetric } from '@/lib/client-metrics'
+import { isRuntimeFlagEnabled } from '@/lib/runtime-flags'
 import { now } from '@/lib/utils'
 import type {
   ActivityLog,
@@ -49,6 +51,8 @@ const TABLE_NAMES = [
 ] as const
 
 type TableName = (typeof TABLE_NAMES)[number]
+type FullSyncResult = { pushed: number; pulled: number; errors: string[] }
+const fullSyncInFlight = new Map<string, Promise<FullSyncResult>>()
 
 function syncErrMessage(err: unknown): string {
   if (err instanceof Error) return err.message
@@ -192,6 +196,7 @@ export async function hasUnsyncedLocalDataForUser(userId: string): Promise<boole
  * A record is unsynced if synced_at is null OR updated_at > synced_at.
  */
 export async function pushChanges(): Promise<{ pushed: number; errors: string[] }> {
+  const startedAt = performance.now()
   let pushed = 0
   const errors: string[] = []
 
@@ -259,6 +264,7 @@ export async function pushChanges(): Promise<{ pushed: number; errors: string[] 
     pushed += unsynced.length
   }
 
+  captureMetric('sync.pushChanges', errors.length === 0, performance.now() - startedAt, { pushed, errors: errors.length })
   return { pushed, errors }
 }
 
@@ -271,7 +277,7 @@ export type PullPrefetchContext = {
 /** Fetch group ids + bill/item ids once per pull (avoids duplicate RPCs). */
 export async function prefetchPullContext(userId: string): Promise<PullPrefetchContext> {
   const groupIds = await getGroupIdsForUser(userId)
-  const billIds = await getRelevantBillIds(userId, groupIds)
+  const billIds = await getRelevantBillIds(userId)
   let itemIds: string[] = []
   if (billIds.length > 0) {
     const { data, error } = await supabase.from('bill_items').select('id').in('bill_id', billIds)
@@ -287,6 +293,7 @@ export async function prefetchPullContext(userId: string): Promise<PullPrefetchC
  * Does not advance last-pull time unless every table pull succeeds.
  */
 export async function pullChanges(userId: string): Promise<{ pulled: number; errors: string[] }> {
+  const startedAt = performance.now()
   let pulled = 0
   const errors: string[] = []
   const lastPull = localStorage.getItem(KWENTA_LAST_PULL_STORAGE_KEY) ?? '1970-01-01T00:00:00.000Z'
@@ -326,6 +333,7 @@ export async function pullChanges(userId: string): Promise<{ pulled: number; err
     localStorage.setItem(KWENTA_LAST_PULL_STORAGE_KEY, now())
   }
 
+  captureMetric('sync.pullChanges', errors.length === 0, performance.now() - startedAt, { pulled, errors: errors.length })
   return { pulled, errors }
 }
 
@@ -449,23 +457,37 @@ async function fetchRemoteRows(
   return (data ?? []) as SyncFields[]
 }
 
-async function getRelevantBillIds(userId: string, _groupIds: string[]): Promise<string[]> {
+async function getRelevantBillIds(userId: string): Promise<string[]> {
   void userId
   const { data, error } = await supabase.rpc('relevant_bill_ids_for_user')
   if (error) throw error
   return (data ?? []).map((r: { id: string }) => r.id)
 }
 
-export async function fullSync(userId: string): Promise<{
-  pushed: number
-  pulled: number
-  errors: string[]
-}> {
-  const roundTrip = await syncRoundTrip(userId)
-  return {
-    pushed: roundTrip.pushed,
-    pulled: roundTrip.pulled,
-    errors: roundTrip.errors,
+export async function fullSync(userId: string): Promise<FullSyncResult> {
+  if (isRuntimeFlagEnabled('dedupeSyncEnabled')) {
+    const running = fullSyncInFlight.get(userId)
+    if (running) return running
+  }
+
+  const job = withMetric('sync.fullSync', async () => {
+    const roundTrip = await syncRoundTrip(userId)
+    return {
+      pushed: roundTrip.pushed,
+      pulled: roundTrip.pulled,
+      errors: roundTrip.errors,
+    }
+  })
+
+  if (!isRuntimeFlagEnabled('dedupeSyncEnabled')) {
+    return job
+  }
+
+  fullSyncInFlight.set(userId, job)
+  try {
+    return await job
+  } finally {
+    fullSyncInFlight.delete(userId)
   }
 }
 
@@ -532,10 +554,15 @@ export async function syncRoundTrip(userId: string): Promise<{
     }
   }
 
-  const { data: bundle, error: rpcError } = await supabase.rpc('kwenta_sync', {
-    p_since: lastPull,
-    p_push: pPush,
-  })
+  const { data: bundle, error: rpcError } = await withMetric(
+    'sync.kwentaSyncRpc',
+    () =>
+      supabase.rpc('kwenta_sync', {
+        p_since: lastPull,
+        p_push: pPush,
+      }),
+    { hasPushPayload: Object.keys(pPush).length > 0 },
+  )
 
   if (rpcError) {
     const code = 'code' in rpcError ? String((rpcError as { code?: string }).code) : ''
