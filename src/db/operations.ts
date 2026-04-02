@@ -36,6 +36,17 @@ function syncFields(overrides?: Partial<{ id: string }>) {
   }
 }
 
+/**
+ * For cloud-visible relationships (e.g. personal settlements), prefer linked Kwenta id.
+ * Keep original id when a profile is purely local and not linked.
+ */
+async function resolveSettlementPartyId(id: string): Promise<string> {
+  const p = await db.profiles.get(id)
+  if (!p || p.is_deleted) return id
+  if (p.linked_profile_id) return p.linked_profile_id
+  return id
+}
+
 // ── Bills ────────────────────────────────────────────
 
 export interface CreateBillInput {
@@ -764,6 +775,10 @@ export async function createSettlement(
 ): Promise<string> {
   const settlementId = generateId()
   const labelTrim = (label ?? '').trim()
+  const [resolvedFromUserId, resolvedToUserId] = await Promise.all([
+    resolveSettlementPartyId(fromUserId),
+    resolveSettlementPartyId(toUserId),
+  ])
 
   if (billId) {
     const bill = await db.bills.get(billId)
@@ -781,16 +796,16 @@ export async function createSettlement(
       ...syncFields({ id: settlementId }),
       group_id: groupId,
       bill_id: billId ?? null,
-      from_user_id: fromUserId,
-      to_user_id: toUserId,
+      from_user_id: resolvedFromUserId,
+      to_user_id: resolvedToUserId,
       amount,
       currency,
       label: labelTrim,
       is_settled: true,
     })
 
-    const fromProfile = await db.profiles.get(fromUserId)
-    const toProfile = await db.profiles.get(toUserId)
+    const fromProfile = (await db.profiles.get(resolvedFromUserId)) ?? (await db.profiles.get(fromUserId))
+    const toProfile = (await db.profiles.get(resolvedToUserId)) ?? (await db.profiles.get(toUserId))
     const labelSuffix = labelTrim ? ` · ${labelTrim}` : ''
 
     await db.activity_log.add({
@@ -805,15 +820,15 @@ export async function createSettlement(
   })
 
   const actor = await db.profiles.get(markedBy)
-  const fromProfile = await db.profiles.get(fromUserId)
-  const toProfile = await db.profiles.get(toUserId)
+  const fromProfile = (await db.profiles.get(resolvedFromUserId)) ?? (await db.profiles.get(fromUserId))
+  const toProfile = (await db.profiles.get(resolvedToUserId)) ?? (await db.profiles.get(toUserId))
   let groupName: string | null = null
   if (groupId) {
     const g = await db.groups.get(groupId)
     if (g && !g.is_deleted) groupName = g.name
   }
 
-  const recipientCandidates = [fromUserId, toUserId].filter((id) => id !== markedBy)
+  const recipientCandidates = [resolvedFromUserId, resolvedToUserId].filter((id) => id !== markedBy)
   for (const candidate of recipientCandidates) {
     const recipientId = await resolveRecipientProfileIdForNotify(candidate)
     if (!recipientId || recipientId === markedBy) continue
@@ -851,11 +866,15 @@ export async function updateSettlement(
 
   const timestamp = now()
   const labelTrim = patch.label.trim()
+  const [resolvedFromUserId, resolvedToUserId] = await Promise.all([
+    resolveSettlementPartyId(patch.fromUserId),
+    resolveSettlementPartyId(patch.toUserId),
+  ])
 
   await db.transaction('rw', [db.settlements, db.activity_log, db.profiles], async () => {
     await db.settlements.update(settlementId, {
-      from_user_id: patch.fromUserId,
-      to_user_id: patch.toUserId,
+      from_user_id: resolvedFromUserId,
+      to_user_id: resolvedToUserId,
       amount: patch.amount,
       currency: patch.currency,
       label: labelTrim,
@@ -863,8 +882,8 @@ export async function updateSettlement(
       synced_at: null,
     })
 
-    const fromProfile = await db.profiles.get(patch.fromUserId)
-    const toProfile = await db.profiles.get(patch.toUserId)
+    const fromProfile = (await db.profiles.get(resolvedFromUserId)) ?? (await db.profiles.get(patch.fromUserId))
+    const toProfile = (await db.profiles.get(resolvedToUserId)) ?? (await db.profiles.get(patch.toUserId))
     const labelSuffix = labelTrim ? ` · ${labelTrim}` : ''
 
     await db.activity_log.add({

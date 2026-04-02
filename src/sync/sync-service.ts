@@ -28,6 +28,18 @@ async function resolveSplitUserIdForPush(localUserId: string): Promise<string> {
   return localUserId
 }
 
+/** Prefer linked Kwenta account id for settlement parties when available. */
+async function resolveSettlementPartyIdForPush(localUserId: string): Promise<string> {
+  const p = await db.profiles.get(localUserId)
+  if (!p || p.is_deleted) {
+    return localUserId
+  }
+  if (p.linked_profile_id) {
+    return p.linked_profile_id
+  }
+  return localUserId
+}
+
 export const KWENTA_LAST_PULL_STORAGE_KEY = 'kwenta_last_pull'
 
 /** Time since we last advanced `KWENTA_LAST_PULL_STORAGE_KEY` after a successful sync. */
@@ -233,6 +245,18 @@ export async function pushChanges(): Promise<{ pushed: number; errors: string[] 
           return resolved === split.user_id ? split : { ...split, user_id: resolved }
         }),
       )
+    } else if (tableName === 'settlements') {
+      rowsToUpsert = await Promise.all(
+        unsynced.map(async (r) => {
+          const s = r as Settlement
+          const [fromResolved, toResolved] = await Promise.all([
+            resolveSettlementPartyIdForPush(s.from_user_id),
+            resolveSettlementPartyIdForPush(s.to_user_id),
+          ])
+          if (fromResolved === s.from_user_id && toResolved === s.to_user_id) return s
+          return { ...s, from_user_id: fromResolved, to_user_id: toResolved }
+        }),
+      )
     }
 
     const { error } = await supabase.from(tableName).upsert(rowsToUpsert, {
@@ -254,6 +278,15 @@ export async function pushChanges(): Promise<{ pushed: number; errors: string[] 
         if (pushed.user_id !== original.user_id) {
           patch.user_id = pushed.user_id
         }
+        await table.update(original.id, patch)
+      }
+    } else if (tableName === 'settlements') {
+      for (let i = 0; i < unsynced.length; i++) {
+        const original = unsynced[i] as Settlement
+        const pushedRow = rowsToUpsert[i] as Settlement
+        const patch: Partial<Settlement> & { synced_at: string } = { synced_at: timestamp }
+        if (pushedRow.from_user_id !== original.from_user_id) patch.from_user_id = pushedRow.from_user_id
+        if (pushedRow.to_user_id !== original.to_user_id) patch.to_user_id = pushedRow.to_user_id
         await table.update(original.id, patch)
       }
     } else {
@@ -548,6 +581,18 @@ export async function syncRoundTrip(userId: string): Promise<{
           return resolved === split.user_id ? split : { ...split, user_id: resolved }
         }),
       )
+    } else if (tableName === 'settlements') {
+      unsynced = await Promise.all(
+        unsynced.map(async (r) => {
+          const s = r as Settlement
+          const [fromResolved, toResolved] = await Promise.all([
+            resolveSettlementPartyIdForPush(s.from_user_id),
+            resolveSettlementPartyIdForPush(s.to_user_id),
+          ])
+          if (fromResolved === s.from_user_id && toResolved === s.to_user_id) return s
+          return { ...s, from_user_id: fromResolved, to_user_id: toResolved }
+        }),
+      )
     }
     if (unsynced.length > 0) {
       pPush[tableName] = unsynced
@@ -610,6 +655,13 @@ export async function syncRoundTrip(userId: string): Promise<{
       if (tableName === 'item_splits') {
         const s = r as ItemSplit
         await table.update(s.id, { synced_at: timestamp, user_id: s.user_id })
+      } else if (tableName === 'settlements') {
+        const s = r as Settlement
+        await table.update(s.id, {
+          synced_at: timestamp,
+          from_user_id: s.from_user_id,
+          to_user_id: s.to_user_id,
+        })
       } else {
         await table.update((r as SyncFields).id, { synced_at: timestamp })
       }
