@@ -181,3 +181,13 @@ export async function markKwentaNotificationRead(id: string, recipientId: string
 
   if (error) console.warn('[kwenta-notifications] mark read:', error.message)
 }
+
+export async function deleteKwentaNotification(id: string, recipientId: string): Promise<void> {
+  const { error } = await supabase
+    .from('kwenta_notifications')
+    .delete()
+    .eq('id', id)
+    .eq('recipient_id', recipientId)
+
+  if (error) console.warn('[kwenta-notifications] delete:', error.message)
+}

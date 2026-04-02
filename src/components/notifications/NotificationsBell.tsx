@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { BellRing, CheckCheck, RefreshCw } from 'lucide-react'
+import { BellRing, CheckCheck, RefreshCw, Trash2 } from 'lucide-react'
 import { toast } from 'sonner'
 import {
+  deleteKwentaNotification,
   fetchKwentaNotifications,
   markKwentaNotificationRead,
   type KwentaNotificationRow,
@@ -13,6 +14,7 @@ import { supabase } from '@/lib/supabase'
 import { useAppStore } from '@/store/app-store'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
+import { ConfirmDialog } from '@/components/common/ConfirmDialog'
 
 export function NotificationsBell({ userId }: { userId: string }) {
   const navigate = useNavigate()
@@ -22,6 +24,7 @@ export function NotificationsBell({ userId }: { userId: string }) {
   const [unread, setUnread] = useState(0)
   const [loading, setLoading] = useState(false)
   const [listError, setListError] = useState<string | null>(null)
+  const [deleteTarget, setDeleteTarget] = useState<KwentaNotificationRow | null>(null)
   const wrapRef = useRef<HTMLDivElement>(null)
   const initializedRef = useRef(false)
   const unreadCacheKey = `kwenta_notifications_unread:${userId}`
@@ -70,6 +73,13 @@ export function NotificationsBell({ userId }: { userId: string }) {
           filter: `recipient_id=eq.${userId}`,
         },
         (payload) => {
+          if (payload.eventType === 'DELETE') {
+            const prev = (payload.old ?? null) as Partial<KwentaNotificationRow> | null
+            if (!prev?.id) return
+            setItems((rows) => rows.filter((r) => r.id !== prev.id))
+            if (!prev.read_at) setUnread((n) => Math.max(0, n - 1))
+            return
+          }
           const next = payload.new as KwentaNotificationRow | null
           if (!next) return
           if (payload.eventType === 'INSERT') {
@@ -140,6 +150,12 @@ export function NotificationsBell({ userId }: { userId: string }) {
     setItems((prev) => prev.map((row) => ({ ...row, read_at: row.read_at ?? new Date().toISOString() })))
     setUnread(0)
     void loadList()
+  }
+
+  async function onDeleteRow(row: KwentaNotificationRow) {
+    await withMetric('notifications.delete', () => deleteKwentaNotification(row.id, userId))
+    setItems((prev) => prev.filter((r) => r.id !== row.id))
+    if (!row.read_at) setUnread((n) => Math.max(0, n - 1))
   }
 
   return (
@@ -223,26 +239,51 @@ export function NotificationsBell({ userId }: { userId: string }) {
             <ul className="max-h-[min(70vh,20rem)] overflow-y-auto">
               {items.map((row) => (
                 <li key={row.id} className="border-b border-stone-100 last:border-0">
-                  <button
-                    type="button"
-                    className={cn(
-                      'w-full px-4 py-3 text-left text-sm transition-colors hover:bg-stone-50',
-                      !row.read_at && 'bg-teal-800/4',
-                    )}
-                    onClick={() => void onPick(row)}
-                  >
-                    <p className="font-medium text-stone-900">{row.title}</p>
-                    <p className="mt-0.5 text-xs leading-relaxed text-stone-600">{row.body}</p>
-                    <p className="mt-1 text-[0.65rem] text-stone-400">
-                      {new Date(row.created_at).toLocaleString()}
-                    </p>
-                  </button>
+                  <div className={cn('flex items-start gap-1 px-2 py-1', !row.read_at && 'bg-teal-800/4')}>
+                    <button
+                      type="button"
+                      className="flex-1 rounded-lg px-2 py-2 text-left text-sm transition-colors hover:bg-stone-50"
+                      onClick={() => void onPick(row)}
+                    >
+                      <p className="font-medium text-stone-900">{row.title}</p>
+                      <p className="mt-0.5 text-xs leading-relaxed text-stone-600">{row.body}</p>
+                      <p className="mt-1 text-[0.65rem] text-stone-400">
+                        {new Date(row.created_at).toLocaleString()}
+                      </p>
+                    </button>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon-xs"
+                      className="mt-1 rounded-full text-stone-500"
+                      aria-label="Delete notification"
+                      onClick={() => setDeleteTarget(row)}
+                    >
+                      <Trash2 className="size-3.5" />
+                    </Button>
+                  </div>
                 </li>
               ))}
             </ul>
           )}
         </div>
       )}
+
+      <ConfirmDialog
+        open={Boolean(deleteTarget)}
+        onOpenChange={(nextOpen) => {
+          if (!nextOpen) setDeleteTarget(null)
+        }}
+        title="Delete notification?"
+        description="This notification will be removed from your list."
+        confirmLabel="Delete"
+        variant="danger"
+        onConfirm={async () => {
+          if (!deleteTarget) return
+          await onDeleteRow(deleteTarget)
+          setDeleteTarget(null)
+        }}
+      />
     </div>
   )
 }
