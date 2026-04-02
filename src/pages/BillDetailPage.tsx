@@ -129,6 +129,22 @@ export function BillDetailPage() {
   }
 
   const canEdit = Boolean(userId && bill.created_by === userId)
+  const mySplitTotal =
+    userId && bill.group_id === null
+      ? (() => {
+          let total = 0
+          let included = false
+          for (const item of bill.items) {
+            for (const split of item.splits) {
+              if (split.user_id !== userId) continue
+              included = true
+              total += split.computed_amount
+            }
+          }
+          if (!included) return null
+          return Math.round(total * 100) / 100
+        })()
+      : null
 
   return (
     <>
@@ -175,6 +191,11 @@ export function BillDetailPage() {
             <p className="text-2xl font-semibold text-teal-800">
               {formatCurrency(bill.total_amount, bill.currency)}
             </p>
+            {mySplitTotal !== null && (
+              <p className="mt-1 text-sm font-medium text-stone-600">
+                Your split: {formatCurrency(mySplitTotal, bill.currency)}
+              </p>
+            )}
             <p className="text-xs text-stone-400">{bill.currency}</p>
           </div>
         </div>

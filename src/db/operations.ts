@@ -877,6 +877,8 @@ export async function updateSettlement(
       description: `${fromProfile?.display_name ?? 'Someone'} → ${toProfile?.display_name ?? 'someone'} · ${new Intl.NumberFormat('en-PH', { style: 'currency', currency: patch.currency, minimumFractionDigits: 0 }).format(patch.amount)} (updated)${labelSuffix}`,
     })
   })
+
+  notifySyncAfterMutation()
 }
 
 export async function deleteSettlement(settlementId: string, editorUserId: string): Promise<void> {

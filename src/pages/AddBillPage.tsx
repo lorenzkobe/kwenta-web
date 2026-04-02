@@ -33,7 +33,7 @@ import {
   type PinnedSplits,
 } from '@/lib/bill-split-form'
 import { BILL_BACK_QUERY, parseSafeAppPath, withBillBackQuery } from '@/lib/bill-navigation'
-import { collectRelatedProfileIds } from '@/lib/people'
+import { listCanonicalRelatedProfileIds } from '@/lib/people'
 import { normalizeAmountInput, stripLeadingZerosAmount } from '@/lib/amount-input'
 import { cn, formatCurrency } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
@@ -153,9 +153,13 @@ export function AddBillPage() {
 
   const personalSplitMembers = useLiveQuery(async () => {
     if (!userId) return []
-    const ids = await collectRelatedProfileIds(userId)
-    ids.add(userId)
+    const ids = await listCanonicalRelatedProfileIds(userId)
     const out: { userId: string; displayName: string; isCurrentUser: boolean }[] = []
+    out.push({
+      userId,
+      displayName: 'You',
+      isCurrentUser: true,
+    })
     for (const id of ids) {
       const p = await db.profiles.get(id)
       if (!p || p.is_deleted) continue

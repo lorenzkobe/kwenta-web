@@ -548,6 +548,7 @@ export function PersonDetailPage() {
                       const net = personalBillDirection?.get(bill.id) ?? 0
                       const settled = Math.abs(net) < 0.005
                       const direction = net > 0 ? 'Receive' : 'Pay'
+                      const amountForDisplay = settled ? 0 : Math.abs(net)
                       const badgeClass = settled
                         ? 'bg-stone-200 text-stone-600'
                         : net > 0
@@ -574,7 +575,7 @@ export function PersonDetailPage() {
                       </div>
                       <div className="flex items-center gap-2">
                         <span className="text-sm font-semibold text-stone-800">
-                          {formatCurrency(bill.total_amount, bill.currency)}
+                          {formatCurrency(amountForDisplay, bill.currency)}
                         </span>
                         <ChevronRight className="size-4 text-stone-400" />
                       </div>
