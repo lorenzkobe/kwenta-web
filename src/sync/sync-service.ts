@@ -16,7 +16,10 @@ import type {
   SyncFields,
 } from '@/types'
 
-/** Prefer linked Kwenta account id when set; otherwise keep id (synced local profiles satisfy FK). */
+/**
+ * Prefer linked Kwenta account id when set; otherwise keep id.
+ * Used for bill splits, settlements, and group_members so the server stores auth.profile ids.
+ */
 async function resolveSplitUserIdForPush(localUserId: string): Promise<string> {
   const p = await db.profiles.get(localUserId)
   if (!p || p.is_deleted) {
@@ -257,6 +260,14 @@ export async function pushChanges(): Promise<{ pushed: number; errors: string[] 
           return { ...s, from_user_id: fromResolved, to_user_id: toResolved }
         }),
       )
+    } else if (tableName === 'group_members') {
+      rowsToUpsert = await Promise.all(
+        unsynced.map(async (r) => {
+          const gm = r as GroupMember
+          const resolved = await resolveSplitUserIdForPush(gm.user_id)
+          return resolved === gm.user_id ? gm : { ...gm, user_id: resolved }
+        }),
+      )
     }
 
     const { error } = await supabase.from(tableName).upsert(rowsToUpsert, {
@@ -287,6 +298,16 @@ export async function pushChanges(): Promise<{ pushed: number; errors: string[] 
         const patch: Partial<Settlement> & { synced_at: string } = { synced_at: timestamp }
         if (pushedRow.from_user_id !== original.from_user_id) patch.from_user_id = pushedRow.from_user_id
         if (pushedRow.to_user_id !== original.to_user_id) patch.to_user_id = pushedRow.to_user_id
+        await table.update(original.id, patch)
+      }
+    } else if (tableName === 'group_members') {
+      for (let i = 0; i < unsynced.length; i++) {
+        const original = unsynced[i] as GroupMember
+        const pushed = rowsToUpsert[i] as GroupMember
+        const patch: Partial<GroupMember> & { synced_at: string } = { synced_at: timestamp }
+        if (pushed.user_id !== original.user_id) {
+          patch.user_id = pushed.user_id
+        }
         await table.update(original.id, patch)
       }
     } else {
@@ -449,10 +470,41 @@ async function fetchRemoteRows(
       }
       return [...dedup.values()]
     }
-    case 'groups':
+    case 'groups': {
       if (groupIds.length === 0) return []
-      query = query.in('id', groupIds)
-      break
+      const { data: incGroups, error: eGroupsInc } = await supabase
+        .from('groups')
+        .select('*')
+        .in('id', groupIds)
+        .gt('updated_at', since)
+      if (eGroupsInc) throw eGroupsInc
+      const { data: recentMemberships, error: eRecentGm } = await supabase
+        .from('group_members')
+        .select('group_id')
+        .eq('user_id', userId)
+        .eq('is_deleted', false)
+        .gt('updated_at', since)
+      if (eRecentGm) throw eRecentGm
+      const recentGroupIds = [
+        ...new Set((recentMemberships ?? []).map((r) => r.group_id).filter((gid) => groupIds.includes(gid))),
+      ]
+      let extraGroups: SyncFields[] = []
+      if (recentGroupIds.length > 0) {
+        const { data: fullGroups, error: eGroupsFull } = await supabase
+          .from('groups')
+          .select('*')
+          .in('id', recentGroupIds)
+        if (eGroupsFull) throw eGroupsFull
+        extraGroups = (fullGroups ?? []) as SyncFields[]
+      }
+      const dedup = new Map<string, SyncFields>()
+      for (const r of [...(incGroups ?? []), ...extraGroups]) {
+        const row = r as SyncFields
+        const prev = dedup.get(row.id)
+        if (!prev || row.updated_at > prev.updated_at) dedup.set(row.id, row)
+      }
+      return [...dedup.values()]
+    }
     case 'group_members':
       if (groupIds.length === 0) return []
       query = query.in('group_id', groupIds)
@@ -593,6 +645,14 @@ export async function syncRoundTrip(userId: string): Promise<{
           return { ...s, from_user_id: fromResolved, to_user_id: toResolved }
         }),
       )
+    } else if (tableName === 'group_members') {
+      unsynced = await Promise.all(
+        unsynced.map(async (r) => {
+          const gm = r as GroupMember
+          const resolved = await resolveSplitUserIdForPush(gm.user_id)
+          return resolved === gm.user_id ? gm : { ...gm, user_id: resolved }
+        }),
+      )
     }
     if (unsynced.length > 0) {
       pPush[tableName] = unsynced
@@ -662,6 +722,9 @@ export async function syncRoundTrip(userId: string): Promise<{
           from_user_id: s.from_user_id,
           to_user_id: s.to_user_id,
         })
+      } else if (tableName === 'group_members') {
+        const gm = r as GroupMember
+        await table.update(gm.id, { synced_at: timestamp, user_id: gm.user_id })
       } else {
         await table.update((r as SyncFields).id, { synced_at: timestamp })
       }
