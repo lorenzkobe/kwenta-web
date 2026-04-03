@@ -18,10 +18,15 @@ import {
   resolveRecipientProfileIdForNotify,
 } from '@/lib/kwenta-notifications'
 import { computeSplits, type SplitInput } from '@/lib/splits'
-import { participantUnionForBill } from '@/lib/people'
+import { fetchRemoteProfileIntoDexie, participantUnionForBill } from '@/lib/people'
 
 function notifySyncAfterMutation() {
   triggerSync()
+}
+
+/** Group membership must use the Kwenta account id so Postgres RLS and sync match `auth.uid()`. */
+function membershipUserIdForProfile(p: { id: string; linked_profile_id: string | null }): string {
+  return p.linked_profile_id ?? p.id
 }
 
 function syncFields(overrides?: Partial<{ id: string }>) {
@@ -376,7 +381,9 @@ export async function addGroupMember(
   }
 
   if (userId) {
-    const already = await db.group_members.where('[group_id+user_id]').equals([groupId, userId]).first()
+    const pCheck = await db.profiles.get(userId)
+    const rowUid = pCheck ? membershipUserIdForProfile(pCheck) : userId
+    const already = await db.group_members.where('[group_id+user_id]').equals([groupId, rowUid]).first()
     if (already && !already.is_deleted) {
       notifySyncAfterMutation()
       return userId
@@ -400,10 +407,11 @@ export async function addGroupMember(
     }
 
     const p = await db.profiles.get(userId)
+    const memberRowUserId = p ? membershipUserIdForProfile(p) : userId
     const member: GroupMember = {
       ...syncFields({ id: memberId }),
       group_id: groupId,
-      user_id: userId,
+      user_id: memberRowUserId,
       display_name: p?.display_name ?? trimmed,
       joined_at: now(),
     }
@@ -419,6 +427,11 @@ export async function addGroupMember(
       description: `Added "${p?.display_name ?? trimmed}" to group`,
     })
   })
+
+  const pFinal = await db.profiles.get(userId!)
+  if (pFinal?.linked_profile_id) {
+    await fetchRemoteProfileIntoDexie(pFinal.linked_profile_id)
+  }
 
   const group = await db.groups.get(groupId)
   const actor = await db.profiles.get(addedBy)
@@ -477,21 +490,34 @@ export async function addExistingGroupMember(
   memberUserId: string,
   addedBy: string,
 ): Promise<void> {
-  const existing = await db.group_members.where('[group_id+user_id]').equals([groupId, memberUserId]).first()
-  if (existing && !existing.is_deleted) {
+  const p = await db.profiles.get(memberUserId)
+  if (!p || p.is_deleted) return
+
+  const memberRowUserId = membershipUserIdForProfile(p)
+  const existingLocal = await db.group_members
+    .where('[group_id+user_id]')
+    .equals([groupId, memberUserId])
+    .first()
+  const existingCanon =
+    memberRowUserId !== memberUserId
+      ? await db.group_members.where('[group_id+user_id]').equals([groupId, memberRowUserId]).first()
+      : undefined
+  if (
+    (existingLocal && !existingLocal.is_deleted) ||
+    (existingCanon && !existingCanon.is_deleted)
+  ) {
     notifySyncAfterMutation()
     return
   }
 
-  const p = await db.profiles.get(memberUserId)
-  if (!p || p.is_deleted) return
+  await fetchRemoteProfileIntoDexie(memberRowUserId)
 
   const memberId = generateId()
   await db.transaction('rw', [db.group_members, db.activity_log], async () => {
     await db.group_members.add({
       ...syncFields({ id: memberId }),
       group_id: groupId,
-      user_id: memberUserId,
+      user_id: memberRowUserId,
       display_name: p.display_name,
       joined_at: now(),
     })
@@ -541,6 +567,17 @@ export async function linkProfileToRemote(
     updated_at: timestamp,
     synced_at: null,
   })
+
+  const memberships = await db.group_members.where('user_id').equals(localProfileId).toArray()
+  for (const m of memberships) {
+    if (m.is_deleted) continue
+    await db.group_members.update(m.id, {
+      user_id: remoteProfileId,
+      updated_at: timestamp,
+      synced_at: null,
+    })
+  }
+
   const actor = await db.profiles.get(actorUserId)
   void notifyProfileLinked({
     actorId: actorUserId,

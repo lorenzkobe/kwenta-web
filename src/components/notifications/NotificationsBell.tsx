@@ -9,6 +9,7 @@ import {
   type KwentaNotificationRow,
 } from '@/lib/kwenta-notifications'
 import { captureMetric, withMetric } from '@/lib/client-metrics'
+import { fullSync } from '@/sync/sync-service'
 import { isRuntimeFlagEnabled } from '@/lib/runtime-flags'
 import { supabase } from '@/lib/supabase'
 import { useAppStore } from '@/store/app-store'
@@ -137,6 +138,11 @@ export function NotificationsBell({ userId }: { userId: string }) {
     if (row.kind === 'bill_participant' && row.entity_id) {
       navigate(`/app/bills/${row.entity_id}`)
     } else if (row.kind === 'added_to_group' && row.group_id) {
+      if (isOnline) {
+        await withMetric('notifications.syncBeforeGroupNav', () => fullSync(userId), {
+          groupId: row.group_id,
+        })
+      }
       navigate(`/app/groups/${row.group_id}`)
     } else {
       navigate('/app/people')
