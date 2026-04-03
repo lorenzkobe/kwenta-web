@@ -91,6 +91,7 @@ export function LoginPage() {
               : 'Account created! You can sign in now.',
           )
           setMode('login')
+          navigate('/login', { replace: true })
         }
       } else {
         const { error } = await resetPassword(email)
