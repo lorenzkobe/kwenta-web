@@ -553,6 +553,11 @@ export function GroupDetailPage() {
     )
   }, [groupId])
 
+  const membershipLoaded = Array.isArray(members)
+  const currentUserHasActiveMembership = Boolean(
+    userId && (members ?? []).some((m) => m.userId === userId),
+  )
+
   async function refreshBalances() {
     if (!groupId || !userId) return
     const updated = await computeGroupBalances(groupId, userId)
@@ -575,7 +580,7 @@ export function GroupDetailPage() {
     setDeleteGroupConfirmOpen(true)
   }
 
-  if (!group || group.is_deleted) {
+  if (!group || group.is_deleted || (userId && membershipLoaded && !currentUserHasActiveMembership)) {
     return (
       <div className="space-y-5">
         <Button asChild variant="ghost" size="sm" className="rounded-full gap-1">

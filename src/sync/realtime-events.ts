@@ -72,6 +72,11 @@ function bundleRows<T extends SyncFields>(bundle: ReconcileBundle, key: keyof Re
   return (Array.isArray(rows) ? rows : []) as T[]
 }
 
+function shouldFallbackPullAfterNoopReconcile(ev: UserEventRow): boolean {
+  if (ev.op === 'DELETE') return false
+  return ev.entity_type === 'groups' || ev.entity_type === 'group_members'
+}
+
 async function applyReconcileBundle(bundle: ReconcileBundle): Promise<number> {
   let applied = 0
   for (const row of bundleRows<Profile>(bundle, 'profiles')) {
@@ -124,7 +129,22 @@ async function processEvent(userId: string, ev: UserEventRow): Promise<void> {
     )
     if (!error && data && isRecord(data)) {
       const applied = await applyReconcileBundle(data as ReconcileBundle)
-      if (applied > 0 || ev.op !== 'DELETE') {
+      if (applied > 0) {
+        captureMetric('realtime.event.process', true, performance.now() - startedAt, { entity: ev.entity_type, op: ev.op, applied })
+        return
+      }
+      if (shouldFallbackPullAfterNoopReconcile(ev)) {
+        await pullChanges(userId)
+        captureMetric('realtime.event.process', true, performance.now() - startedAt, {
+          entity: ev.entity_type,
+          op: ev.op,
+          applied,
+          fallbackPull: true,
+          noopReconcile: true,
+        })
+        return
+      }
+      if (ev.op !== 'DELETE') {
         captureMetric('realtime.event.process', true, performance.now() - startedAt, { entity: ev.entity_type, op: ev.op, applied })
         return
       }

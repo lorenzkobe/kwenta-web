@@ -16,6 +16,7 @@ import { useAppStore } from '@/store/app-store'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { ConfirmDialog } from '@/components/common/ConfirmDialog'
+import { db } from '@/db/db'
 
 export function NotificationsBell({ userId }: { userId: string }) {
   const navigate = useNavigate()
@@ -129,6 +130,14 @@ export function NotificationsBell({ userId }: { userId: string }) {
     return () => document.removeEventListener('mousedown', onDoc)
   }, [open])
 
+  async function canOpenGroup(groupId: string): Promise<boolean> {
+    const [group, membership] = await Promise.all([
+      db.groups.get(groupId),
+      db.group_members.where('[group_id+user_id]').equals([groupId, userId]).first(),
+    ])
+    return Boolean(group && !group.is_deleted && membership && !membership.is_deleted)
+  }
+
   async function onPick(row: KwentaNotificationRow) {
     await withMetric('notifications.markRead', () => markKwentaNotificationRead(row.id, userId))
     setItems((prev) => prev.map((p) => (p.id === row.id ? { ...p, read_at: new Date().toISOString() } : p)))
@@ -138,12 +147,28 @@ export function NotificationsBell({ userId }: { userId: string }) {
     if (row.kind === 'bill_participant' && row.entity_id) {
       navigate(`/app/bills/${row.entity_id}`)
     } else if (row.kind === 'added_to_group' && row.group_id) {
+      let syncErrors: string[] = []
       if (isOnline) {
-        await withMetric('notifications.syncBeforeGroupNav', () => fullSync(userId), {
+        const syncResult = await withMetric('notifications.syncBeforeGroupNav', () => fullSync(userId), {
           groupId: row.group_id,
         })
+        syncErrors = syncResult.errors
       }
-      navigate(`/app/groups/${row.group_id}`)
+
+      const hasGroupAccess = await canOpenGroup(row.group_id)
+      if (hasGroupAccess) {
+        navigate(`/app/groups/${row.group_id}`)
+        return
+      }
+
+      if (!isOnline) {
+        toast.info('You are offline. Reconnect to load this group.')
+      } else if (syncErrors.length > 0) {
+        toast.info('This group is still syncing. Try again in a moment.')
+      } else {
+        toast.info('This group is no longer available.')
+      }
+      navigate('/app/groups')
     } else {
       navigate('/app/people')
     }
