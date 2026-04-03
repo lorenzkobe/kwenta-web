@@ -505,10 +505,31 @@ async function fetchRemoteRows(
       }
       return [...dedup.values()]
     }
-    case 'group_members':
-      if (groupIds.length === 0) return []
-      query = query.in('group_id', groupIds)
-      break
+    case 'group_members': {
+      const { data: myMembershipRows, error: eMine } = await supabase
+        .from('group_members')
+        .select('*')
+        .eq('user_id', userId)
+        .gt('updated_at', since)
+      if (eMine) throw eMine
+      let inActiveGroups: SyncFields[] = []
+      if (groupIds.length > 0) {
+        const { data: gRows, error: eG } = await supabase
+          .from('group_members')
+          .select('*')
+          .in('group_id', groupIds)
+          .gt('updated_at', since)
+        if (eG) throw eG
+        inActiveGroups = (gRows ?? []) as SyncFields[]
+      }
+      const dedupGm = new Map<string, SyncFields>()
+      for (const r of [...(myMembershipRows ?? []), ...inActiveGroups]) {
+        const row = r as SyncFields
+        const prev = dedupGm.get(row.id)
+        if (!prev || row.updated_at > prev.updated_at) dedupGm.set(row.id, row)
+      }
+      return [...dedupGm.values()]
+    }
     case 'bills': {
       const { data: rpcRows, error: rpcError } = await supabase.rpc('bills_for_sync', {
         p_since: since,
