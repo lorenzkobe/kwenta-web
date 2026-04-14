@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { LayoutList, Plus, Save, SplitSquareHorizontal, Trash2, UserPlus, Users, X } from 'lucide-react'
+import { toast } from 'sonner'
 import {
   createBill,
   getBillWithDetails,
@@ -214,7 +215,7 @@ export function AddBillDialog({
     const st = simpleSplitTypeRef.current
     const amt = parseFloat(simpleAmountStrRef.current) || 0
     setSimpleSplitMeta((meta) => {
-      let pinned = { ...meta.pinned }
+      const pinned = { ...meta.pinned }
       if (raw.trim() === '') {
         const target = st === 'percentage' ? 100 : amt
         return applyClearedSplitField(ids, meta.values, meta.pinned, uid, st === 'percentage' ? 'percentage' : 'custom', target)
@@ -242,9 +243,9 @@ export function AddBillDialog({
       const st = simpleSplitTypeRef.current
       const amt = parseFloat(simpleAmountStrRef.current) || 0
       setSimpleSplitMeta((meta) => {
-        let pinned = { ...meta.pinned }
+        const pinned = { ...meta.pinned }
         if (!adding) delete pinned[uid]
-        let values = { ...meta.values }
+        const values = { ...meta.values }
         if (!adding) delete values[uid]
 
         if (st === 'equal') {
@@ -324,9 +325,9 @@ export function AddBillDialog({
         const nextIds = adding
           ? [...item.selectedUserIds, uid]
           : item.selectedUserIds.filter((x) => x !== uid)
-        let pinned = { ...item.pinnedSplit }
+        const pinned = { ...item.pinnedSplit }
         if (!adding) delete pinned[uid]
-        let values = { ...item.splitValues }
+        const values = { ...item.splitValues }
         if (!adding) delete values[uid]
 
         if (item.splitType === 'equal') {
@@ -404,7 +405,7 @@ export function AddBillDialog({
       prev.map((item) => {
         if (item.key !== itemKey) return item
         const target = item.splitType === 'percentage' ? 100 : parseFloat(item.amount) || 0
-        let pinned = { ...item.pinnedSplit }
+        const pinned = { ...item.pinnedSplit }
         if (raw.trim() === '') {
           const mode = item.splitType === 'percentage' ? 'percentage' : 'custom'
           const { values, pinned: nextPinned } = applyClearedSplitField(
@@ -491,6 +492,9 @@ export function AddBillDialog({
       }
       onSaved()
       onClose()
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Could not save bill right now.'
+      toast.error(message)
     } finally {
       setSaving(false)
     }

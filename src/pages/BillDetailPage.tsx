@@ -6,6 +6,7 @@ import { getBillWithDetails, deleteBill } from '@/db/operations'
 import { BILL_BACK_QUERY, billDetailBackPath, withBillBackQuery } from '@/lib/bill-navigation'
 import {
   computePairwiseNetForBill,
+  expandProfileIdsForSplitMatching,
   participantUnionForBill,
   resolveProfileDisplay,
 } from '@/lib/people'
@@ -45,6 +46,7 @@ export function BillDetailPage() {
     toName: string
   } | null>(null)
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false)
+  const [mySplitTotal, setMySplitTotal] = useState<number | null>(null)
 
   const reloadBill = useCallback(() => {
     if (!billId) return
@@ -103,8 +105,38 @@ export function BillDetailPage() {
   }, [billId, userId, bill])
 
   useEffect(() => {
-    void reloadBillPairs()
+    const t = setTimeout(() => {
+      void reloadBillPairs()
+    }, 0)
+    return () => clearTimeout(t)
   }, [reloadBillPairs])
+
+  useEffect(() => {
+    if (!bill || !userId || bill.group_id !== null) {
+      const t = setTimeout(() => setMySplitTotal(null), 0)
+      return () => clearTimeout(t)
+    }
+
+    let cancelled = false
+    void (async () => {
+      const myIds = await expandProfileIdsForSplitMatching(userId)
+      let total = 0
+      let included = false
+      for (const item of bill.items) {
+        for (const split of item.splits) {
+          if (!myIds.has(split.user_id)) continue
+          included = true
+          total += split.computed_amount
+        }
+      }
+      if (cancelled) return
+      setMySplitTotal(included ? Math.round(total * 100) / 100 : null)
+    })()
+
+    return () => {
+      cancelled = true
+    }
+  }, [bill, userId])
 
   async function executeDeleteBill() {
     if (!billId || !userId) return
@@ -137,23 +169,6 @@ export function BillDetailPage() {
   }
 
   const canEdit = Boolean(userId && bill.created_by === userId)
-  const mySplitTotal =
-    userId && bill.group_id === null
-      ? (() => {
-          let total = 0
-          let included = false
-          for (const item of bill.items) {
-            for (const split of item.splits) {
-              if (split.user_id !== userId) continue
-              included = true
-              total += split.computed_amount
-            }
-          }
-          if (!included) return null
-          return Math.round(total * 100) / 100
-        })()
-      : null
-
   return (
     <>
     <div className="space-y-5">

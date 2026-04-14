@@ -10,17 +10,17 @@ export function RealtimeNoticeBanner() {
   const [visible, setVisible] = useState(false)
 
   useEffect(() => {
-    if (!notice) {
-      setVisible(false)
-      return
-    }
-    setVisible(true)
+    if (!notice) return
+    const raf = requestAnimationFrame(() => setVisible(true))
     const t = setTimeout(() => {
       setVisible(false)
       clear(null)
     }, AUTO_HIDE_MS)
-    return () => clearTimeout(t)
-  }, [notice?.at, notice?.message, clear])
+    return () => {
+      cancelAnimationFrame(raf)
+      clearTimeout(t)
+    }
+  }, [notice, clear])
 
   if (!notice) return null
 

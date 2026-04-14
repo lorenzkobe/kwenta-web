@@ -48,6 +48,9 @@ export function SettlementHistoryList({
                 {h.billTitle && (
                   <p className="mt-0.5 text-xs text-teal-800/90">Bill: {h.billTitle}</p>
                 )}
+                {!h.billTitle && h.groupId === null && (
+                  <p className="mt-0.5 text-xs text-stone-500">General payment</p>
+                )}
                 {h.label.trim() !== '' && (
                   <p className="mt-0.5 text-xs font-medium text-stone-600">{h.label}</p>
                 )}

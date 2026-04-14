@@ -235,6 +235,208 @@ export async function computePairwiseNetForBill(
   return Math.round(net * 100) / 100
 }
 
+export interface PersonalBillAllocationSlice {
+  billId: string
+  billTitle: string
+  amount: number
+  currency: string
+  createdAt: string
+}
+
+export interface PersonalBillAllocationPlan {
+  allocatableTotal: number
+  appliedAmount: number
+  remainderAmount: number
+  affectedBillCount: number
+  slices: PersonalBillAllocationSlice[]
+}
+
+type PersonalDirectionContext = {
+  meId: string
+  otherId: string
+  fromUserId: string
+  toUserId: string
+}
+
+function resolvePersonalDirection(ctx: PersonalDirectionContext): 'other_to_me' | 'me_to_other' | null {
+  const otherToMe = ctx.fromUserId === ctx.otherId && ctx.toUserId === ctx.meId
+  if (otherToMe) return 'other_to_me'
+  const meToOther = ctx.fromUserId === ctx.meId && ctx.toUserId === ctx.otherId
+  if (meToOther) return 'me_to_other'
+  return null
+}
+
+async function listEligiblePersonalBillBalances(params: {
+  meId: string
+  otherId: string
+  currency: string
+  direction: 'other_to_me' | 'me_to_other'
+}): Promise<PersonalBillAllocationSlice[]> {
+  const bills = await listBillsInvolvingPair(params.meId, params.otherId)
+  const personal = bills
+    .filter((b) => b.group_id === null && b.currency === params.currency)
+    .sort((a, b) => a.created_at.localeCompare(b.created_at))
+
+  const out: PersonalBillAllocationSlice[] = []
+  for (const bill of personal) {
+    const net = await computePairwiseNetForBill(bill.id, params.meId, params.otherId)
+    let due = 0
+    if (params.direction === 'other_to_me' && net > 0.005) {
+      due = net
+    } else if (params.direction === 'me_to_other' && net < -0.005) {
+      due = Math.abs(net)
+    }
+    if (due <= 0.005) continue
+    out.push({
+      billId: bill.id,
+      billTitle: bill.title,
+      amount: Math.round(due * 100) / 100,
+      currency: bill.currency,
+      createdAt: bill.created_at,
+    })
+  }
+  return out
+}
+
+export async function buildPersonalBillAllocationPlan(params: {
+  meId: string
+  otherId: string
+  fromUserId: string
+  toUserId: string
+  currency: string
+  amountToApply: number
+}): Promise<PersonalBillAllocationPlan> {
+  const amountToApply = Math.max(0, params.amountToApply)
+  const direction = resolvePersonalDirection({
+    meId: params.meId,
+    otherId: params.otherId,
+    fromUserId: params.fromUserId,
+    toUserId: params.toUserId,
+  })
+  if (!direction) {
+    return {
+      allocatableTotal: 0,
+      appliedAmount: 0,
+      remainderAmount: Math.round(amountToApply * 100) / 100,
+      affectedBillCount: 0,
+      slices: [],
+    }
+  }
+
+  const eligible = await listEligiblePersonalBillBalances({
+    meId: params.meId,
+    otherId: params.otherId,
+    currency: params.currency,
+    direction,
+  })
+
+  const allocatableTotalRaw = eligible.reduce((sum, row) => sum + row.amount, 0)
+  const allocatableTotal = Math.round(allocatableTotalRaw * 100) / 100
+
+  let remaining = amountToApply
+  const slices: PersonalBillAllocationSlice[] = []
+  for (const row of eligible) {
+    if (remaining <= 0.005) break
+    const applied = Math.min(remaining, row.amount)
+    if (applied <= 0.005) continue
+    slices.push({ ...row, amount: Math.round(applied * 100) / 100 })
+    remaining -= applied
+  }
+
+  const appliedAmount = Math.round((amountToApply - Math.max(remaining, 0)) * 100) / 100
+  const remainderAmount = Math.round(Math.max(remaining, 0) * 100) / 100
+  return {
+    allocatableTotal,
+    appliedAmount,
+    remainderAmount,
+    affectedBillCount: slices.length,
+    slices,
+  }
+}
+
+export async function computeAvailableGeneralCredit(params: {
+  meId: string
+  otherId: string
+  fromUserId: string
+  toUserId: string
+  currency: string
+}): Promise<number> {
+  const fromIds = await expandProfileIdsForSplitMatching(params.fromUserId)
+  const toIds = await expandProfileIdsForSplitMatching(params.toUserId)
+  const all = await db.settlements.filter((s) => !s.is_deleted && s.is_settled).toArray()
+  let total = 0
+  for (const s of all) {
+    if (s.group_id !== null || s.bill_id !== null) continue
+    if (s.currency !== params.currency) continue
+    if (!fromIds.has(s.from_user_id) || !toIds.has(s.to_user_id)) continue
+    total += s.amount
+  }
+  return Math.round(total * 100) / 100
+}
+
+export interface ManualGeneralCreditApplyPlan extends PersonalBillAllocationPlan {
+  fromUserId: string
+  toUserId: string
+  availableGeneralCredit: number
+}
+
+export async function buildManualGeneralCreditApplyPlan(params: {
+  meId: string
+  otherId: string
+  currency: string
+}): Promise<ManualGeneralCreditApplyPlan | null> {
+  const receiveDirectionCredit = await computeAvailableGeneralCredit({
+    meId: params.meId,
+    otherId: params.otherId,
+    fromUserId: params.otherId,
+    toUserId: params.meId,
+    currency: params.currency,
+  })
+  const receiveDirectionPlan = await buildPersonalBillAllocationPlan({
+    meId: params.meId,
+    otherId: params.otherId,
+    fromUserId: params.otherId,
+    toUserId: params.meId,
+    currency: params.currency,
+    amountToApply: receiveDirectionCredit,
+  })
+
+  const payDirectionCredit = await computeAvailableGeneralCredit({
+    meId: params.meId,
+    otherId: params.otherId,
+    fromUserId: params.meId,
+    toUserId: params.otherId,
+    currency: params.currency,
+  })
+  const payDirectionPlan = await buildPersonalBillAllocationPlan({
+    meId: params.meId,
+    otherId: params.otherId,
+    fromUserId: params.meId,
+    toUserId: params.otherId,
+    currency: params.currency,
+    amountToApply: payDirectionCredit,
+  })
+
+  const receiveApplied = receiveDirectionPlan.appliedAmount
+  const payApplied = payDirectionPlan.appliedAmount
+  if (receiveApplied <= 0.005 && payApplied <= 0.005) return null
+
+  if (receiveApplied >= payApplied) {
+    return {
+      ...receiveDirectionPlan,
+      fromUserId: params.otherId,
+      toUserId: params.meId,
+      availableGeneralCredit: receiveDirectionCredit,
+    }
+  }
+  return {
+    ...payDirectionPlan,
+    fromUserId: params.meId,
+    toUserId: params.otherId,
+    availableGeneralCredit: payDirectionCredit,
+  }
+}
+
 /** Like `computePairwiseNet` but only bills with `group_id == null` (personal). */
 export async function computePairwiseNetPersonalOnly(
   meId: string,

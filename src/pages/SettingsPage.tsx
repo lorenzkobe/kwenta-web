@@ -3,6 +3,7 @@ import { useLiveQuery } from 'dexie-react-hooks'
 import { Link, useNavigate } from 'react-router-dom'
 import {
   ArrowUpRight,
+  CircleAlert,
   Check,
   ChevronRight,
   Copy,
@@ -22,6 +23,11 @@ import { useUserSettlementHistory } from '@/db/hooks'
 import type { SettlementHistoryItem } from '@/lib/settlement'
 import { markVoluntarySignOut } from '@/lib/auth-session-flags'
 import { clearKwentaLocalData } from '@/lib/clear-kwenta-local'
+import {
+  dismissNotAppliedChange,
+  listPendingConflictsForActor,
+  markNotAppliedChangeReapplied,
+} from '@/sync/cloud-first-mutations'
 import { useAuth } from '@/hooks/useAuth'
 import { useCurrentUser } from '@/hooks/useCurrentUser'
 import { useAppStore } from '@/store/app-store'
@@ -57,6 +63,10 @@ export function SettingsPage() {
   const hasPendingSync = useLiveQuery(
     async () => (user?.id ? hasUnsyncedLocalDataForUser(user.id) : false),
     [user?.id],
+  )
+  const pendingConflicts = useLiveQuery(
+    async () => (userId ? listPendingConflictsForActor(userId) : []),
+    [userId],
   )
 
   const [editing, setEditing] = useState(false)
@@ -130,6 +140,24 @@ export function SettingsPage() {
     } finally {
       setSignOutBusy(false)
     }
+  }
+
+  function fallbackRouteForConflict(entityType: string, entityId: string | null): string {
+    if (!entityId) return '/app/settings'
+    if (entityType === 'bill') return `/app/bills/${entityId}`
+    if (entityType === 'group') return `/app/groups/${entityId}`
+    if (entityType === 'settlement') return '/app/settings'
+    if (entityType === 'profile') return `/app/people/${entityId}`
+    return '/app/settings'
+  }
+
+  async function handleDismissConflict(changeId: string) {
+    await dismissNotAppliedChange(changeId)
+  }
+
+  async function handleApplyAgain(changeId: string, routeHint: string | null, entityType: string, entityId: string | null) {
+    await markNotAppliedChangeReapplied(changeId)
+    navigate(routeHint ?? fallbackRouteForConflict(entityType, entityId))
   }
 
   return (
@@ -266,6 +294,62 @@ export function SettingsPage() {
               >
                 View
               </Button>
+            </div>
+          </div>
+        )}
+
+        {(pendingConflicts?.length ?? 0) > 0 && (
+          <div className="rounded-3xl border border-amber-200 bg-amber-50/60 p-5 shadow-sm">
+            <div className="flex items-start gap-2">
+              <CircleAlert className="mt-0.5 size-4 text-amber-700" />
+              <div className="min-w-0 flex-1">
+                <h2 className="text-base font-semibold text-amber-900">Not applied changes</h2>
+                <p className="mt-1 text-xs text-amber-800">
+                  These changes were not applied after sync conflict checks. Review each one.
+                </p>
+              </div>
+            </div>
+
+            <div className="mt-4 space-y-2">
+              {pendingConflicts!.map((change) => (
+                <div key={change.id} className="rounded-xl border border-amber-200 bg-white px-4 py-3">
+                  <p className="text-sm font-medium text-stone-900">{change.operation.replaceAll('_', ' ')}</p>
+                  <p className="mt-1 text-xs text-stone-600">{change.reason_message}</p>
+                  <p className="mt-1 text-[0.7rem] text-stone-400">{timeAgo(change.created_at)}</p>
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    <Button
+                      type="button"
+                      size="sm"
+                      className="rounded-lg"
+                      onClick={() =>
+                        handleApplyAgain(change.id, change.route_hint, change.entity_type, change.entity_id)
+                      }
+                    >
+                      Apply again
+                    </Button>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      className="rounded-lg"
+                      onClick={() =>
+                        navigate(change.route_hint ?? fallbackRouteForConflict(change.entity_type, change.entity_id))
+                      }
+                    >
+                      View current
+                    </Button>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="ghost"
+                      className="rounded-lg text-stone-600"
+                      onClick={() => void handleDismissConflict(change.id)}
+                    >
+                      Dismiss
+                    </Button>
+                  </div>
+                </div>
+              ))}
             </div>
           </div>
         )}

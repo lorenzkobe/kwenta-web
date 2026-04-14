@@ -8,7 +8,6 @@ import { RequireAuth } from '@/components/auth/RequireAuth'
 import { AuthProvider } from '@/hooks/useAuth'
 
 const LoginPage = lazy(() => import('@/pages/LoginPage').then((m) => ({ default: m.LoginPage })))
-const JoinGroupPage = lazy(() => import('@/pages/JoinGroupPage').then((m) => ({ default: m.JoinGroupPage })))
 const HomePage = lazy(() => import('@/pages/HomePage').then((m) => ({ default: m.HomePage })))
 const BillsPage = lazy(() => import('@/pages/BillsPage').then((m) => ({ default: m.BillsPage })))
 const BillDetailPage = lazy(() => import('@/pages/BillDetailPage').then((m) => ({ default: m.BillDetailPage })))
@@ -46,8 +45,6 @@ function App() {
           <Routes>
             <Route path="/" element={<LandingPage />} />
             <Route path="/login" element={<LoginPage />} />
-            <Route path="/join/:inviteCode" element={<JoinGroupPage />} />
-
             <Route element={<RequireAuth />}>
               <Route path="/app" element={<AppShell />}>
                 <Route index element={<HomePage />} />

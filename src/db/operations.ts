@@ -1,15 +1,16 @@
 import { db } from './db'
-import { triggerSync } from '@/sync/sync-manager'
+import { requestSyncNow, triggerSync } from '@/sync/sync-manager'
 import type {
   Bill,
   BillItem,
   Group,
   GroupMember,
   ItemSplit,
+  MutationEntityType,
   SplitType,
 } from '@/types'
 import { generateId, getDeviceId, now } from '@/lib/utils'
-import { syncRoundTrip } from '@/sync/sync-service'
+import { finalizeMutationSync } from '@/sync/cloud-first-mutations'
 import {
   notifyAddedToGroup,
   notifyBillParticipantsCreated,
@@ -20,7 +21,22 @@ import {
 import { computeSplits, type SplitInput } from '@/lib/splits'
 import { fetchRemoteProfileIntoDexie, participantUnionForBill } from '@/lib/people'
 
-function notifySyncAfterMutation() {
+async function notifySyncAfterMutation(meta?: {
+  actorUserId: string
+  operation: string
+  entityType: MutationEntityType
+  entityId?: string | null
+  payload?: unknown
+  routeHint?: string | null
+}) {
+  if (meta) {
+    await finalizeMutationSync(meta)
+    return
+  }
+  if (typeof navigator !== 'undefined' && navigator.onLine) {
+    requestSyncNow()
+    return
+  }
   triggerSync()
 }
 
@@ -138,15 +154,14 @@ export async function createBill(input: CreateBillInput): Promise<string> {
   }
   const actor = await db.profiles.get(input.createdBy)
 
-  // Single kwenta_sync RPC (push + pull bundle) instead of one HTTP request per table.
-  try {
-    const { errors } = await syncRoundTrip(input.createdBy)
-    if (errors.length > 0) {
-      console.warn('[createBill] sync errors:', errors)
-    }
-  } catch (e) {
-    console.warn('[createBill] sync failed', e)
-  }
+  await notifySyncAfterMutation({
+    actorUserId: input.createdBy,
+    operation: 'create_bill',
+    entityType: 'bill',
+    entityId: billId,
+    payload: { title: input.title, groupId: input.groupId },
+    routeHint: input.groupId ? `/app/groups/${input.groupId}` : '/app/bills',
+  })
 
   void notifyBillParticipantsCreated({
     actorId: input.createdBy,
@@ -238,7 +253,14 @@ export async function updateBill(
       description: `Updated bill "${patch.title}"`,
     })
   })
-  notifySyncAfterMutation()
+  await notifySyncAfterMutation({
+    actorUserId: editorUserId,
+    operation: 'update_bill',
+    entityType: 'bill',
+    entityId: billId,
+    payload: { title: patch.title, currency: patch.currency, groupId: bill.group_id },
+    routeHint: bill.group_id ? `/app/groups/${bill.group_id}` : `/app/bills/${billId}`,
+  })
 }
 
 export async function deleteBill(billId: string, userId: string) {
@@ -269,7 +291,14 @@ export async function deleteBill(billId: string, userId: string) {
       description: `Deleted bill "${bill.title}"`,
     })
   })
-  notifySyncAfterMutation()
+  await notifySyncAfterMutation({
+    actorUserId: userId,
+    operation: 'delete_bill',
+    entityType: 'bill',
+    entityId: billId,
+    payload: { title: bill.title, groupId: bill.group_id },
+    routeHint: bill.group_id ? `/app/groups/${bill.group_id}` : '/app/bills',
+  })
 }
 
 // ── Groups ───────────────────────────────────────────
@@ -312,7 +341,14 @@ export async function createGroup(
     })
   })
 
-  notifySyncAfterMutation()
+  await notifySyncAfterMutation({
+    actorUserId: createdBy,
+    operation: 'create_group',
+    entityType: 'group',
+    entityId: groupId,
+    payload: { name, currency },
+    routeHint: `/app/groups/${groupId}`,
+  })
   return groupId
 }
 
@@ -323,6 +359,7 @@ export async function updateGroup(
 ): Promise<void> {
   const group = await db.groups.get(groupId)
   if (!group || group.is_deleted) return
+  if (group.created_by !== userId) return
 
   const timestamp = now()
   const nextName = patch.name?.trim() ?? group.name
@@ -346,7 +383,14 @@ export async function updateGroup(
       description: `Updated group "${nextName}"`,
     })
   })
-  notifySyncAfterMutation()
+  await notifySyncAfterMutation({
+    actorUserId: userId,
+    operation: 'update_group',
+    entityType: 'group',
+    entityId: groupId,
+    payload: { name: nextName, currency: nextCurrency },
+    routeHint: `/app/groups/${groupId}`,
+  })
 }
 
 export async function addGroupMember(
@@ -365,7 +409,14 @@ export async function addGroupMember(
   for (const m of existingMembership) {
     const p = await db.profiles.get(m.user_id)
     if (p && !p.is_deleted && p.display_name.trim().toLowerCase() === normalized) {
-      notifySyncAfterMutation()
+      await notifySyncAfterMutation({
+        actorUserId: addedBy,
+        operation: 'group_member_exists',
+        entityType: 'group_member',
+        entityId: m.id,
+        payload: { groupId, memberUserId: m.user_id },
+        routeHint: `/app/groups/${groupId}`,
+      })
       return m.user_id
     }
   }
@@ -385,7 +436,14 @@ export async function addGroupMember(
     const rowUid = pCheck ? membershipUserIdForProfile(pCheck) : userId
     const already = await db.group_members.where('[group_id+user_id]').equals([groupId, rowUid]).first()
     if (already && !already.is_deleted) {
-      notifySyncAfterMutation()
+      await notifySyncAfterMutation({
+        actorUserId: addedBy,
+        operation: 'group_member_exists',
+        entityType: 'group_member',
+        entityId: already.id,
+        payload: { groupId, memberUserId: rowUid },
+        routeHint: `/app/groups/${groupId}`,
+      })
       return userId
     }
   }
@@ -446,7 +504,14 @@ export async function addGroupMember(
     })
   }
 
-  notifySyncAfterMutation()
+  await notifySyncAfterMutation({
+    actorUserId: addedBy,
+    operation: 'add_group_member',
+    entityType: 'group_member',
+    entityId: memberId,
+    payload: { groupId, memberUserId: userId },
+    routeHint: `/app/groups/${groupId}`,
+  })
   return userId!
 }
 
@@ -480,7 +545,14 @@ export async function createLocalProfile(
     linked_profile_id: null,
     owner_id: ownerUserId,
   })
-  notifySyncAfterMutation()
+  await notifySyncAfterMutation({
+    actorUserId: ownerUserId,
+    operation: 'create_local_profile',
+    entityType: 'profile',
+    entityId: userId,
+    payload: { displayName: trimmed },
+    routeHint: `/app/people/${userId}`,
+  })
   return { outcome: 'created', id: userId }
 }
 
@@ -506,7 +578,14 @@ export async function addExistingGroupMember(
     (existingLocal && !existingLocal.is_deleted) ||
     (existingCanon && !existingCanon.is_deleted)
   ) {
-    notifySyncAfterMutation()
+    await notifySyncAfterMutation({
+      actorUserId: addedBy,
+      operation: 'group_member_exists',
+      entityType: 'group_member',
+      entityId: existingLocal?.id ?? existingCanon?.id ?? null,
+      payload: { groupId, memberUserId: memberRowUserId },
+      routeHint: `/app/groups/${groupId}`,
+    })
     return
   }
 
@@ -544,7 +623,14 @@ export async function addExistingGroupMember(
       groupName: group.name,
     })
   }
-  notifySyncAfterMutation()
+  await notifySyncAfterMutation({
+    actorUserId: addedBy,
+    operation: 'add_group_member',
+    entityType: 'group_member',
+    entityId: memberId,
+    payload: { groupId, memberUserId: memberRowUserId },
+    routeHint: `/app/groups/${groupId}`,
+  })
 }
 
 /** Point a local contact at a synced account (for display & future migration). */
@@ -585,7 +671,14 @@ export async function linkProfileToRemote(
     recipientId: remoteProfileId,
     linkedAsName: local.display_name,
   })
-  notifySyncAfterMutation()
+  await notifySyncAfterMutation({
+    actorUserId,
+    operation: 'link_profile',
+    entityType: 'profile',
+    entityId: localProfileId,
+    payload: { remoteProfileId },
+    routeHint: `/app/people/${localProfileId}`,
+  })
 }
 
 export async function removeGroupMember(
@@ -654,7 +747,14 @@ export async function removeGroupMember(
       })
     },
   )
-  notifySyncAfterMutation()
+  await notifySyncAfterMutation({
+    actorUserId: removedBy,
+    operation: 'remove_group_member',
+    entityType: 'group_member',
+    entityId: memberUserId,
+    payload: { groupId, memberUserId },
+    routeHint: `/app/groups/${groupId}`,
+  })
 }
 
 /**
@@ -679,7 +779,7 @@ async function removePersonFromPersonalBills(memberUserId: string, removedBy: st
   }
 
   const timestamp = now()
-  await db.transaction('rw', [db.bill_items, db.item_splits, db.activity_log], async () => {
+  await db.transaction('rw', [db.bills, db.bill_items, db.item_splits, db.activity_log], async () => {
     const bills = await db.bills
       .filter((b) => !b.is_deleted && (b.group_id === null || b.group_id === undefined))
       .toArray()
@@ -769,7 +869,14 @@ export async function deletePerson(personId: string, actorUserId: string): Promi
     entity_id: personId,
     description: `Removed contact "${displayName}"`,
   })
-  notifySyncAfterMutation()
+  await notifySyncAfterMutation({
+    actorUserId,
+    operation: 'delete_person',
+    entityType: 'profile',
+    entityId: personId,
+    payload: { personId },
+    routeHint: '/app/people',
+  })
 }
 
 export async function deleteGroup(groupId: string, userId: string) {
@@ -777,6 +884,7 @@ export async function deleteGroup(groupId: string, userId: string) {
   await db.transaction('rw', [db.groups, db.group_members, db.activity_log], async () => {
     const group = await db.groups.get(groupId)
     if (!group) return
+    if (group.created_by !== userId) return
 
     await db.groups.update(groupId, { is_deleted: true, updated_at: timestamp })
 
@@ -795,7 +903,14 @@ export async function deleteGroup(groupId: string, userId: string) {
       description: `Deleted group "${group.name}"`,
     })
   })
-  notifySyncAfterMutation()
+  await notifySyncAfterMutation({
+    actorUserId: userId,
+    operation: 'delete_group',
+    entityType: 'group',
+    entityId: groupId,
+    payload: { groupId },
+    routeHint: '/app/groups',
+  })
 }
 
 // ── Settlements ─────────────────────────────────────
@@ -809,6 +924,12 @@ export async function createSettlement(
   markedBy: string,
   label?: string,
   billId?: string | null,
+  options?: {
+    suppressNotification?: boolean
+    suppressSync?: boolean
+    syncOperation?: string
+    routeHint?: string
+  },
 ): Promise<string> {
   const settlementId = generateId()
   const labelTrim = (label ?? '').trim()
@@ -865,26 +986,259 @@ export async function createSettlement(
     if (g && !g.is_deleted) groupName = g.name
   }
 
-  const recipientCandidates = [resolvedFromUserId, resolvedToUserId].filter((id) => id !== markedBy)
+  if (!options?.suppressNotification) {
+    const recipientCandidates = [resolvedFromUserId, resolvedToUserId].filter((id) => id !== markedBy)
+    for (const candidate of recipientCandidates) {
+      const recipientId = await resolveRecipientProfileIdForNotify(candidate)
+      if (!recipientId || recipientId === markedBy) continue
+      void notifyPaymentRecorded({
+        actorId: markedBy,
+        actorName: actor?.display_name?.trim() || 'Someone',
+        recipientId,
+        amount,
+        currency,
+        fromName: fromProfile?.display_name?.trim() || 'Someone',
+        toName: toProfile?.display_name?.trim() || 'Someone',
+        groupId,
+        groupName,
+        settlementId,
+      })
+    }
+  }
+
+  if (!options?.suppressSync) {
+    await notifySyncAfterMutation({
+      actorUserId: markedBy,
+      operation: options?.syncOperation ?? 'create_settlement',
+      entityType: 'settlement',
+      entityId: settlementId,
+      payload: { groupId, billId: billId ?? null, amount, currency },
+      routeHint: options?.routeHint ?? (groupId ? `/app/groups/${groupId}` : '/app/settings'),
+    })
+  }
+  return settlementId
+}
+
+export interface DistributedSettlementSlice {
+  billId: string
+  amount: number
+}
+
+async function emitSinglePaymentNotification(params: {
+  markedBy: string
+  fromUserId: string
+  toUserId: string
+  amount: number
+  currency: string
+  groupId: string | null
+  settlementId: string
+}) {
+  const actor = await db.profiles.get(params.markedBy)
+  const [fromProfile, toProfile] = await Promise.all([
+    db.profiles.get(params.fromUserId),
+    db.profiles.get(params.toUserId),
+  ])
+  let groupName: string | null = null
+  if (params.groupId) {
+    const g = await db.groups.get(params.groupId)
+    if (g && !g.is_deleted) groupName = g.name
+  }
+  const recipientCandidates = [params.fromUserId, params.toUserId].filter((id) => id !== params.markedBy)
   for (const candidate of recipientCandidates) {
     const recipientId = await resolveRecipientProfileIdForNotify(candidate)
-    if (!recipientId || recipientId === markedBy) continue
+    if (!recipientId || recipientId === params.markedBy) continue
     void notifyPaymentRecorded({
-      actorId: markedBy,
+      actorId: params.markedBy,
       actorName: actor?.display_name?.trim() || 'Someone',
       recipientId,
-      amount,
-      currency,
+      amount: params.amount,
+      currency: params.currency,
       fromName: fromProfile?.display_name?.trim() || 'Someone',
       toName: toProfile?.display_name?.trim() || 'Someone',
-      groupId,
+      groupId: params.groupId,
       groupName,
-      settlementId,
+      settlementId: params.settlementId,
+    })
+  }
+}
+
+export async function createPersonalPaymentWithDistribution(params: {
+  fromUserId: string
+  toUserId: string
+  totalAmount: number
+  currency: string
+  markedBy: string
+  label?: string
+  slices: DistributedSettlementSlice[]
+  remainderAmount: number
+  routeHint?: string
+}): Promise<{ settlementIds: string[] }> {
+  const settlementIds: string[] = []
+
+  for (const slice of params.slices) {
+    if (slice.amount <= 0.005) continue
+    const id = await createSettlement(
+      null,
+      params.fromUserId,
+      params.toUserId,
+      slice.amount,
+      params.currency,
+      params.markedBy,
+      params.label,
+      slice.billId,
+      { suppressNotification: true, suppressSync: true },
+    )
+    settlementIds.push(id)
+  }
+
+  if (params.remainderAmount > 0.005) {
+    const id = await createSettlement(
+      null,
+      params.fromUserId,
+      params.toUserId,
+      params.remainderAmount,
+      params.currency,
+      params.markedBy,
+      params.label,
+      null,
+      { suppressNotification: true, suppressSync: true },
+    )
+    settlementIds.push(id)
+  }
+
+  const notifyEntityId = settlementIds[0] ?? null
+  if (notifyEntityId) {
+    await emitSinglePaymentNotification({
+      markedBy: params.markedBy,
+      fromUserId: params.fromUserId,
+      toUserId: params.toUserId,
+      amount: Math.round(params.totalAmount * 100) / 100,
+      currency: params.currency,
+      groupId: null,
+      settlementId: notifyEntityId,
     })
   }
 
-  notifySyncAfterMutation()
-  return settlementId
+  await notifySyncAfterMutation({
+    actorUserId: params.markedBy,
+    operation: 'create_settlement_distributed',
+    entityType: 'settlement',
+    entityId: notifyEntityId,
+    payload: {
+      totalAmount: params.totalAmount,
+      currency: params.currency,
+      slices: params.slices.length,
+      remainderAmount: params.remainderAmount,
+    },
+    routeHint: params.routeHint ?? '/app/settings',
+  })
+
+  return { settlementIds }
+}
+
+export async function applyGeneralCreditToPersonalBills(params: {
+  fromUserId: string
+  toUserId: string
+  currency: string
+  markedBy: string
+  appliedAmount: number
+  slices: DistributedSettlementSlice[]
+  routeHint?: string
+}): Promise<{ settlementIds: string[] }> {
+  let remainingToConsume = Math.round(params.appliedAmount * 100) / 100
+  if (remainingToConsume <= 0.005) return { settlementIds: [] }
+
+  const [resolvedFromUserId, resolvedToUserId] = await Promise.all([
+    resolveSettlementPartyId(params.fromUserId),
+    resolveSettlementPartyId(params.toUserId),
+  ])
+
+  const sourceGeneral = (
+    await db.settlements
+      .filter(
+        (s) =>
+          !s.is_deleted &&
+          s.is_settled &&
+          s.group_id === null &&
+          s.bill_id === null &&
+          s.currency === params.currency &&
+          s.from_user_id === resolvedFromUserId &&
+          s.to_user_id === resolvedToUserId,
+      )
+      .toArray()
+  ).sort((a, b) => a.created_at.localeCompare(b.created_at))
+
+  const totalAvailable = sourceGeneral.reduce((sum, row) => sum + row.amount, 0)
+  if (totalAvailable + 0.005 < remainingToConsume) {
+    throw new Error('General credit changed. Refresh and try again.')
+  }
+
+  const timestamp = now()
+  for (const row of sourceGeneral) {
+    if (remainingToConsume <= 0.005) break
+    const consume = Math.min(row.amount, remainingToConsume)
+    const nextAmount = Math.round((row.amount - consume) * 100) / 100
+    if (nextAmount <= 0.005) {
+      await db.settlements.update(row.id, {
+        amount: 0,
+        is_deleted: true,
+        updated_at: timestamp,
+        synced_at: null,
+      })
+    } else {
+      await db.settlements.update(row.id, {
+        amount: nextAmount,
+        updated_at: timestamp,
+        synced_at: null,
+      })
+    }
+    remainingToConsume -= consume
+  }
+
+  const settlementIds: string[] = []
+  for (const slice of params.slices) {
+    if (slice.amount <= 0.005) continue
+    const id = await createSettlement(
+      null,
+      params.fromUserId,
+      params.toUserId,
+      slice.amount,
+      params.currency,
+      params.markedBy,
+      'Applied general credit to bills',
+      slice.billId,
+      { suppressNotification: true, suppressSync: true },
+    )
+    settlementIds.push(id)
+  }
+
+  const notifyEntityId = settlementIds[0] ?? null
+  if (notifyEntityId) {
+    await emitSinglePaymentNotification({
+      markedBy: params.markedBy,
+      fromUserId: params.fromUserId,
+      toUserId: params.toUserId,
+      amount: Math.round(params.appliedAmount * 100) / 100,
+      currency: params.currency,
+      groupId: null,
+      settlementId: notifyEntityId,
+    })
+  }
+
+  await notifySyncAfterMutation({
+    actorUserId: params.markedBy,
+    operation: 'apply_general_credit_to_bills',
+    entityType: 'settlement',
+    entityId: notifyEntityId,
+    payload: {
+      amount: params.appliedAmount,
+      currency: params.currency,
+      slices: params.slices.length,
+    },
+    routeHint: params.routeHint ?? '/app/settings',
+  })
+
+  return { settlementIds }
 }
 
 export async function updateSettlement(
@@ -934,7 +1288,14 @@ export async function updateSettlement(
     })
   })
 
-  notifySyncAfterMutation()
+  await notifySyncAfterMutation({
+    actorUserId: editorUserId,
+    operation: 'update_settlement',
+    entityType: 'settlement',
+    entityId: settlementId,
+    payload: { amount: patch.amount, currency: patch.currency },
+    routeHint: s.group_id ? `/app/groups/${s.group_id}` : '/app/settings',
+  })
 }
 
 export async function deleteSettlement(settlementId: string, editorUserId: string): Promise<void> {
@@ -963,7 +1324,14 @@ export async function deleteSettlement(settlementId: string, editorUserId: strin
       description: `Removed payment ${fromProfile?.display_name ?? '?'} → ${toProfile?.display_name ?? '?'}`,
     })
   })
-  notifySyncAfterMutation()
+  await notifySyncAfterMutation({
+    actorUserId: editorUserId,
+    operation: 'delete_settlement',
+    entityType: 'settlement',
+    entityId: settlementId,
+    payload: { groupId: s.group_id },
+    routeHint: s.group_id ? `/app/groups/${s.group_id}` : '/app/settings',
+  })
 }
 
 // ── Queries ──────────────────────────────────────────

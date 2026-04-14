@@ -45,6 +45,9 @@ export function HomePage() {
     )
   }, [userId])
 
+  const statsLoading = stats === undefined
+  const recentBillsLoading = recentBills === undefined
+
   function greeting() {
     const hour = new Date().getHours()
     if (hour < 12) return 'Good morning'
@@ -76,15 +79,27 @@ export function HomePage() {
         <div className="mt-6 grid gap-3 sm:grid-cols-3">
           <div className="rounded-2xl border border-white/10 bg-white/10 p-4">
             <p className="text-xs font-medium text-white/65">Total bills</p>
-            <p className="mt-1 text-2xl font-semibold">{stats?.billCount ?? 0}</p>
+            {statsLoading ? (
+              <div className="mt-2 h-8 w-16 animate-pulse rounded bg-white/25" />
+            ) : (
+              <p className="mt-1 text-2xl font-semibold">{stats?.billCount ?? 0}</p>
+            )}
           </div>
           <div className="rounded-2xl border border-white/10 bg-white/10 p-4">
             <p className="text-xs font-medium text-white/65">Total spent</p>
-            <p className="mt-1 text-2xl font-semibold">{formatCurrency(stats?.totalSpent ?? 0)}</p>
+            {statsLoading ? (
+              <div className="mt-2 h-8 w-24 animate-pulse rounded bg-white/25" />
+            ) : (
+              <p className="mt-1 text-2xl font-semibold">{formatCurrency(stats?.totalSpent ?? 0)}</p>
+            )}
           </div>
           <div className="rounded-2xl border border-white/10 bg-white/10 p-4">
             <p className="text-xs font-medium text-white/65">Active groups</p>
-            <p className="mt-1 text-2xl font-semibold">{stats?.groupCount ?? 0}</p>
+            {statsLoading ? (
+              <div className="mt-2 h-8 w-16 animate-pulse rounded bg-white/25" />
+            ) : (
+              <p className="mt-1 text-2xl font-semibold">{stats?.groupCount ?? 0}</p>
+            )}
           </div>
         </div>
       </section>
@@ -130,14 +145,26 @@ export function HomePage() {
             <ReceiptText className="size-4 text-teal-800" />
             <h3 className="text-base font-semibold">Recent bills</h3>
           </div>
-          {(recentBills?.length ?? 0) > 0 && (
+          {!recentBillsLoading && (recentBills?.length ?? 0) > 0 && (
             <Button asChild variant="ghost" size="xs" className="rounded-full text-teal-800">
               <Link to="/app/bills">View all</Link>
             </Button>
           )}
         </div>
 
-        {(!recentBills || recentBills.length === 0) ? (
+        {recentBillsLoading ? (
+          <div className="mt-4 space-y-2">
+            {Array.from({ length: 3 }).map((_, idx) => (
+              <div
+                key={`recent-skeleton-${idx}`}
+                className="rounded-xl border border-stone-200 bg-stone-100/60 px-4 py-3"
+              >
+                <div className="h-4 w-1/3 animate-pulse rounded bg-stone-200" />
+                <div className="mt-2 h-3 w-1/4 animate-pulse rounded bg-stone-200" />
+              </div>
+            ))}
+          </div>
+        ) : (!recentBills || recentBills.length === 0) ? (
           <div className="mt-4 flex flex-col items-center py-8 text-center">
             <div className="rounded-2xl bg-stone-100 p-4">
               <ReceiptText className="size-6 text-stone-400" />

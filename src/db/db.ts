@@ -6,6 +6,8 @@ import type {
   Group,
   GroupMember,
   ItemSplit,
+  NotAppliedChange,
+  PendingMutation,
   Profile,
   Settlement,
 } from '@/types'
@@ -19,6 +21,8 @@ export class KwentaDB extends Dexie {
   item_splits!: Table<ItemSplit, string>
   settlements!: Table<Settlement, string>
   activity_log!: Table<ActivityLog, string>
+  pending_mutations!: Table<PendingMutation, string>
+  not_applied_changes!: Table<NotAppliedChange, string>
 
   constructor() {
     super('kwenta')
@@ -79,6 +83,20 @@ export class KwentaDB extends Dexie {
       await tx.table('settlements').toCollection().modify((s: Record<string, unknown>) => {
         if (s.bill_id === undefined) s.bill_id = null
       })
+    })
+
+    this.version(5).stores({
+      profiles: 'id, email, owner_id, linked_profile_id, synced_at, is_deleted',
+      groups: 'id, created_by, invite_code, synced_at, is_deleted',
+      group_members: 'id, group_id, user_id, [group_id+user_id], synced_at, is_deleted',
+      bills: 'id, group_id, created_by, created_at, synced_at, is_deleted',
+      bill_items: 'id, bill_id, synced_at, is_deleted',
+      item_splits: 'id, item_id, user_id, synced_at, is_deleted',
+      settlements: 'id, group_id, bill_id, from_user_id, to_user_id, is_settled, synced_at, is_deleted',
+      activity_log: 'id, group_id, user_id, entity_type, entity_id, created_at, synced_at, is_deleted',
+      pending_mutations: 'id, actor_user_id, status, entity_type, entity_id, created_at, updated_at',
+      not_applied_changes:
+        'id, actor_user_id, resolution, entity_type, entity_id, [entity_type+entity_id], created_at, resolved_at, pending_mutation_id',
     })
   }
 }

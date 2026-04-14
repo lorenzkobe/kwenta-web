@@ -83,3 +83,45 @@ export interface ActivityLog extends SyncFields {
   entity_id: string
   description: string
 }
+
+export type PendingMutationStatus = 'pending' | 'applied' | 'conflict' | 'dismissed'
+
+export type MutationEntityType =
+  | 'bill'
+  | 'group'
+  | 'group_member'
+  | 'settlement'
+  | 'profile'
+  | 'activity_log'
+  | 'unknown'
+
+export interface PendingMutation {
+  id: string
+  actor_user_id: string
+  operation: string
+  entity_type: MutationEntityType
+  entity_id: string | null
+  payload_json: string
+  status: PendingMutationStatus
+  retry_count: number
+  last_error: string | null
+  idempotency_key: string
+  created_at: string
+  updated_at: string
+}
+
+export interface NotAppliedChange {
+  id: string
+  actor_user_id: string
+  pending_mutation_id: string | null
+  entity_type: MutationEntityType
+  entity_id: string | null
+  operation: string
+  reason_code: string
+  reason_message: string
+  payload_json: string
+  route_hint: string | null
+  created_at: string
+  resolved_at: string | null
+  resolution: 'pending' | 'dismissed' | 'reapplied' | 'auto_resolved'
+}

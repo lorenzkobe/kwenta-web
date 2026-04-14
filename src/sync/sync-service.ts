@@ -364,10 +364,7 @@ export async function pullChanges(userId: string): Promise<{ pulled: number; err
       for (const row of rows) {
         const existing = await table.get(row.id)
         if (existing) {
-          const local = existing as SyncFields
-          if (row.updated_at > local.updated_at) {
-            await table.update(row.id, { ...row, synced_at: row.updated_at })
-          }
+          await table.update(row.id, { ...row, synced_at: row.updated_at })
         } else {
           await table.add({ ...row, synced_at: row.updated_at })
         }
@@ -716,10 +713,7 @@ export async function syncRoundTrip(userId: string): Promise<{
     for (const row of rows) {
       const existing = await table.get(row.id)
       if (existing) {
-        const local = existing as SyncFields
-        if (row.updated_at > local.updated_at) {
-          await table.update(row.id, { ...row, synced_at: row.updated_at })
-        }
+        await table.update(row.id, { ...row, synced_at: row.updated_at })
       } else {
         await table.add({ ...row, synced_at: row.updated_at })
       }

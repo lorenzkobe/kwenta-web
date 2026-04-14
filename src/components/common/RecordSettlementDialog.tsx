@@ -1,5 +1,6 @@
 import { useState, useEffect, useMemo } from 'react'
 import { ArrowRight, X } from 'lucide-react'
+import { toast } from 'sonner'
 import { createSettlement } from '@/db/operations'
 import { normalizeAmountInput, stripLeadingZerosAmount } from '@/lib/amount-input'
 import { formatCurrency } from '@/lib/utils'
@@ -23,6 +24,11 @@ export function RecordSettlementDialog({
   confirmLabel,
   partyPicker,
   billId = null,
+  onSubmit,
+  showPaymentModeToggle = false,
+  paymentMode = 'general',
+  onPaymentModeChange,
+  helperLines,
 }: {
   open: boolean
   onOpenChange: (open: boolean) => void
@@ -41,6 +47,20 @@ export function RecordSettlementDialog({
   title?: string
   confirmLabel?: string
   partyPicker?: { id: string; label: string }[]
+  onSubmit?: (args: {
+    groupId: string | null
+    billId: string | null
+    fromUserId: string
+    toUserId: string
+    amount: number
+    currency: string
+    label?: string
+    markedBy: string
+  }) => Promise<void | boolean>
+  showPaymentModeToggle?: boolean
+  paymentMode?: 'general' | 'distributed'
+  onPaymentModeChange?: (mode: 'general' | 'distributed') => void
+  helperLines?: string[]
 }) {
   const pickerOn = Boolean(partyPicker && partyPicker.length === 2)
 
@@ -82,18 +102,35 @@ export function RecordSettlementDialog({
     if (!Number.isFinite(amount) || amount <= 0) return
     setSaving(true)
     try {
-      await createSettlement(
-        groupId,
-        effectiveFrom,
-        effectiveTo,
-        amount,
-        currency,
-        markedBy,
-        label.trim() || undefined,
-        billId,
-      )
+      if (onSubmit) {
+        const handled = await onSubmit({
+          groupId,
+          billId,
+          fromUserId: effectiveFrom,
+          toUserId: effectiveTo,
+          amount,
+          currency,
+          label: label.trim() || undefined,
+          markedBy,
+        })
+        if (handled === false) return
+      } else {
+        await createSettlement(
+          groupId,
+          effectiveFrom,
+          effectiveTo,
+          amount,
+          currency,
+          markedBy,
+          label.trim() || undefined,
+          billId,
+        )
+      }
       onRecorded()
       onOpenChange(false)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Could not record payment right now.'
+      toast.error(message)
     } finally {
       setSaving(false)
     }
@@ -125,6 +162,38 @@ export function RecordSettlementDialog({
         </div>
 
         <div className="space-y-4 px-5 py-4">
+          {showPaymentModeToggle && onPaymentModeChange && (
+            <div className="space-y-2 rounded-xl border border-stone-200 bg-stone-50 p-3">
+              <p className="text-xs font-medium uppercase tracking-wide text-stone-500">Payment type</p>
+              <div className="grid grid-cols-2 gap-1 rounded-lg border border-stone-200 bg-white p-1">
+                <button
+                  type="button"
+                  className={`rounded-md px-2 py-2 text-xs font-medium transition-colors ${
+                    paymentMode === 'general'
+                      ? 'bg-teal-800/10 text-teal-900'
+                      : 'text-stone-500 hover:text-stone-800'
+                  }`}
+                  onClick={() => onPaymentModeChange('general')}
+                  disabled={saving}
+                >
+                  General
+                </button>
+                <button
+                  type="button"
+                  className={`rounded-md px-2 py-2 text-xs font-medium transition-colors ${
+                    paymentMode === 'distributed'
+                      ? 'bg-teal-800/10 text-teal-900'
+                      : 'text-stone-500 hover:text-stone-800'
+                  }`}
+                  onClick={() => onPaymentModeChange('distributed')}
+                  disabled={saving}
+                >
+                  Distribute
+                </button>
+              </div>
+            </div>
+          )}
+
           <div className="rounded-xl border border-stone-200 bg-stone-50 px-4 py-3">
             <p className="text-xs font-medium text-stone-500">Payment</p>
 
@@ -195,6 +264,16 @@ export function RecordSettlementDialog({
               </p>
             )}
           </div>
+
+          {helperLines && helperLines.length > 0 && (
+            <div className="space-y-1 rounded-xl border border-stone-200 bg-stone-50 px-3 py-2">
+              {helperLines.map((line) => (
+                <p key={line} className="text-xs text-stone-600">
+                  {line}
+                </p>
+              ))}
+            </div>
+          )}
 
           <div className="flex flex-col gap-2">
             <label htmlFor="settlement-label" className="text-sm font-medium text-stone-800">

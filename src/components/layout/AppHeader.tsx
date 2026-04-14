@@ -4,6 +4,7 @@ import {
   Home,
   Layers3,
   ReceiptText,
+  Scale,
   UserRound,
   Wallet,
   WifiOff,
@@ -24,6 +25,7 @@ const navItems = [
   { to: '/app/bills', icon: ReceiptText, label: 'Bills', end: false },
   { to: '/app/groups', icon: Layers3, label: 'Groups', end: false },
   { to: '/app/people', icon: BookUser, label: 'People', end: false },
+  { to: '/app/balances', icon: Scale, label: 'Balances', end: false },
 ] as const
 
 export function AppHeader() {

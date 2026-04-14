@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useMemo, useState } from 'react'
 import {
   LayoutList,
   ListOrdered,
@@ -305,24 +305,25 @@ export function LandingProductDemo() {
     [simpleBills, simpleSelectedId],
   )
 
+  const effectiveItemizedSelectedId = useMemo(() => {
+    if (!itemizedSelectedId) return finalizedItemizedBills[0]?.id ?? null
+    if (finalizedItemizedBills.some((b) => b.id === itemizedSelectedId)) return itemizedSelectedId
+    return finalizedItemizedBills[0]?.id ?? null
+  }, [finalizedItemizedBills, itemizedSelectedId])
+
   const itemizedSelected = useMemo(
-    () => itemizedUserBills.find((b) => b.id === itemizedSelectedId) ?? null,
-    [itemizedUserBills, itemizedSelectedId],
+    () => itemizedUserBills.find((b) => b.id === effectiveItemizedSelectedId) ?? null,
+    [itemizedUserBills, effectiveItemizedSelectedId],
   )
 
   const itemizedLineTarget = itemizedDraft ?? itemizedSelected
 
-  useEffect(() => {
-    if (mode !== 'itemized') {
+  function handleModeChange(nextMode: DemoMode) {
+    setMode(nextMode)
+    if (nextMode !== 'itemized') {
       setItemizedDraft(null)
     }
-  }, [mode])
-
-  useEffect(() => {
-    if (!itemizedSelectedId) return
-    if (finalizedItemizedBills.some((b) => b.id === itemizedSelectedId)) return
-    setItemizedSelectedId(finalizedItemizedBills[0]?.id ?? null)
-  }, [finalizedItemizedBills, itemizedSelectedId])
+  }
 
   const simpleSplitGroup = useMemo((): string[] => {
     if (!simpleSelected || simpleSelected.items.length === 0) return [...DEMO_ROSTER]
@@ -540,7 +541,7 @@ export function LandingProductDemo() {
                       type="button"
                       role="tab"
                       aria-selected={mode === id}
-                      onClick={() => setMode(id)}
+                      onClick={() => handleModeChange(id)}
                       className={cn(
                         'flex items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-sm font-medium transition-colors',
                         mode === id
@@ -720,7 +721,7 @@ export function LandingProductDemo() {
                                 onClick={() => setItemizedSelectedId(b.id)}
                                 className={cn(
                                   'w-full rounded-xl border px-3 py-3 text-left text-sm transition-colors',
-                                  b.id === itemizedSelectedId
+                                  b.id === effectiveItemizedSelectedId
                                     ? 'border-teal-800/35 bg-[#f0f7f5] text-stone-900'
                                     : 'border-stone-200 bg-stone-50/40 text-stone-800 hover:border-stone-300',
                                 )}

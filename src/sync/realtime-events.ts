@@ -36,9 +36,7 @@ async function upsertRemoteRow<T extends SyncFields>(tableName: keyof typeof db,
   const table = (db as any)[tableName] as { get: (id: string) => Promise<T | undefined>; add: (v: T) => Promise<void>; update: (id: string, v: Partial<T>) => Promise<void> }
   const existing = await table.get(row.id)
   if (existing) {
-    if (row.updated_at > existing.updated_at) {
-      await table.update(row.id, { ...(row as unknown as Partial<T>), synced_at: row.updated_at } as Partial<T>)
-    }
+    await table.update(row.id, { ...(row as unknown as Partial<T>), synced_at: row.updated_at } as Partial<T>)
     return
   }
   await table.add({ ...(row as T), synced_at: row.updated_at })

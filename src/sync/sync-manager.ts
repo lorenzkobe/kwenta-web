@@ -1,4 +1,6 @@
 import { hydrateLinkedRemoteProfilesForActor } from '@/lib/people'
+import { flushQueuedKwentaNotifications, hasQueuedKwentaNotifications } from '@/lib/kwenta-notifications'
+import { markPendingMutationsApplied, markPendingMutationsConflict } from '@/sync/cloud-first-mutations'
 import { supabase } from '@/lib/supabase'
 import { useAppStore } from '@/store/app-store'
 import {
@@ -88,7 +90,8 @@ async function runSync(reason: SyncRunReason) {
   if (reason === 'backup') {
     const needsPush = await hasUnsyncedLocalDataForUser(userId)
     const needsPull = getMillisecondsSinceLastPull() >= BACKUP_PULL_STALE_AFTER_MS
-    if (!needsPush && !needsPull) return
+    const needsNotificationFlush = await hasQueuedKwentaNotifications(userId)
+    if (!needsPush && !needsPull && !needsNotificationFlush) return
   }
 
   isSyncing = true
@@ -112,6 +115,7 @@ async function runSync(reason: SyncRunReason) {
       if (!stillUnsynced) {
         resetBackoff()
         useAppStore.getState().setSyncStatus('idle')
+        await flushQueuedKwentaNotifications({ assumeCloudAck: true })
         return
       }
     }
@@ -119,11 +123,14 @@ async function runSync(reason: SyncRunReason) {
     const result = await fullSync(userId)
     if (result.errors.length > 0) {
       console.warn('[sync] errors:', result.errors)
+      await markPendingMutationsConflict(userId, 'replay_sync_error', result.errors.join(' | '))
       useAppStore.getState().setSyncStatus('error')
       scheduleRetry()
     } else {
+      await markPendingMutationsApplied(userId)
       resetBackoff()
       useAppStore.getState().setSyncStatus('idle')
+      await flushQueuedKwentaNotifications({ assumeCloudAck: true })
       await hydrateLinkedRemoteProfilesForActor(userId)
     }
   } catch (err) {

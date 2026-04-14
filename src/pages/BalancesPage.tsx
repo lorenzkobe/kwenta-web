@@ -68,7 +68,7 @@ export function BalancesPage() {
 
   useEffect(() => {
     if (!userId) return
-    setLoading(true)
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     reloadSummaries().finally(() => setLoading(false))
   }, [userId, reloadSummaries])
 

@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { ArrowRight, Trash2, X } from 'lucide-react'
 import { useLiveQuery } from 'dexie-react-hooks'
+import { toast } from 'sonner'
 import { db } from '@/db/db'
 import { updateSettlement, deleteSettlement } from '@/db/operations'
 import type { SettlementHistoryItem } from '@/lib/settlement'
@@ -61,6 +62,9 @@ export function EditSettlementDialog({
       )
       onSaved()
       onClose()
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Could not save payment changes.'
+      toast.error(message)
     } finally {
       setSaving(false)
     }
@@ -73,6 +77,9 @@ export function EditSettlementDialog({
       await deleteSettlement(item.id, userId)
       onSaved()
       onClose()
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Could not remove payment right now.'
+      toast.error(message)
     } finally {
       setDeleting(false)
     }

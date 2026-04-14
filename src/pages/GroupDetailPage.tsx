@@ -3,7 +3,6 @@ import {
   ArrowLeft,
   ArrowRight,
   Check,
-  Copy,
   History,
   MoreVertical,
   Pencil,
@@ -287,7 +286,6 @@ function EditGroupDialog({
   groupId,
   initialName,
   initialCurrency,
-  inviteCode,
   currentUserId,
   onClose,
   onSaved,
@@ -295,7 +293,6 @@ function EditGroupDialog({
   groupId: string
   initialName: string
   initialCurrency: string
-  inviteCode: string
   currentUserId: string
   onClose: () => void
   onSaved: () => void
@@ -303,7 +300,6 @@ function EditGroupDialog({
   const [name, setName] = useState(initialName)
   const [currency, setCurrency] = useState(initialCurrency)
   const [saving, setSaving] = useState(false)
-  const [copied, setCopied] = useState(false)
 
   async function handleSave() {
     if (!name.trim()) return
@@ -315,12 +311,6 @@ function EditGroupDialog({
     } finally {
       setSaving(false)
     }
-  }
-
-  function handleCopyInvite() {
-    navigator.clipboard.writeText(inviteCode)
-    setCopied(true)
-    setTimeout(() => setCopied(false), 2000)
   }
 
   return (
@@ -365,22 +355,6 @@ function EditGroupDialog({
                 ))}
               </SelectContent>
             </Select>
-          </div>
-          <div className="rounded-xl border border-stone-200 bg-stone-50 px-3 py-2.5">
-            <p className="text-xs font-medium text-stone-500">Invite code</p>
-            <div className="mt-1 flex items-center justify-between gap-2">
-              <code className="text-sm font-semibold tracking-wide text-stone-800">{inviteCode}</code>
-              <Button
-                type="button"
-                variant="outline"
-                size="xs"
-                className="shrink-0 rounded-lg"
-                onClick={handleCopyInvite}
-              >
-                <Copy className="size-3" />
-                {copied ? 'Copied' : 'Copy'}
-              </Button>
-            </div>
           </div>
           <Button className="w-full rounded-xl" disabled={!name.trim() || saving} onClick={handleSave}>
             {saving ? 'Saving…' : 'Save changes'}
@@ -441,12 +415,14 @@ function GroupOptionsMenu({
   onMembers,
   onPaymentHistory,
   onDelete,
+  canManageGroup,
   onClose,
 }: {
   onEdit: () => void
   onMembers: () => void
   onPaymentHistory: () => void
   onDelete: () => void
+  canManageGroup: boolean
   onClose: () => void
 }) {
   const itemClass =
@@ -467,18 +443,22 @@ function GroupOptionsMenu({
           <Users className="size-4 text-teal-800" />
           Members
         </button>
-        <button type="button" className={itemClass} onClick={onEdit}>
-          <Pencil className="size-4 text-teal-800" />
-          Edit group
-        </button>
-        <button
-          type="button"
-          className={cn(itemClass, 'text-red-600 hover:bg-red-50')}
-          onClick={onDelete}
-        >
-          <Trash2 className="size-4" />
-          Delete group
-        </button>
+        {canManageGroup && (
+          <button type="button" className={itemClass} onClick={onEdit}>
+            <Pencil className="size-4 text-teal-800" />
+            Edit group
+          </button>
+        )}
+        {canManageGroup && (
+          <button
+            type="button"
+            className={cn(itemClass, 'text-red-600 hover:bg-red-50')}
+            onClick={onDelete}
+          >
+            <Trash2 className="size-4" />
+            Delete group
+          </button>
+        )}
         <Button variant="ghost" className="mt-1 w-full rounded-xl text-stone-500" onClick={onClose}>
           Cancel
         </Button>
@@ -557,6 +537,7 @@ export function GroupDetailPage() {
   const currentUserHasActiveMembership = Boolean(
     userId && (members ?? []).some((m) => m.userId === userId),
   )
+  const isGroupCreator = Boolean(userId && group && group.created_by === userId)
 
   async function refreshBalances() {
     if (!groupId || !userId) return
@@ -570,12 +551,13 @@ export function GroupDetailPage() {
   }, [groupId, userId, bills, members])
 
   async function executeDeleteGroup() {
-    if (!groupId || !userId) return
+    if (!groupId || !userId || !isGroupCreator) return
     await deleteGroup(groupId, userId)
     navigate('/app/groups')
   }
 
   function openDeleteFromMenu() {
+    if (!isGroupCreator) return
     setShowOptionsMenu(false)
     setDeleteGroupConfirmOpen(true)
   }
@@ -804,15 +786,15 @@ export function GroupDetailPage() {
             setShowPaymentHistory(true)
           }}
           onDelete={openDeleteFromMenu}
+          canManageGroup={isGroupCreator}
         />
       )}
 
-      {showEditGroup && userId && groupId && (
+      {showEditGroup && userId && groupId && isGroupCreator && (
         <EditGroupDialog
           groupId={groupId}
           initialName={group.name}
           initialCurrency={group.currency}
-          inviteCode={group.invite_code}
           currentUserId={userId}
           onClose={() => setShowEditGroup(false)}
           onSaved={refreshBalances}

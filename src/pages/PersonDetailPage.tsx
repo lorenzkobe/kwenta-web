@@ -14,6 +14,8 @@ import {
 import { useLiveQuery } from 'dexie-react-hooks'
 import { db } from '@/db/db'
 import {
+  buildManualGeneralCreditApplyPlan,
+  buildPersonalBillAllocationPlan,
   computePairwiseNetForBill,
   computePairwiseNet,
   fetchRemoteProfileIntoDexie,
@@ -24,8 +26,14 @@ import {
   listSharedGroupsWithBalance,
   resolveProfileDisplay,
 } from '@/lib/people'
-import { deletePerson, linkProfileToRemote } from '@/db/operations'
+import {
+  applyGeneralCreditToPersonalBills,
+  createPersonalPaymentWithDistribution,
+  deletePerson,
+  linkProfileToRemote,
+} from '@/db/operations'
 import { ConfirmDialog } from '@/components/common/ConfirmDialog'
+import { useConfirmDialog } from '@/hooks/useConfirmDialog'
 import { useCurrentUser } from '@/hooks/useCurrentUser'
 import { withBillBackQuery } from '@/lib/bill-navigation'
 import { cn, formatCurrency } from '@/lib/utils'
@@ -43,6 +51,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
+import { toast } from 'sonner'
 
 function sheetBackdrop(onClose: () => void) {
   return (
@@ -194,6 +203,8 @@ export function PersonDetailPage() {
   const { userId, profile: meProfile } = useCurrentUser()
   const [editing, setEditing] = useState<SettlementHistoryItem | null>(null)
   const [record, setRecord] = useState<{ currency: string } | null>(null)
+  const [paymentMode, setPaymentMode] = useState<'general' | 'distributed'>('general')
+  const [applyingGeneralCredit, setApplyingGeneralCredit] = useState(false)
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false)
   const [showOptionsMenu, setShowOptionsMenu] = useState(false)
   const [linkByIdInput, setLinkByIdInput] = useState('')
@@ -201,6 +212,7 @@ export function PersonDetailPage() {
   const [linkByIdPending, setLinkByIdPending] = useState(false)
   const [linkAccountOpen, setLinkAccountOpen] = useState(false)
   const [billsScope, setBillsScope] = useState<'personal' | 'groups'>('personal')
+  const { confirm: confirmFlow, dialog: flowConfirmDialog } = useConfirmDialog()
 
   const profile = useLiveQuery(
     async (): Promise<Profile | null | undefined> => {
@@ -287,6 +299,15 @@ export function PersonDetailPage() {
     if (pb) return pb.currency
     return bills?.[0]?.currency ?? 'PHP'
   }, [personalBills, bills])
+
+  const manualGeneralCreditPlan = useLiveQuery(async () => {
+    if (!userId || !personId) return null
+    return buildManualGeneralCreditApplyPlan({
+      meId: userId,
+      otherId: personId,
+      currency: defaultCurrency,
+    })
+  }, [userId, personId, defaultCurrency, settlements, personalBills, personalBillDirection])
 
   const settlementParties = useMemo((): { id: string; label: string }[] | undefined => {
     if (!userId || !personId) return undefined
@@ -409,6 +430,115 @@ export function PersonDetailPage() {
     setDeleteConfirmOpen(true)
   }
 
+  async function handleRecordPaymentSubmit(args: {
+    groupId: string | null
+    billId: string | null
+    fromUserId: string
+    toUserId: string
+    amount: number
+    currency: string
+    label?: string
+    markedBy: string
+  }) {
+    if (!userId || !personId) return
+    if (paymentMode === 'general') {
+      await createPersonalPaymentWithDistribution({
+        fromUserId: args.fromUserId,
+        toUserId: args.toUserId,
+        totalAmount: args.amount,
+        currency: args.currency,
+        markedBy: args.markedBy,
+        label: args.label,
+        slices: [],
+        remainderAmount: args.amount,
+        routeHint: `/app/people/${personId}`,
+      })
+      return true
+    }
+
+    const plan = await buildPersonalBillAllocationPlan({
+      meId: userId,
+      otherId: personId,
+      fromUserId: args.fromUserId,
+      toUserId: args.toUserId,
+      currency: args.currency,
+      amountToApply: args.amount,
+    })
+
+    const fullSettle = plan.allocatableTotal > 0.005 && args.amount >= plan.allocatableTotal - 0.005
+    if (fullSettle) {
+      const ok = await confirmFlow({
+        title: 'This can clear your balance',
+        description: 'This payment can settle all unpaid personal bills between you two.',
+        confirmLabel: 'Apply payment',
+      })
+      if (!ok) return false
+    }
+
+    if (plan.remainderAmount > 0.005) {
+      const ok = await confirmFlow({
+        title: 'This is more than unpaid bills',
+        description: `${formatCurrency(plan.appliedAmount, args.currency)} will settle unpaid bills. ${formatCurrency(
+          plan.remainderAmount,
+          args.currency,
+        )} will be saved as a general payment.`,
+        confirmLabel: 'Continue',
+      })
+      if (!ok) return false
+    }
+
+    await createPersonalPaymentWithDistribution({
+      fromUserId: args.fromUserId,
+      toUserId: args.toUserId,
+      totalAmount: args.amount,
+      currency: args.currency,
+      markedBy: args.markedBy,
+      label: args.label,
+      slices: plan.slices.map((s) => ({ billId: s.billId, amount: s.amount })),
+      remainderAmount: plan.remainderAmount,
+      routeHint: `/app/people/${personId}`,
+    })
+    return true
+  }
+
+  async function handleApplyGeneralCredit() {
+    if (!manualGeneralCreditPlan || !userId || !personId) return
+    if (manualGeneralCreditPlan.appliedAmount <= 0.005 || manualGeneralCreditPlan.slices.length === 0) {
+      toast.info('No unpaid personal bills to apply credit to.')
+      return
+    }
+    const ok = await confirmFlow({
+      title: 'Apply available credit to bills',
+      description: `Apply ${formatCurrency(
+        manualGeneralCreditPlan.appliedAmount,
+        defaultCurrency,
+      )} to ${manualGeneralCreditPlan.affectedBillCount} unpaid personal bill${
+        manualGeneralCreditPlan.affectedBillCount === 1 ? '' : 's'
+      }?`,
+      confirmLabel: 'Apply',
+    })
+    if (!ok) return
+
+    setApplyingGeneralCredit(true)
+    try {
+      await applyGeneralCreditToPersonalBills({
+        fromUserId: manualGeneralCreditPlan.fromUserId,
+        toUserId: manualGeneralCreditPlan.toUserId,
+        currency: defaultCurrency,
+        markedBy: userId,
+        appliedAmount: manualGeneralCreditPlan.appliedAmount,
+        slices: manualGeneralCreditPlan.slices.map((s) => ({ billId: s.billId, amount: s.amount })),
+        routeHint: `/app/people/${personId}`,
+      })
+      toast.success('Applied available general credit to unpaid bills.')
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Could not apply credit right now.'
+      toast.error(message)
+    } finally {
+      setApplyingGeneralCredit(false)
+    }
+  }
+
   return (
     <div className="space-y-5">
       <div className="flex items-center justify-between gap-2">
@@ -475,14 +605,45 @@ export function PersonDetailPage() {
         </p>
 
         <div className="mt-4">
-          <Button
-            size="sm"
-            className="rounded-full"
-            type="button"
-            onClick={() => setRecord({ currency: defaultCurrency })}
-          >
-            Add payment
-          </Button>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              size="sm"
+              className="rounded-full"
+              type="button"
+              onClick={() => {
+                setPaymentMode('general')
+                setRecord({ currency: defaultCurrency })
+              }}
+            >
+              Add payment
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              className="rounded-full"
+              type="button"
+              disabled={
+                applyingGeneralCredit ||
+                !manualGeneralCreditPlan ||
+                manualGeneralCreditPlan.appliedAmount <= 0.005
+              }
+              onClick={() => void handleApplyGeneralCredit()}
+            >
+              {applyingGeneralCredit ? 'Applying…' : 'Apply available general credit'}
+            </Button>
+          </div>
+          <p className="mt-2 text-xs text-stone-500">
+            General payments reduce your total balance only. Distributed payments are split to your oldest
+            unpaid bills.
+          </p>
+          {manualGeneralCreditPlan && manualGeneralCreditPlan.appliedAmount > 0.005 && (
+            <p className="mt-1 text-xs text-stone-500">
+              Available general credit you can apply now:{' '}
+              {formatCurrency(manualGeneralCreditPlan.appliedAmount, defaultCurrency)} across{' '}
+              {manualGeneralCreditPlan.affectedBillCount} bill
+              {manualGeneralCreditPlan.affectedBillCount === 1 ? '' : 's'}.
+            </p>
+          )}
         </div>
       </div>
 
@@ -691,6 +852,15 @@ export function PersonDetailPage() {
           toName={display?.displayName ?? profile.display_name}
           partyPicker={settlementParties}
           markedBy={userId}
+          showPaymentModeToggle
+          paymentMode={paymentMode}
+          onPaymentModeChange={setPaymentMode}
+          helperLines={
+            paymentMode === 'distributed'
+              ? ['We split this payment to your oldest unpaid bills first.']
+              : ['General payments reduce your total balance only.']
+          }
+          onSubmit={handleRecordPaymentSubmit}
           onRecorded={() => {
             setRecord(null)
           }}
@@ -740,6 +910,7 @@ export function PersonDetailPage() {
         variant="danger"
         onConfirm={handleDeletePerson}
       />
+      {flowConfirmDialog}
     </div>
   )
 }

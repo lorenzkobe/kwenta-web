@@ -56,3 +56,13 @@ Promote each stage only if:
 - Notification badge/list updates via realtime without focus/visibility polling.
 - Offline -> online reconnect catches up missed changes once.
 
+## Cloud-first verification (manual)
+
+- Online mutation success path: create/edit/delete bill and settlement, verify no conflict cards created.
+- Online mutation failure path (simulate server/RPC failure): verify error toast appears and a Not applied card is created.
+- Offline mutation path: create/edit while offline, verify pending mutations exist and replay on reconnect.
+- Replay conflict path: when replay fails, verify card appears in Settings > Not applied changes.
+- Conflict recovery path: use View current, Apply again, Dismiss, and verify successful manual save auto-resolves matching card.
+
+No new test framework is introduced in this phase; use existing build/lint plus focused manual scenarios.
+

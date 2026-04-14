@@ -27,6 +27,8 @@ type EnrichedBill = {
   currency: string
   total_amount: number
   created_at: string
+  created_by: string
+  creatorName?: string
   itemCount: number
   settled: boolean
   participantPills: { id: string; label: string }[]
@@ -38,49 +40,65 @@ export function BillsPage() {
   const [sort, setSort] = useState<BillSort>('date_desc')
   const [deleteTarget, setDeleteTarget] = useState<{ id: string; title: string } | null>(null)
 
-  const enrichedBills = useLiveQuery(async () => {
-    if (!userId) return [] as EnrichedBill[]
-    const all = await db.bills.where('created_by').equals(userId).toArray()
-    const active = all.filter((b) => !b.is_deleted && b.group_id == null)
-    return Promise.all(
-      active.map(async (bill) => {
-        const items = await db.bill_items.where('bill_id').equals(bill.id).toArray()
-        const activeItems = items.filter((i) => !i.is_deleted)
-        const union = await participantUnionForBill(bill.id)
-        const participantPills: { id: string; label: string }[] = []
-        const seen = new Set<string>()
-        for (const uid of union) {
-          if (seen.has(uid)) continue
-          seen.add(uid)
-          const p = await db.profiles.get(uid)
-          const name = p?.display_name ?? 'Someone'
-          participantPills.push({
-            id: uid,
-            label: uid === userId ? 'You' : name,
-          })
-        }
-        participantPills.sort((a, b) => {
-          if (a.label === 'You') return -1
-          if (b.label === 'You') return 1
-          return a.label.localeCompare(b.label)
+  const billBuckets = useLiveQuery(async () => {
+    if (!userId) return { myBills: [] as EnrichedBill[], sharedBills: [] as EnrichedBill[] }
+    const currentUserId = userId
+    const allPersonal = (await db.bills.toArray()).filter((b) => !b.is_deleted && b.group_id === null)
+    const myRaw = allPersonal.filter((b) => b.created_by === currentUserId)
+    const sharedRaw: typeof allPersonal = []
+    for (const bill of allPersonal) {
+      if (bill.created_by === currentUserId) continue
+      const union = await participantUnionForBill(bill.id)
+      if (union.has(currentUserId)) sharedRaw.push(bill)
+    }
+
+    async function enrichBill(bill: (typeof allPersonal)[number]): Promise<EnrichedBill> {
+      const items = await db.bill_items.where('bill_id').equals(bill.id).toArray()
+      const activeItems = items.filter((i) => !i.is_deleted)
+      const union = await participantUnionForBill(bill.id)
+      const participantPills: { id: string; label: string }[] = []
+      const seen = new Set<string>()
+      for (const uid of union) {
+        if (seen.has(uid)) continue
+        seen.add(uid)
+        const p = await db.profiles.get(uid)
+        const name = p?.display_name ?? 'Someone'
+        participantPills.push({
+          id: uid,
+          label: uid === currentUserId ? 'You' : name,
         })
-        const settled = await isPersonalBillFullySettled(bill.id, userId)
-        return {
-          id: bill.id,
-          title: bill.title,
-          currency: bill.currency,
-          total_amount: bill.total_amount,
-          created_at: bill.created_at,
-          itemCount: activeItems.length,
-          settled,
-          participantPills,
-        }
-      }),
-    )
+      }
+      participantPills.sort((a, b) => {
+        if (a.label === 'You') return -1
+        if (b.label === 'You') return 1
+        return a.label.localeCompare(b.label)
+      })
+      const creator = await db.profiles.get(bill.created_by)
+      const settled = await isPersonalBillFullySettled(bill.id, currentUserId)
+      return {
+        id: bill.id,
+        title: bill.title,
+        currency: bill.currency,
+        total_amount: bill.total_amount,
+        created_at: bill.created_at,
+        created_by: bill.created_by,
+        creatorName: creator?.display_name ?? 'Someone',
+        itemCount: activeItems.length,
+        settled,
+        participantPills,
+      }
+    }
+
+    const [myBills, sharedBills] = await Promise.all([
+      Promise.all(myRaw.map((bill) => enrichBill(bill))),
+      Promise.all(sharedRaw.map((bill) => enrichBill(bill))),
+    ])
+
+    return { myBills, sharedBills }
   }, [userId])
 
   const bills = useMemo(() => {
-    const list = enrichedBills ?? []
+    const list = billBuckets?.myBills ?? []
     let out = list
     if (filter === 'settled') out = out.filter((b) => b.settled)
     if (filter === 'unsettled') out = out.filter((b) => !b.settled)
@@ -100,7 +118,14 @@ export function BillsPage() {
       }
     })
     return copy
-  }, [enrichedBills, filter, sort])
+  }, [billBuckets?.myBills, filter, sort])
+
+  const sharedBills = useMemo(() => {
+    const list = [...(billBuckets?.sharedBills ?? [])]
+    list.sort((a, b) => b.created_at.localeCompare(a.created_at))
+    return list
+  }, [billBuckets?.sharedBills])
+  const loadingBills = billBuckets === undefined
 
   async function executeDeleteBill() {
     if (!userId || !deleteTarget) return
@@ -114,7 +139,7 @@ export function BillsPage() {
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Personal bills</h1>
           <p className="mt-1 text-sm text-stone-600">
-            {enrichedBills?.length ?? 0} bill{(enrichedBills?.length ?? 0) !== 1 ? 's' : ''} · Group bills stay in each
+            {(billBuckets?.myBills.length ?? 0) + sharedBills.length} bill{((billBuckets?.myBills.length ?? 0) + sharedBills.length) !== 1 ? 's' : ''} · Group bills stay in each
             group
           </p>
         </div>
@@ -126,7 +151,7 @@ export function BillsPage() {
         </Button>
       </div>
 
-      {enrichedBills && enrichedBills.length > 0 && (
+      {billBuckets && billBuckets.myBills.length > 0 && (
         <div className="flex flex-col gap-2 rounded-2xl border border-stone-200 bg-white p-3 shadow-sm sm:flex-row sm:flex-wrap sm:items-center">
           <div className="flex min-w-0 flex-1 flex-col gap-1 sm:max-w-48">
             <span className="text-xs font-medium text-stone-500">Filter</span>
@@ -173,7 +198,28 @@ export function BillsPage() {
         </Button>
       </div>
 
-      {(!enrichedBills || enrichedBills.length === 0) ? (
+      {loadingBills ? (
+        <div className="space-y-3">
+          {Array.from({ length: 4 }).map((_, idx) => (
+            <div
+              key={`bill-skeleton-${idx}`}
+              className="rounded-2xl border border-stone-200 bg-white p-4 shadow-sm"
+            >
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0 flex-1">
+                  <div className="h-4 w-1/3 animate-pulse rounded bg-stone-200" />
+                  <div className="mt-2 h-3 w-1/4 animate-pulse rounded bg-stone-200" />
+                  <div className="mt-3 flex gap-1.5">
+                    <span className="h-5 w-14 animate-pulse rounded-full bg-stone-200" />
+                    <span className="h-5 w-18 animate-pulse rounded-full bg-stone-200" />
+                  </div>
+                </div>
+                <div className="h-4 w-16 animate-pulse rounded bg-stone-200" />
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : (!billBuckets || (billBuckets.myBills.length === 0 && sharedBills.length === 0)) ? (
         <div className="rounded-3xl border border-stone-200 bg-white p-5 shadow-sm">
           <div className="flex flex-col items-center py-12 text-center">
             <div className="rounded-2xl bg-stone-100 p-4">
@@ -191,68 +237,124 @@ export function BillsPage() {
             </Button>
           </div>
         </div>
-      ) : bills.length === 0 ? (
-        <div className="rounded-3xl border border-stone-200 bg-white p-5 text-center text-sm text-stone-500 shadow-sm">
-          No bills match this filter.
-        </div>
       ) : (
-        <div className="space-y-3">
-          {bills.map((bill) => (
-            <div
-              key={bill.id}
-              className="rounded-2xl border border-stone-200 bg-white p-4 shadow-sm transition-colors hover:bg-stone-50"
-            >
-              <div className="flex items-start justify-between gap-3">
-                <Link to={`/app/bills/${bill.id}`} className="min-w-0 flex-1">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <p className="font-semibold text-stone-800">{bill.title}</p>
-                    <span
-                      className={cn(
-                        'rounded-full px-2 py-0.5 text-[0.65rem] font-semibold uppercase tracking-wide',
-                        bill.settled
-                          ? 'bg-emerald-500/15 text-emerald-800'
-                          : 'bg-amber-500/15 text-amber-900',
-                      )}
-                    >
-                      {bill.settled ? 'Settled' : 'Open'}
-                    </span>
-                  </div>
-                  <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-stone-500">
-                    <span>{timeAgo(bill.created_at)}</span>
-                    <span>·</span>
-                    <span>
-                      {bill.itemCount} item{bill.itemCount !== 1 ? 's' : ''}
-                    </span>
-                  </div>
-                  {bill.participantPills.length > 0 && (
-                    <div className="mt-2 flex flex-wrap gap-1.5">
-                      {bill.participantPills.map((p) => (
-                        <span
-                          key={p.id}
-                          className="inline-flex max-w-40 truncate rounded-full border border-teal-800/20 bg-teal-800/8 px-2.5 py-0.5 text-[0.7rem] font-medium text-teal-900"
-                        >
-                          {p.label}
-                        </span>
-                      ))}
-                    </div>
-                  )}
-                </Link>
-                <div className="flex items-center gap-2">
-                  <span className="text-sm font-semibold text-stone-800">
-                    {formatCurrency(bill.total_amount, bill.currency)}
-                  </span>
-                  <Button
-                    variant="ghost"
-                    size="icon-xs"
-                    className="rounded-full text-stone-400 hover:text-red-600"
-                    onClick={() => setDeleteTarget({ id: bill.id, title: bill.title })}
+        <div className="space-y-5">
+          <div>
+            <div className="mb-2 flex items-center justify-between">
+              <p className="text-sm font-semibold text-stone-700">Bills you created</p>
+            </div>
+            {(billBuckets?.myBills.length ?? 0) > 0 && bills.length === 0 ? (
+              <div className="rounded-3xl border border-stone-200 bg-white p-5 text-center text-sm text-stone-500 shadow-sm">
+                No bills match this filter.
+              </div>
+            ) : billBuckets && billBuckets.myBills.length === 0 ? (
+              <div className="rounded-3xl border border-stone-200 bg-white p-5 text-center text-sm text-stone-500 shadow-sm">
+                You have not created a personal bill yet.
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {bills.map((bill) => (
+                  <div
+                    key={bill.id}
+                    className="rounded-2xl border border-stone-200 bg-white p-4 shadow-sm transition-colors hover:bg-stone-50"
                   >
-                    <Trash2 className="size-3.5" />
-                  </Button>
-                </div>
+                    <div className="flex items-start justify-between gap-3">
+                      <Link to={`/app/bills/${bill.id}`} className="min-w-0 flex-1">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <p className="font-semibold text-stone-800">{bill.title}</p>
+                          <span
+                            className={cn(
+                              'rounded-full px-2 py-0.5 text-[0.65rem] font-semibold uppercase tracking-wide',
+                              bill.settled
+                                ? 'bg-emerald-500/15 text-emerald-800'
+                                : 'bg-amber-500/15 text-amber-900',
+                            )}
+                          >
+                            {bill.settled ? 'Settled' : 'Open'}
+                          </span>
+                        </div>
+                        <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-stone-500">
+                          <span>{timeAgo(bill.created_at)}</span>
+                          <span>·</span>
+                          <span>
+                            {bill.itemCount} item{bill.itemCount !== 1 ? 's' : ''}
+                          </span>
+                        </div>
+                        {bill.participantPills.length > 0 && (
+                          <div className="mt-2 flex flex-wrap gap-1.5">
+                            {bill.participantPills.map((p) => (
+                              <span
+                                key={p.id}
+                                className="inline-flex max-w-40 truncate rounded-full border border-teal-800/20 bg-teal-800/8 px-2.5 py-0.5 text-[0.7rem] font-medium text-teal-900"
+                              >
+                                {p.label}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                      </Link>
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm font-semibold text-stone-800">
+                          {formatCurrency(bill.total_amount, bill.currency)}
+                        </span>
+                        <Button
+                          variant="ghost"
+                          size="icon-xs"
+                          className="rounded-full text-stone-400 hover:text-red-600"
+                          onClick={() => setDeleteTarget({ id: bill.id, title: bill.title })}
+                        >
+                          <Trash2 className="size-3.5" />
+                        </Button>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {sharedBills.length > 0 && (
+            <div>
+              <div className="mb-2 flex items-center justify-between">
+                <p className="text-sm font-semibold text-stone-700">Shared with you</p>
+              </div>
+              <div className="space-y-3">
+                {sharedBills.map((bill) => (
+                  <Link
+                    key={bill.id}
+                    to={`/app/bills/${bill.id}`}
+                    className="block rounded-2xl border border-stone-200 bg-white p-4 shadow-sm transition-colors hover:bg-stone-50"
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0 flex-1">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <p className="font-semibold text-stone-800">{bill.title}</p>
+                          <span
+                            className={cn(
+                              'rounded-full px-2 py-0.5 text-[0.65rem] font-semibold uppercase tracking-wide',
+                              bill.settled
+                                ? 'bg-emerald-500/15 text-emerald-800'
+                                : 'bg-amber-500/15 text-amber-900',
+                            )}
+                          >
+                            {bill.settled ? 'Settled' : 'Open'}
+                          </span>
+                        </div>
+                        <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-stone-500">
+                          <span>{timeAgo(bill.created_at)}</span>
+                          <span>·</span>
+                          <span>Created by {bill.creatorName ?? 'Someone'}</span>
+                        </div>
+                      </div>
+                      <span className="text-sm font-semibold text-stone-800">
+                        {formatCurrency(bill.total_amount, bill.currency)}
+                      </span>
+                    </div>
+                  </Link>
+                ))}
               </div>
             </div>
-          ))}
+          )}
         </div>
       )}
     </div>

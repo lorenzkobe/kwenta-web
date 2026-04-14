@@ -1,6 +1,7 @@
 import { db } from '@/db/db'
 import { supabase } from '@/lib/supabase'
 import { useAppStore } from '@/store/app-store'
+import { syncRoundTrip } from '@/sync/sync-service'
 
 export type KwentaNotificationKind =
   | 'profile_linked'
@@ -22,6 +23,28 @@ export interface KwentaNotificationRow {
   updated_at: string
 }
 
+type NotificationInsertRow = {
+  recipient_id: string
+  actor_id: string
+  kind: KwentaNotificationKind
+  title: string
+  body: string
+  entity_id: string | null
+  group_id: string | null
+}
+
+type NotificationOutboxEntry = {
+  id: string
+  actorId: string
+  rows: NotificationInsertRow[]
+  createdAt: string
+  attempts: number
+  lastError: string | null
+}
+
+const NOTIFICATION_OUTBOX_KEY = 'kwenta_notification_outbox_v1'
+let flushInFlight: Promise<void> | null = null
+
 /**
  * Real Kwenta account id to notify for a split row: linked remote, or non-local profile with email.
  */
@@ -34,8 +57,92 @@ export async function resolveRecipientProfileIdForNotify(splitUserId: string): P
   return p.id
 }
 
-function shouldSendCloudNotification(): boolean {
-  return useAppStore.getState().isOnline
+function readOutbox(): NotificationOutboxEntry[] {
+  const raw = localStorage.getItem(NOTIFICATION_OUTBOX_KEY)
+  if (!raw) return []
+  try {
+    const parsed = JSON.parse(raw) as NotificationOutboxEntry[]
+    if (!Array.isArray(parsed)) return []
+    return parsed.filter((entry) => Array.isArray(entry.rows) && entry.rows.length > 0)
+  } catch {
+    return []
+  }
+}
+
+function writeOutbox(next: NotificationOutboxEntry[]) {
+  localStorage.setItem(NOTIFICATION_OUTBOX_KEY, JSON.stringify(next))
+}
+
+function enqueueNotificationRows(actorId: string, rows: NotificationInsertRow[]) {
+  if (rows.length === 0) return
+  const queue = readOutbox()
+  queue.push({
+    id: crypto.randomUUID(),
+    actorId,
+    rows,
+    createdAt: new Date().toISOString(),
+    attempts: 0,
+    lastError: null,
+  })
+  writeOutbox(queue)
+}
+
+export async function hasQueuedKwentaNotifications(actorId: string): Promise<boolean> {
+  const queue = readOutbox()
+  return queue.some((entry) => entry.actorId === actorId)
+}
+
+type FlushOptions = {
+  assumeCloudAck?: boolean
+}
+
+export async function flushQueuedKwentaNotifications(options?: FlushOptions): Promise<void> {
+  if (flushInFlight) return flushInFlight
+
+  flushInFlight = (async () => {
+    const isOnline = useAppStore.getState().isOnline
+    if (!isOnline) return
+
+    const {
+      data: { session },
+    } = await supabase.auth.getSession()
+    const actorId = session?.user?.id
+    if (!actorId) return
+
+    const queue = readOutbox()
+    if (queue.length === 0) return
+
+    if (!options?.assumeCloudAck) {
+      const syncResult = await syncRoundTrip(actorId)
+      if (syncResult.errors.length > 0) {
+        return
+      }
+    }
+
+    const nextQueue: NotificationOutboxEntry[] = []
+    for (const entry of queue) {
+      if (entry.actorId !== actorId) {
+        nextQueue.push(entry)
+        continue
+      }
+      const { error } = await supabase.from('kwenta_notifications').insert(entry.rows)
+      if (error) {
+        nextQueue.push({
+          ...entry,
+          attempts: entry.attempts + 1,
+          lastError: error.message,
+        })
+      }
+    }
+
+    writeOutbox(nextQueue)
+  })()
+
+  try {
+    await flushInFlight
+  } finally {
+    flushInFlight = null
+  }
 }
 
 export async function notifyProfileLinked(params: {
@@ -44,17 +151,18 @@ export async function notifyProfileLinked(params: {
   recipientId: string
   linkedAsName: string
 }): Promise<void> {
-  if (!shouldSendCloudNotification()) return
-  const { error } = await supabase.from('kwenta_notifications').insert({
-    recipient_id: params.recipientId,
-    actor_id: params.actorId,
-    kind: 'profile_linked',
-    title: 'Contact linked to you',
-    body: `${params.actorName} linked a saved contact (“${params.linkedAsName}”) to your Kwenta account.`,
-    entity_id: null,
-    group_id: null,
-  })
-  if (error) console.warn('[kwenta-notifications] profile_linked:', error.message)
+  enqueueNotificationRows(params.actorId, [
+    {
+      recipient_id: params.recipientId,
+      actor_id: params.actorId,
+      kind: 'profile_linked',
+      title: 'Contact linked to you',
+      body: `${params.actorName} linked a saved contact (“${params.linkedAsName}”) to your Kwenta account.`,
+      entity_id: null,
+      group_id: null,
+    },
+  ])
+  void flushQueuedKwentaNotifications()
 }
 
 export async function notifyBillParticipantsCreated(params: {
@@ -66,7 +174,7 @@ export async function notifyBillParticipantsCreated(params: {
   groupId: string | null
   groupName: string | null
 }): Promise<void> {
-  if (!shouldSendCloudNotification() || params.recipientIds.length === 0) return
+  if (params.recipientIds.length === 0) return
 
   const scope =
     params.groupId && params.groupName
@@ -83,8 +191,8 @@ export async function notifyBillParticipantsCreated(params: {
     group_id: params.groupId,
   }))
 
-  const { error } = await supabase.from('kwenta_notifications').insert(rows)
-  if (error) console.warn('[kwenta-notifications] bill_participant:', error.message)
+  enqueueNotificationRows(params.actorId, rows)
+  void flushQueuedKwentaNotifications()
 }
 
 export async function notifyPaymentRecorded(params: {
@@ -99,7 +207,6 @@ export async function notifyPaymentRecorded(params: {
   groupName: string | null
   settlementId: string
 }): Promise<void> {
-  if (!shouldSendCloudNotification()) return
   const scope =
     params.groupId && params.groupName
       ? `Group · ${params.groupName}`
@@ -110,16 +217,18 @@ export async function notifyPaymentRecorded(params: {
     minimumFractionDigits: 0,
   }).format(params.amount)
 
-  const { error } = await supabase.from('kwenta_notifications').insert({
-    recipient_id: params.recipientId,
-    actor_id: params.actorId,
-    kind: 'payment_recorded',
-    title: 'Payment recorded',
-    body: `${params.actorName} recorded ${amountLabel} (${params.fromName} -> ${params.toName}) · ${scope}.`,
-    entity_id: params.settlementId,
-    group_id: params.groupId,
-  })
-  if (error) console.warn('[kwenta-notifications] payment_recorded:', error.message)
+  enqueueNotificationRows(params.actorId, [
+    {
+      recipient_id: params.recipientId,
+      actor_id: params.actorId,
+      kind: 'payment_recorded',
+      title: 'Payment recorded',
+      body: `${params.actorName} recorded ${amountLabel} (${params.fromName} -> ${params.toName}) · ${scope}.`,
+      entity_id: params.settlementId,
+      group_id: params.groupId,
+    },
+  ])
+  void flushQueuedKwentaNotifications()
 }
 
 export async function notifyAddedToGroup(params: {
@@ -129,17 +238,18 @@ export async function notifyAddedToGroup(params: {
   groupId: string
   groupName: string
 }): Promise<void> {
-  if (!shouldSendCloudNotification()) return
-  const { error } = await supabase.from('kwenta_notifications').insert({
-    recipient_id: params.recipientId,
-    actor_id: params.actorId,
-    kind: 'added_to_group',
-    title: 'Added to a group',
-    body: `${params.actorName} added you to “${params.groupName}”.`,
-    entity_id: params.groupId,
-    group_id: params.groupId,
-  })
-  if (error) console.warn('[kwenta-notifications] added_to_group:', error.message)
+  enqueueNotificationRows(params.actorId, [
+    {
+      recipient_id: params.recipientId,
+      actor_id: params.actorId,
+      kind: 'added_to_group',
+      title: 'Added to a group',
+      body: `${params.actorName} added you to “${params.groupName}”.`,
+      entity_id: params.groupId,
+      group_id: params.groupId,
+    },
+  ])
+  void flushQueuedKwentaNotifications()
 }
 
 export async function fetchKwentaNotifications(recipientId: string, limit = 50): Promise<KwentaNotificationRow[]> {
@@ -155,20 +265,6 @@ export async function fetchKwentaNotifications(recipientId: string, limit = 50):
     return []
   }
   return (data ?? []) as KwentaNotificationRow[]
-}
-
-export async function fetchUnreadKwentaNotificationCount(recipientId: string): Promise<number> {
-  const { count, error } = await supabase
-    .from('kwenta_notifications')
-    .select('id', { count: 'exact', head: true })
-    .eq('recipient_id', recipientId)
-    .is('read_at', null)
-
-  if (error) {
-    console.warn('[kwenta-notifications] count:', error.message)
-    return 0
-  }
-  return count ?? 0
 }
 
 export async function markKwentaNotificationRead(id: string, recipientId: string): Promise<void> {
