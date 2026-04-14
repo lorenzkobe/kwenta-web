@@ -24,6 +24,7 @@ type ReconcileBundle = Partial<
 >
 
 const LAST_SEEN_EVENT_KEY = (userId: string) => `kwenta_last_seen_user_event:${userId}`
+const MAX_RECENT_EVENT_IDS = 1024
 
 function isRecord(v: unknown): v is Record<string, unknown> {
   return Boolean(v) && typeof v === 'object'
@@ -112,6 +113,15 @@ async function applyReconcileBundle(bundle: ReconcileBundle): Promise<number> {
     applied++
   }
   return applied
+}
+
+function rememberEventId(recentOrder: string[], recentSet: Set<string>, eventId: string): void {
+  if (recentSet.has(eventId)) return
+  recentSet.add(eventId)
+  recentOrder.push(eventId)
+  if (recentOrder.length <= MAX_RECENT_EVENT_IDS) return
+  const evicted = recentOrder.shift()
+  if (evicted) recentSet.delete(evicted)
 }
 
 async function processEvent(userId: string, ev: UserEventRow): Promise<void> {
@@ -237,7 +247,7 @@ async function processEvent(userId: string, ev: UserEventRow): Promise<void> {
   }
 }
 
-async function catchUpSince(userId: string, sinceIso: string): Promise<void> {
+async function catchUpSince(userId: string, sinceIso: string, onEvent: (ev: UserEventRow) => Promise<void>): Promise<void> {
   const { data, error } = await supabase
     .from('kwenta_user_events')
     .select('*')
@@ -253,8 +263,7 @@ async function catchUpSince(userId: string, sinceIso: string): Promise<void> {
 
   const events = (data ?? []) as UserEventRow[]
   for (const ev of events) {
-    await processEvent(userId, ev)
-    localStorage.setItem(LAST_SEEN_EVENT_KEY(userId), ev.created_at)
+    await onEvent(ev)
   }
 }
 
@@ -264,12 +273,43 @@ export function startRealtimeForUser(userId: string): () => void {
   let flushing = false
   let catchUpInFlight: Promise<void> | null = null
   let lastCatchUpSince: string | null = null
+  const recentEventOrder: string[] = []
+  const recentEventSet = new Set<string>()
+
+  async function processEventSafely(ev: UserEventRow): Promise<void> {
+    if (recentEventSet.has(ev.id)) {
+      localStorage.setItem(LAST_SEEN_EVENT_KEY(userId), ev.created_at)
+      return
+    }
+
+    rememberEventId(recentEventOrder, recentEventSet, ev.id)
+
+    try {
+      await processEvent(userId, ev)
+    } catch (error) {
+      console.warn('[realtime] event processing failed; falling back to pull', {
+        eventId: ev.id,
+        entity: ev.entity_type,
+        op: ev.op,
+        error,
+      })
+      await pullChanges(userId)
+      captureMetric('realtime.event.process', false, 0, {
+        entity: ev.entity_type,
+        op: ev.op,
+        fallbackPull: true,
+        unhandledError: true,
+      })
+    } finally {
+      localStorage.setItem(LAST_SEEN_EVENT_KEY(userId), ev.created_at)
+    }
+  }
 
   function scheduleCatchUp(sinceIso: string) {
     const dedupe = isRuntimeFlagEnabled('realtimeCatchupSingleRun')
     if (dedupe && catchUpInFlight && lastCatchUpSince === sinceIso) return
     lastCatchUpSince = sinceIso
-    const run = withMetric('realtime.catchUp', () => catchUpSince(userId, sinceIso), { sinceIso })
+    const run = withMetric('realtime.catchUp', () => catchUpSince(userId, sinceIso, processEventSafely), { sinceIso })
     catchUpInFlight = run.finally(() => {
       if (catchUpInFlight === run) catchUpInFlight = null
     })
@@ -285,8 +325,7 @@ export function startRealtimeForUser(userId: string): () => void {
       while (!disposed && queue.length > 0) {
         const ev = queue.shift()
         if (!ev) break
-        await processEvent(userId, ev)
-        localStorage.setItem(LAST_SEEN_EVENT_KEY(userId), ev.created_at)
+        await processEventSafely(ev)
       }
     } finally {
       flushing = false
