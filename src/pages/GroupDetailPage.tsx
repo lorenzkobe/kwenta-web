@@ -21,6 +21,8 @@ import { db } from '@/db/db'
 import {
   addGroupMember,
   addExistingGroupMember,
+  createBundledGroupSettlement,
+  createSettlement,
   removeGroupMember,
   deleteGroup,
   updateGroup,
@@ -490,10 +492,9 @@ export function GroupDetailPage() {
   const [editingSettlement, setEditingSettlement] = useState<SettlementHistoryItem | null>(null)
   const [recordSettlement, setRecordSettlement] = useState<{
     fromUserId: string
-    toUserId: string
-    amount: number
+    totalAmount: number
     fromName: string
-    toName: string
+    recipients: { toUserId: string; toName: string; amount: number }[]
   } | null>(null)
   const [deleteGroupConfirmOpen, setDeleteGroupConfirmOpen] = useState(false)
 
@@ -689,24 +690,39 @@ export function GroupDetailPage() {
             })}
           </ul>
 
-          {balanceSummary && balanceSummary.suggestions.length > 0 && (
+          {balanceSummary && balanceSummary.groupedSuggestions.length > 0 && (
             <div className="mt-5 border-t border-stone-100 pt-5">
               <p className="text-xs font-medium text-stone-500">Suggested payments</p>
               <div className="mt-2 space-y-2">
-                {balanceSummary.suggestions.map((s) => {
-                  const key = `${s.fromUserId}-${s.toUserId}`
+                {balanceSummary.groupedSuggestions.map((suggestion) => {
+                  const key = `${suggestion.fromUserId}-${suggestion.recipients.map((r) => r.toUserId).join('-')}`
                   return (
                     <div
                       key={key}
                       className="flex flex-col gap-2 rounded-xl border border-stone-200 bg-white px-4 py-3 sm:flex-row sm:items-center sm:justify-between"
                     >
-                      <div className="flex flex-wrap items-center gap-2 text-sm">
-                        <span className="font-medium text-stone-800">{s.fromName}</span>
-                        <ArrowRight className="size-3.5 text-stone-400" />
-                        <span className="font-medium text-stone-800">{s.toName}</span>
-                        <span className="font-semibold text-teal-800">
-                          {formatCurrency(s.amount, balanceSummary.currency)}
-                        </span>
+                      <div className="space-y-1 text-sm">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="font-medium text-stone-800">{suggestion.fromName}</span>
+                          <ArrowRight className="size-3.5 text-stone-400" />
+                          <span className="font-medium text-stone-800">
+                            {suggestion.recipients.length === 1
+                              ? suggestion.recipients[0].toName
+                              : `${suggestion.recipients.length} people`}
+                          </span>
+                          <span className="font-semibold text-teal-800">
+                            {formatCurrency(suggestion.totalAmount, balanceSummary.currency)}
+                          </span>
+                        </div>
+                        {suggestion.recipients.length > 1 && (
+                          <div className="space-y-0.5 pl-0.5">
+                            {suggestion.recipients.map((recipient) => (
+                              <p key={recipient.toUserId} className="text-xs text-stone-500">
+                                • {recipient.toName} {formatCurrency(recipient.amount, balanceSummary.currency)}
+                              </p>
+                            ))}
+                          </div>
+                        )}
                       </div>
                       <Button
                         variant="success"
@@ -715,11 +731,10 @@ export function GroupDetailPage() {
                         type="button"
                         onClick={() =>
                           setRecordSettlement({
-                            fromUserId: s.fromUserId,
-                            toUserId: s.toUserId,
-                            amount: s.amount,
-                            fromName: s.fromName,
-                            toName: s.toName,
+                            fromUserId: suggestion.fromUserId,
+                            totalAmount: suggestion.totalAmount,
+                            fromName: suggestion.fromName,
+                            recipients: suggestion.recipients,
                           })
                         }
                       >
@@ -882,11 +897,44 @@ export function GroupDetailPage() {
           groupId={groupId}
           currency={group.currency}
           fromUserId={recordSettlement.fromUserId}
-          toUserId={recordSettlement.toUserId}
-          defaultAmount={recordSettlement.amount}
+          toUserId={recordSettlement.recipients[0]?.toUserId ?? recordSettlement.fromUserId}
+          defaultAmount={recordSettlement.totalAmount}
           fromName={recordSettlement.fromName}
-          toName={recordSettlement.toName}
+          toName={
+            recordSettlement.recipients.length === 1
+              ? recordSettlement.recipients[0].toName
+              : `${recordSettlement.recipients.length} people`
+          }
           markedBy={userId}
+          helperLines={recordSettlement.recipients.map(
+            (recipient) => `${recipient.toName}: ${formatCurrency(recipient.amount, group.currency)}`,
+          )}
+          onSubmit={async ({ label }) => {
+            if (recordSettlement.recipients.length <= 1) {
+              const recipient = recordSettlement.recipients[0]
+              if (!recipient) return
+              await createSettlement(
+                groupId,
+                recordSettlement.fromUserId,
+                recipient.toUserId,
+                recipient.amount,
+                group.currency,
+                userId,
+                label,
+                null,
+              )
+              return
+            }
+            await createBundledGroupSettlement({
+              groupId,
+              fromUserId: recordSettlement.fromUserId,
+              recipients: recordSettlement.recipients,
+              currency: group.currency,
+              markedBy: userId,
+              label,
+            })
+          }}
+          confirmLabel="Record payment"
           onRecorded={() => void refreshBalances()}
         />
       )}

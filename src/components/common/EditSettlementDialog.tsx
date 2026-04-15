@@ -3,13 +3,19 @@ import { ArrowRight, Trash2, X } from 'lucide-react'
 import { useLiveQuery } from 'dexie-react-hooks'
 import { toast } from 'sonner'
 import { db } from '@/db/db'
-import { updateSettlement, deleteSettlement } from '@/db/operations'
+import {
+  deleteBundledPayment,
+  deleteSettlement,
+  updateBundledPaymentLabel,
+  updateSettlement,
+} from '@/db/operations'
 import type { SettlementHistoryItem } from '@/lib/settlement'
 import { useCurrentUser } from '@/hooks/useCurrentUser'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { ConfirmDialog } from '@/components/common/ConfirmDialog'
 import { normalizeAmountInput, stripLeadingZerosAmount } from '@/lib/amount-input'
+import { formatCurrency } from '@/lib/utils'
 
 export function EditSettlementDialog({
   item,
@@ -45,21 +51,25 @@ export function EditSettlementDialog({
 
   async function handleSave() {
     if (!userId) return
-    const amount = parseFloat(amountStr.replace(',', '.'))
-    if (!Number.isFinite(amount) || amount <= 0) return
     setSaving(true)
     try {
-      await updateSettlement(
-        item.id,
-        {
-          fromUserId: item.fromUserId,
-          toUserId: item.toUserId,
-          amount,
-          currency: item.currency,
-          label: label.trim(),
-        },
-        userId,
-      )
+      if (item.isBundled && item.bundleId) {
+        await updateBundledPaymentLabel(item.bundleId, { label: label.trim() }, userId)
+      } else {
+        const amount = parseFloat(amountStr.replace(',', '.'))
+        if (!Number.isFinite(amount) || amount <= 0) return
+        await updateSettlement(
+          item.id,
+          {
+            fromUserId: item.fromUserId,
+            toUserId: item.toUserId,
+            amount,
+            currency: item.currency,
+            label: label.trim(),
+          },
+          userId,
+        )
+      }
       onSaved()
       onClose()
     } catch (error) {
@@ -74,7 +84,11 @@ export function EditSettlementDialog({
     if (!userId) return
     setDeleting(true)
     try {
-      await deleteSettlement(item.id, userId)
+      if (item.isBundled && item.bundleId) {
+        await deleteBundledPayment(item.bundleId, userId)
+      } else {
+        await deleteSettlement(item.id, userId)
+      }
       onSaved()
       onClose()
     } catch (error) {
@@ -112,25 +126,37 @@ export function EditSettlementDialog({
             </div>
             <p className="mt-1 text-xs text-stone-400">Payer and receiver are fixed when editing.</p>
           </div>
-          <div className="flex flex-col gap-2">
-            <label htmlFor="edit-settlement-amount" className="text-sm font-medium text-stone-800">
-              Amount ({item.currency})
-            </label>
-            <Input
-              id="edit-settlement-amount"
-              type="text"
-              inputMode="decimal"
-              value={amountStr}
-              onChange={(e) => setAmountStr(normalizeAmountInput(e.target.value))}
-              onBlur={() =>
-                setAmountStr((s) => {
-                  const next = stripLeadingZerosAmount(s)
-                  return next === s ? s : next
-                })
-              }
-              className="rounded-lg"
-            />
-          </div>
+          {item.isBundled ? (
+            <div className="rounded-xl border border-stone-200 bg-stone-50 px-4 py-3">
+              <p className="text-xs font-medium text-stone-500">Amount ({item.currency})</p>
+              <p className="mt-1 text-lg font-semibold text-teal-800">
+                {formatCurrency(item.amount, item.currency)}
+              </p>
+              <p className="mt-1 text-xs text-stone-500">
+                Bundled payments keep amounts fixed. You can edit the label or remove the full payment.
+              </p>
+            </div>
+          ) : (
+            <div className="flex flex-col gap-2">
+              <label htmlFor="edit-settlement-amount" className="text-sm font-medium text-stone-800">
+                Amount ({item.currency})
+              </label>
+              <Input
+                id="edit-settlement-amount"
+                type="text"
+                inputMode="decimal"
+                value={amountStr}
+                onChange={(e) => setAmountStr(normalizeAmountInput(e.target.value))}
+                onBlur={() =>
+                  setAmountStr((s) => {
+                    const next = stripLeadingZerosAmount(s)
+                    return next === s ? s : next
+                  })
+                }
+                className="rounded-lg"
+              />
+            </div>
+          )}
 
           <div className="flex flex-col gap-2">
             <label htmlFor="edit-settlement-label" className="text-sm font-medium text-stone-800">
@@ -161,7 +187,7 @@ export function EditSettlementDialog({
             <Button
               className="order-1 w-full rounded-xl sm:order-2 sm:min-w-32"
               onClick={handleSave}
-              disabled={!userId || saving || deleting || invalidAmount}
+              disabled={!userId || saving || deleting || (!item.isBundled && invalidAmount)}
             >
               {saving ? 'Saving…' : 'Save'}
             </Button>
@@ -174,7 +200,11 @@ export function EditSettlementDialog({
       open={removeConfirmOpen}
       onOpenChange={setRemoveConfirmOpen}
       title="Remove this payment?"
-      description="Balances will update to match. You can record a new payment if needed."
+      description={
+        item.isBundled
+          ? 'This removes the whole bundled payment and all included recipient payments.'
+          : 'Balances will update to match. You can record a new payment if needed.'
+      }
       confirmLabel="Remove"
       variant="danger"
       onConfirm={executeRemove}

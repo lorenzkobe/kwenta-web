@@ -870,6 +870,9 @@ export async function listPairwiseSettlementsBetween(
     ])
     items.push({
       id: s.id,
+      settlementIds: [s.id],
+      bundleId: s.bundle_id ?? null,
+      isBundled: false,
       groupId: s.group_id,
       groupName,
       fromUserId: s.from_user_id,
@@ -880,6 +883,13 @@ export async function listPairwiseSettlementsBetween(
       currency: s.currency,
       label: s.label ?? '',
       createdAt: s.created_at,
+      recipients: [
+        {
+          toUserId: s.to_user_id,
+          toName: toP?.display_name ?? 'Someone',
+          amount: s.amount,
+        },
+      ],
     })
   }
   items.sort((a, b) => b.createdAt.localeCompare(a.createdAt))

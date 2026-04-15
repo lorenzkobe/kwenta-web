@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo } from 'react'
-import { ArrowRight, Check, History, Loader2, Scale, User, Users } from 'lucide-react'
+import { Check, History, Loader2, Scale, User, Users } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { useCurrentUser } from '@/hooks/useCurrentUser'
 import {
@@ -11,7 +11,6 @@ import { computePersonalNetRollup, getPersonalBalanceContactRows } from '@/lib/p
 import { useUserSettlementHistory } from '@/db/hooks'
 import { SettlementHistoryList } from '@/components/common/SettlementHistoryList'
 import { EditSettlementDialog } from '@/components/common/EditSettlementDialog'
-import { RecordSettlementDialog } from '@/components/common/RecordSettlementDialog'
 import { formatCurrency, cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 
@@ -42,15 +41,6 @@ export function BalancesPage() {
   >([])
   const [loading, setLoading] = useState(true)
   const [editingSettlement, setEditingSettlement] = useState<SettlementHistoryItem | null>(null)
-  const [recordSettlement, setRecordSettlement] = useState<{
-    groupId: string
-    currency: string
-    fromUserId: string
-    toUserId: string
-    amount: number
-    fromName: string
-    toName: string
-  } | null>(null)
   const userSettlementHistory = useUserSettlementHistory(userId ?? undefined)
 
   const reloadSummaries = useCallback(async () => {
@@ -383,54 +373,6 @@ export function BalancesPage() {
               </div>
             </div>
 
-            {summary.suggestions.length > 0 && (
-              <div className="mt-4">
-                <p className="text-xs font-medium text-stone-400">
-                  Suggested payments
-                </p>
-                <div className="mt-2 space-y-2">
-                  {summary.suggestions.map((s) => {
-                    const key = `${s.fromUserId}-${s.toUserId}`
-                    return (
-                      <div
-                        key={key}
-                        className="flex items-center justify-between rounded-xl border border-stone-200 bg-stone-100/60 px-4 py-3"
-                      >
-                        <div className="flex items-center gap-2 text-sm">
-                          <span className="font-medium text-stone-800">{s.fromName}</span>
-                          <ArrowRight className="size-3.5 text-stone-400" />
-                          <span className="font-medium text-stone-800">{s.toName}</span>
-                          <span className="font-semibold text-teal-800">
-                            {formatCurrency(s.amount, summary.currency)}
-                          </span>
-                        </div>
-                        <Button
-                          variant="success"
-                          size="xs"
-                          className="rounded-lg"
-                          type="button"
-                          onClick={() =>
-                            setRecordSettlement({
-                              groupId: summary.groupId,
-                              currency: summary.currency,
-                              fromUserId: s.fromUserId,
-                              toUserId: s.toUserId,
-                              amount: s.amount,
-                              fromName: s.fromName,
-                              toName: s.toName,
-                            })
-                          }
-                        >
-                          <Check className="size-3" />
-                          Pay
-                        </Button>
-                      </div>
-                    )
-                  })}
-                </div>
-              </div>
-            )}
-
             {groupPaymentHistory.length > 0 && (
               <div className="mt-4 border-t border-stone-100 pt-4">
                 <div className="flex items-center gap-2">
@@ -458,24 +400,6 @@ export function BalancesPage() {
           onSaved={() => {
             void reloadSummaries()
           }}
-        />
-      )}
-
-      {recordSettlement && userId && (
-        <RecordSettlementDialog
-          open
-          onOpenChange={(o) => {
-            if (!o) setRecordSettlement(null)
-          }}
-          groupId={recordSettlement.groupId}
-          currency={recordSettlement.currency}
-          fromUserId={recordSettlement.fromUserId}
-          toUserId={recordSettlement.toUserId}
-          defaultAmount={recordSettlement.amount}
-          fromName={recordSettlement.fromName}
-          toName={recordSettlement.toName}
-          markedBy={userId}
-          onRecorded={() => void reloadSummaries()}
         />
       )}
     </div>

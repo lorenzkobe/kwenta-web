@@ -4,6 +4,21 @@ import { cn, formatCurrency } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 
 function describePayment(h: SettlementHistoryItem, currentUserId: string | null | undefined) {
+  if (h.isBundled) {
+    const recipientCount = h.recipients.length
+    const currentUserIsRecipient = Boolean(
+      currentUserId && h.recipients.some((recipient) => recipient.toUserId === currentUserId),
+    )
+    if (currentUserId && h.fromUserId === currentUserId) {
+      return recipientCount === 1
+        ? `You paid ${h.recipients[0]?.toName ?? h.toName}`
+        : `You paid ${recipientCount} people`
+    }
+    if (currentUserIsRecipient) {
+      return recipientCount === 1 ? `${h.fromName} paid you` : `${h.fromName} paid you and others`
+    }
+    return recipientCount === 1 ? `${h.fromName} paid ${h.toName}` : `${h.fromName} paid ${recipientCount} people`
+  }
   if (currentUserId && h.toUserId === currentUserId) return `${h.fromName} paid you`
   if (currentUserId && h.fromUserId === currentUserId) return `You paid ${h.toName}`
   return `${h.fromName} paid ${h.toName}`
@@ -53,6 +68,15 @@ export function SettlementHistoryList({
                 )}
                 {h.label.trim() !== '' && (
                   <p className="mt-0.5 text-xs font-medium text-stone-600">{h.label}</p>
+                )}
+                {h.isBundled && h.recipients.length > 1 && (
+                  <div className="mt-1 space-y-0.5">
+                    {h.recipients.map((recipient) => (
+                      <p key={recipient.toUserId} className="text-xs text-stone-500">
+                        • {recipient.toName} {formatCurrency(recipient.amount, h.currency)}
+                      </p>
+                    ))}
+                  </div>
                 )}
                 <p className="text-xs text-stone-400">
                   {new Date(h.createdAt).toLocaleString(undefined, {

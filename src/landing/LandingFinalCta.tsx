@@ -10,22 +10,32 @@ export function LandingFinalCta() {
           <div className="grid gap-10 lg:grid-cols-[1.2fr_1fr] lg:items-center">
             <div>
               <h2 className="font-display text-3xl font-semibold tracking-tight sm:text-4xl">
-                Stop guessing who should pay what.
+                Ready to make shared spending simpler?
               </h2>
               <p className="mt-4 text-base leading-relaxed text-stone-300">
-                Sign in to use Kwenta on this device, sync with your account, and keep a backup in the
-                cloud. Work offline anytime; upload when you’re connected.
+                Kwenta helps you split with confidence now, then scale into saved history and collaborative
+                group tracking when you sign in.
               </p>
-              <Button
-                asChild
-                size="lg"
-                className="mt-8 rounded-full bg-white px-8 text-stone-900 hover:bg-stone-100"
-              >
+              <div className="mt-8 flex flex-wrap gap-3">
+                <Button
+                  asChild
+                  size="lg"
+                  variant="outline"
+                  className="rounded-full border-white/40 !bg-transparent px-8 !text-white hover:!bg-white/10"
+                >
+                  <a href="#demo">Explore the experience</a>
+                </Button>
+                <Button
+                  asChild
+                  size="lg"
+                  className="rounded-full bg-white px-8 text-stone-900 hover:bg-stone-100"
+                >
                 <Link to="/login">
-                  Sign in to Kwenta
+                  Sign in to save everything
                   <ArrowRight className="size-4" />
                 </Link>
-              </Button>
+                </Button>
+              </div>
             </div>
 
             <div className="grid gap-3 sm:grid-cols-3 lg:grid-cols-1 lg:gap-4">

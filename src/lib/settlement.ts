@@ -1,4 +1,5 @@
 import { db } from '@/db/db'
+import type { Settlement } from '@/types'
 
 export interface BalanceEntry {
   userId: string
@@ -16,12 +17,26 @@ export interface SettlementSuggestion {
   amount: number
 }
 
+export interface BundledSuggestionRecipient {
+  toUserId: string
+  toName: string
+  amount: number
+}
+
+export interface BundledSettlementSuggestion {
+  fromUserId: string
+  fromName: string
+  totalAmount: number
+  recipients: BundledSuggestionRecipient[]
+}
+
 export interface GroupBalanceSummary {
   groupId: string
   groupName: string
   currency: string
   balances: BalanceEntry[]
   suggestions: SettlementSuggestion[]
+  groupedSuggestions: BundledSettlementSuggestion[]
   /** Positive net for you in this group: amount you should receive */
   totalToReceive: number
   /** Magnitude of negative net for you in this group: amount you should pay */
@@ -104,6 +119,7 @@ export async function computeGroupBalances(
   }
 
   const suggestions = optimizeSettlements(balances, profileMap)
+  const groupedSuggestions = groupSuggestionsByPayer(suggestions, profileMap)
 
   return {
     groupId,
@@ -111,6 +127,7 @@ export async function computeGroupBalances(
     currency: group.currency,
     balances,
     suggestions,
+    groupedSuggestions,
     totalToReceive,
     totalToPay,
   }
@@ -167,6 +184,31 @@ function optimizeSettlements(
   return suggestions
 }
 
+function groupSuggestionsByPayer(
+  suggestions: SettlementSuggestion[],
+  nameMap: Map<string, string>,
+): BundledSettlementSuggestion[] {
+  const grouped = new Map<string, BundledSettlementSuggestion>()
+  for (const s of suggestions) {
+    const existing = grouped.get(s.fromUserId)
+    if (!existing) {
+      grouped.set(s.fromUserId, {
+        fromUserId: s.fromUserId,
+        fromName: nameMap.get(s.fromUserId) ?? s.fromName,
+        totalAmount: s.amount,
+        recipients: [{ toUserId: s.toUserId, toName: s.toName, amount: s.amount }],
+      })
+      continue
+    }
+    existing.totalAmount = Math.round((existing.totalAmount + s.amount) * 100) / 100
+    existing.recipients.push({ toUserId: s.toUserId, toName: s.toName, amount: s.amount })
+  }
+  for (const value of grouped.values()) {
+    value.recipients.sort((a, b) => b.amount - a.amount)
+  }
+  return [...grouped.values()].sort((a, b) => b.totalAmount - a.totalAmount)
+}
+
 export async function computeAllGroupBalances(
   userId: string,
 ): Promise<GroupBalanceSummary[]> {
@@ -185,6 +227,9 @@ export async function computeAllGroupBalances(
 /** Recorded cash/settle events for display (already applied in balance math). */
 export interface SettlementHistoryItem {
   id: string
+  settlementIds: string[]
+  bundleId: string | null
+  isBundled: boolean
   /** Null for personal (non-group) payments */
   groupId: string | null
   /** Set when listing across groups (e.g. home / balances). */
@@ -201,38 +246,95 @@ export interface SettlementHistoryItem {
   /** Optional note (e.g. "Cash", "Dinner") — scoped to the group but shown in global lists too */
   label: string
   createdAt: string
+  recipients: BundledSuggestionRecipient[]
+}
+
+type ActiveSettlementRow = Settlement
+
+async function buildSettlementHistoryItem(
+  rows: ActiveSettlementRow[],
+  groupId: string | null,
+  groupName?: string,
+): Promise<SettlementHistoryItem | null> {
+  const activeRows = rows.filter((s) => !s.is_deleted && s.is_settled)
+  if (activeRows.length === 0) return null
+
+  const sortedRows = [...activeRows].sort((a, b) => b.created_at.localeCompare(a.created_at))
+  const primary = sortedRows[0]
+  const fromProfile = await db.profiles.get(primary.from_user_id)
+
+  const recipientMap = new Map<string, BundledSuggestionRecipient>()
+  for (const row of sortedRows) {
+    const existing = recipientMap.get(row.to_user_id)
+    if (existing) {
+      existing.amount = Math.round((existing.amount + row.amount) * 100) / 100
+      continue
+    }
+    const toProfile = await db.profiles.get(row.to_user_id)
+    recipientMap.set(row.to_user_id, {
+      toUserId: row.to_user_id,
+      toName: toProfile?.display_name ?? 'Someone',
+      amount: row.amount,
+    })
+  }
+
+  const recipients = [...recipientMap.values()].sort((a, b) => b.amount - a.amount)
+  const billId = sortedRows.every((row) => row.bill_id === primary.bill_id) ? primary.bill_id : null
+  const billRow = billId ? await db.bills.get(billId) : null
+  const label = sortedRows.find((row) => row.label.trim() !== '')?.label ?? primary.label ?? ''
+  const isBundled = Boolean(primary.bundle_id) && recipients.length > 1
+
+  return {
+    id: isBundled ? (primary.bundle_id ?? primary.id) : primary.id,
+    settlementIds: sortedRows.map((row) => row.id),
+    bundleId: isBundled ? (primary.bundle_id ?? null) : null,
+    isBundled,
+    groupId,
+    groupName,
+    billId: billId ?? null,
+    billTitle: billRow && !billRow.is_deleted ? billRow.title : null,
+    fromUserId: primary.from_user_id,
+    toUserId: recipients[0]?.toUserId ?? primary.to_user_id,
+    fromName: fromProfile?.display_name ?? 'Someone',
+    toName: recipients[0]?.toName ?? 'Someone',
+    amount: Math.round(recipients.reduce((sum, recipient) => sum + recipient.amount, 0) * 100) / 100,
+    currency: primary.currency,
+    label,
+    createdAt: primary.created_at,
+    recipients,
+  }
+}
+
+async function buildHistoryItemsFromRows(
+  rows: ActiveSettlementRow[],
+  groupId: string | null,
+  groupName?: string,
+): Promise<SettlementHistoryItem[]> {
+  const groups = new Map<string, ActiveSettlementRow[]>()
+  for (const row of rows) {
+    const key = row.bundle_id ?? row.id
+    const existing = groups.get(key) ?? []
+    existing.push(row)
+    groups.set(key, existing)
+  }
+
+  const items: SettlementHistoryItem[] = []
+  for (const groupedRows of groups.values()) {
+    const item = await buildSettlementHistoryItem(groupedRows, groupId, groupName)
+    if (item) items.push(item)
+  }
+  items.sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+  return items
 }
 
 export async function listSettlementHistoryForGroup(
   groupId: string,
 ): Promise<SettlementHistoryItem[]> {
   const settlements = await db.settlements.where('group_id').equals(groupId).toArray()
-  const active = settlements.filter((s) => !s.is_deleted && s.is_settled)
-  active.sort((a, b) => b.created_at.localeCompare(a.created_at))
-
-  const items: SettlementHistoryItem[] = []
-  for (const s of active) {
-    const [fromP, toP] = await Promise.all([
-      db.profiles.get(s.from_user_id),
-      db.profiles.get(s.to_user_id),
-    ])
-    const billRow = s.bill_id ? await db.bills.get(s.bill_id) : null
-    items.push({
-      id: s.id,
-      groupId: groupId,
-      billId: s.bill_id ?? null,
-      billTitle: billRow && !billRow.is_deleted ? billRow.title : null,
-      fromUserId: s.from_user_id,
-      toUserId: s.to_user_id,
-      fromName: fromP?.display_name ?? 'Someone',
-      toName: toP?.display_name ?? 'Someone',
-      amount: s.amount,
-      currency: s.currency,
-      label: s.label ?? '',
-      createdAt: s.created_at,
-    })
-  }
-  return items
+  const active = settlements
+    .filter((s) => !s.is_deleted && s.is_settled)
+    .sort((a, b) => b.created_at.localeCompare(a.created_at))
+  return buildHistoryItemsFromRows(active, groupId)
 }
 
 /** All recorded settlements in groups the user belongs to (newest first). */
@@ -258,28 +360,8 @@ export async function listSettlementHistoryForUser(
       s.group_id === null &&
       (s.from_user_id === userId || s.to_user_id === userId),
   )
-  for (const s of personal) {
-    const [fromP, toP] = await Promise.all([
-      db.profiles.get(s.from_user_id),
-      db.profiles.get(s.to_user_id),
-    ])
-    const billRow = s.bill_id ? await db.bills.get(s.bill_id) : null
-    out.push({
-      id: s.id,
-      groupId: null,
-      groupName: 'Personal',
-      billId: s.bill_id ?? null,
-      billTitle: billRow && !billRow.is_deleted ? billRow.title : null,
-      fromUserId: s.from_user_id,
-      toUserId: s.to_user_id,
-      fromName: fromP?.display_name ?? 'Someone',
-      toName: toP?.display_name ?? 'Someone',
-      amount: s.amount,
-      currency: s.currency,
-      label: s.label ?? '',
-      createdAt: s.created_at,
-    })
-  }
+  const personalItems = await buildHistoryItemsFromRows(personal, null, 'Personal')
+  out.push(...personalItems)
 
   out.sort((a, b) => b.createdAt.localeCompare(a.createdAt))
   return out

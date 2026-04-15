@@ -954,6 +954,7 @@ export async function createSettlement(
       ...syncFields({ id: settlementId }),
       group_id: groupId,
       bill_id: billId ?? null,
+      bundle_id: null,
       from_user_id: resolvedFromUserId,
       to_user_id: resolvedToUserId,
       amount,
@@ -1017,6 +1018,120 @@ export async function createSettlement(
     })
   }
   return settlementId
+}
+
+export async function createBundledGroupSettlement(params: {
+  groupId: string
+  fromUserId: string
+  recipients: { toUserId: string; amount: number }[]
+  currency: string
+  markedBy: string
+  label?: string
+}): Promise<{ bundleId: string; settlementIds: string[] }> {
+  const cleanedRecipients = params.recipients
+    .map((recipient) => ({
+      ...recipient,
+      amount: Math.round(recipient.amount * 100) / 100,
+    }))
+    .filter((recipient) => recipient.amount > 0.005)
+  if (cleanedRecipients.length === 0) {
+    throw new Error('No payment recipients found for this bundled payment.')
+  }
+
+  const group = await db.groups.get(params.groupId)
+  if (!group || group.is_deleted) throw new Error('Group not found')
+
+  const bundleId = generateId()
+  const settlementIds = cleanedRecipients.map(() => generateId())
+  const [resolvedFromUserId, resolvedRecipients] = await Promise.all([
+    resolveSettlementPartyId(params.fromUserId),
+    Promise.all(
+      cleanedRecipients.map(async (recipient) => ({
+        toUserId: await resolveSettlementPartyId(recipient.toUserId),
+        amount: recipient.amount,
+      })),
+    ),
+  ])
+  const labelTrim = (params.label ?? '').trim()
+
+  await db.transaction('rw', [db.settlements, db.activity_log, db.profiles], async () => {
+    for (let i = 0; i < resolvedRecipients.length; i++) {
+      const recipient = resolvedRecipients[i]
+      await db.settlements.add({
+        ...syncFields({ id: settlementIds[i] }),
+        group_id: params.groupId,
+        bill_id: null,
+        bundle_id: bundleId,
+        from_user_id: resolvedFromUserId,
+        to_user_id: recipient.toUserId,
+        amount: recipient.amount,
+        currency: params.currency,
+        label: labelTrim,
+        is_settled: true,
+      })
+    }
+
+    const fromProfile =
+      (await db.profiles.get(resolvedFromUserId)) ?? (await db.profiles.get(params.fromUserId))
+    const detailParts: string[] = []
+    for (const recipient of resolvedRecipients) {
+      const toProfile = await db.profiles.get(recipient.toUserId)
+      detailParts.push(
+        `${toProfile?.display_name ?? 'Someone'} ${new Intl.NumberFormat('en-PH', {
+          style: 'currency',
+          currency: params.currency,
+          minimumFractionDigits: 0,
+        }).format(recipient.amount)}`,
+      )
+    }
+    const labelSuffix = labelTrim ? ` · ${labelTrim}` : ''
+    await db.activity_log.add({
+      ...syncFields(),
+      group_id: params.groupId,
+      user_id: params.markedBy,
+      action: 'settled',
+      entity_type: 'settlement',
+      entity_id: bundleId,
+      description: `${fromProfile?.display_name ?? 'Someone'} paid ${detailParts.join(', ')}${labelSuffix}`,
+    })
+  })
+
+  const actor = await db.profiles.get(params.markedBy)
+  const fromProfile = (await db.profiles.get(resolvedFromUserId)) ?? (await db.profiles.get(params.fromUserId))
+  for (let i = 0; i < resolvedRecipients.length; i++) {
+    const recipient = resolvedRecipients[i]
+    const toProfile = await db.profiles.get(recipient.toUserId)
+    const recipientId = await resolveRecipientProfileIdForNotify(recipient.toUserId)
+    if (!recipientId || recipientId === params.markedBy) continue
+    void notifyPaymentRecorded({
+      actorId: params.markedBy,
+      actorName: actor?.display_name?.trim() || 'Someone',
+      recipientId,
+      amount: recipient.amount,
+      currency: params.currency,
+      fromName: fromProfile?.display_name?.trim() || 'Someone',
+      toName: toProfile?.display_name?.trim() || 'Someone',
+      groupId: params.groupId,
+      groupName: group.name,
+      settlementId: settlementIds[i],
+    })
+  }
+
+  await notifySyncAfterMutation({
+    actorUserId: params.markedBy,
+    operation: 'create_settlement_bundle',
+    entityType: 'settlement',
+    entityId: bundleId,
+    payload: {
+      groupId: params.groupId,
+      recipients: resolvedRecipients.length,
+      totalAmount: Math.round(resolvedRecipients.reduce((sum, recipient) => sum + recipient.amount, 0) * 100) / 100,
+      currency: params.currency,
+    },
+    routeHint: `/app/groups/${params.groupId}`,
+  })
+
+  return { bundleId, settlementIds }
 }
 
 export interface DistributedSettlementSlice {
@@ -1298,6 +1413,50 @@ export async function updateSettlement(
   })
 }
 
+export async function updateBundledPaymentLabel(
+  bundleId: string,
+  patch: { label: string },
+  editorUserId: string,
+): Promise<void> {
+  const rows = await db.settlements.where('bundle_id').equals(bundleId).toArray()
+  const activeRows = rows.filter((row) => !row.is_deleted)
+  if (activeRows.length === 0) return
+
+  const timestamp = now()
+  const labelTrim = patch.label.trim()
+  const first = activeRows[0]
+
+  await db.transaction('rw', [db.settlements, db.activity_log, db.profiles], async () => {
+    for (const row of activeRows) {
+      await db.settlements.update(row.id, {
+        label: labelTrim,
+        updated_at: timestamp,
+        synced_at: null,
+      })
+    }
+
+    const fromProfile = await db.profiles.get(first.from_user_id)
+    await db.activity_log.add({
+      ...syncFields(),
+      group_id: first.group_id,
+      user_id: editorUserId,
+      action: 'updated',
+      entity_type: 'settlement',
+      entity_id: bundleId,
+      description: `Updated bundled payment label for ${fromProfile?.display_name ?? 'Someone'}`,
+    })
+  })
+
+  await notifySyncAfterMutation({
+    actorUserId: editorUserId,
+    operation: 'update_settlement_bundle_label',
+    entityType: 'settlement',
+    entityId: bundleId,
+    payload: { bundleId, label: labelTrim },
+    routeHint: first.group_id ? `/app/groups/${first.group_id}` : '/app/settings',
+  })
+}
+
 export async function deleteSettlement(settlementId: string, editorUserId: string): Promise<void> {
   const s = await db.settlements.get(settlementId)
   if (!s || s.is_deleted) return
@@ -1331,6 +1490,44 @@ export async function deleteSettlement(settlementId: string, editorUserId: strin
     entityId: settlementId,
     payload: { groupId: s.group_id },
     routeHint: s.group_id ? `/app/groups/${s.group_id}` : '/app/settings',
+  })
+}
+
+export async function deleteBundledPayment(bundleId: string, editorUserId: string): Promise<void> {
+  const rows = await db.settlements.where('bundle_id').equals(bundleId).toArray()
+  const activeRows = rows.filter((row) => !row.is_deleted)
+  if (activeRows.length === 0) return
+
+  const timestamp = now()
+  const first = activeRows[0]
+  await db.transaction('rw', [db.settlements, db.activity_log, db.profiles], async () => {
+    for (const row of activeRows) {
+      await db.settlements.update(row.id, {
+        is_deleted: true,
+        updated_at: timestamp,
+        synced_at: null,
+      })
+    }
+
+    const fromProfile = await db.profiles.get(first.from_user_id)
+    await db.activity_log.add({
+      ...syncFields(),
+      group_id: first.group_id,
+      user_id: editorUserId,
+      action: 'deleted',
+      entity_type: 'settlement',
+      entity_id: bundleId,
+      description: `Removed bundled payment from ${fromProfile?.display_name ?? 'Someone'}`,
+    })
+  })
+
+  await notifySyncAfterMutation({
+    actorUserId: editorUserId,
+    operation: 'delete_settlement_bundle',
+    entityType: 'settlement',
+    entityId: bundleId,
+    payload: { bundleId, settlementIds: activeRows.map((row) => row.id), groupId: first.group_id },
+    routeHint: first.group_id ? `/app/groups/${first.group_id}` : '/app/settings',
   })
 }
 

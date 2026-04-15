@@ -3,10 +3,10 @@ import { Wallet } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 
 const nav = [
-  { href: '#demo', label: 'Demo' },
+  { href: '#demo', label: 'Experience' },
   { href: '#features', label: 'Features' },
   { href: '#how-it-works', label: 'How it works' },
-  { href: '#offline', label: 'Sync' },
+  { href: '#benefits', label: 'Why sign in' },
 ] as const
 
 export function LandingHeader() {
@@ -34,7 +34,7 @@ export function LandingHeader() {
 
         <div className="flex shrink-0 items-center gap-2">
           <Button variant="ghost" size="sm" className="rounded-full text-stone-700 md:hidden" asChild>
-            <a href="#demo">Demo</a>
+            <a href="#demo">Explore</a>
           </Button>
           <Button size="sm" className="rounded-full bg-teal-800 px-4 hover:bg-teal-900" asChild>
             <Link to="/login">Sign in</Link>

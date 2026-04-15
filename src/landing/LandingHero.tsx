@@ -3,10 +3,10 @@ import { ArrowRight, Check } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 
 const trustPoints = [
-  'Item-level or whole-bill splits',
-  'Built for groups, trips, roommates',
-  'Works offline; syncs when you’re back online',
-  'Sign in to back up and use across devices',
+  'Split one total or itemized lines with clarity',
+  'Flexible split types for real-world shared spending',
+  'Designed for personal ledgers and group collaboration',
+  'Sign in to save history, sync devices, and manage groups',
 ] as const
 
 export function LandingHero() {
@@ -18,16 +18,16 @@ export function LandingHero() {
       <div className="relative mx-auto max-w-7xl px-4 py-14 sm:px-6 sm:py-20 lg:px-8 lg:py-24">
         <div className="max-w-3xl">
           <p className="inline-flex items-center rounded-full border border-stone-200 bg-white/80 px-4 py-1.5 text-sm font-medium text-stone-700 shadow-sm">
-            Bill splitting without the spreadsheet headache
+            Fair, flexible expense splitting
           </p>
 
           <h1 className="font-display mt-6 text-4xl font-semibold tracking-tight text-stone-900 sm:text-5xl lg:text-[3.25rem] lg:leading-[1.1]">
-            Split shared expenses with clarity—on your phone, on the web, even when signal drops.
+            Split shared expenses with confidence, from quick personal spend to full group tracking.
           </h1>
 
           <p className="mt-6 max-w-2xl text-lg leading-relaxed text-stone-600">
-            Kwenta tracks who ordered what, who shares each line, and who should settle up. Save work
-            locally first, then let your account sync it when you’re online.
+            Kwenta keeps every bill clear: set titles, currencies, split styles, and participants in seconds.
+            Stay lightweight for quick splits, then unlock saved history and collaboration when you sign in.
           </p>
 
           <p className="mt-4 max-w-2xl text-base leading-relaxed text-stone-700">
@@ -43,13 +43,13 @@ export function LandingHero() {
               size="lg"
               className="rounded-full bg-teal-800 px-7 text-base hover:bg-teal-900"
             >
-              <Link to="/login">
-                Sign in to Kwenta
+              <a href="#demo">
+                Explore the experience
                 <ArrowRight className="size-4" />
-              </Link>
+              </a>
             </Button>
             <Button asChild size="lg" variant="outline" className="rounded-full border-stone-300 px-7 text-base">
-              <a href="#demo">Play with the demo</a>
+              <Link to="/login">Sign in to save and use groups</Link>
             </Button>
           </div>
 

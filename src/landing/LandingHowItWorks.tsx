@@ -1,18 +1,18 @@
 const howItWorks = [
   {
-    title: 'Add the bill',
+    title: 'Create the bill',
     description:
-      'One total or multiple line items—match how people actually ordered or what was shared.',
+      'Start with a title and currency, then choose simple total or detailed line items.',
   },
   {
-    title: 'Assign shares',
+    title: 'Set splits your way',
     description:
-      'Pick who is on each line and how it splits so partial sharing stays easy to track.',
+      'Pick who is included and choose equal, percentage, or custom split types per bill or per item.',
   },
   {
-    title: 'Review balances',
+    title: 'Track what happens next',
     description:
-      'See who should pay whom and record settlements when money moves—locally first, synced when you’re signed in.',
+      'Review balances, record settlements, and keep your shared spending history organized over time.',
   },
 ] as const
 
@@ -23,7 +23,7 @@ export function LandingHowItWorks() {
         <div className="max-w-3xl">
           <p className="text-sm font-semibold tracking-wide text-teal-800">How it works</p>
           <h2 className="font-display mt-2 text-3xl font-semibold tracking-tight text-stone-900 sm:text-4xl">
-            Simple on the surface, flexible underneath.
+            Built for the full bill-splitting journey.
           </h2>
         </div>
 

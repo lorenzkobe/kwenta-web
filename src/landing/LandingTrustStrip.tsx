@@ -1,10 +1,10 @@
-import { ReceiptText, RefreshCcw, Users, WifiOff } from 'lucide-react'
+import { CreditCard, ReceiptText, SplitSquareHorizontal, Users } from 'lucide-react'
 
 const items = [
-  { icon: ReceiptText, label: 'Split by item or total' },
-  { icon: Users, label: 'Personal bills + group circles' },
-  { icon: WifiOff, label: 'Offline-first storage' },
-  { icon: RefreshCcw, label: 'Cloud sync when online' },
+  { icon: ReceiptText, label: 'Simple and itemized bills' },
+  { icon: SplitSquareHorizontal, label: 'Equal, percentage, or custom splits' },
+  { icon: Users, label: 'Personal tracking and group collaboration' },
+  { icon: CreditCard, label: 'Balances and settlement tracking' },
 ] as const
 
 export function LandingTrustStrip() {

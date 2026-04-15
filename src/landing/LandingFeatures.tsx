@@ -1,4 +1,4 @@
-import { ReceiptText, RefreshCcw, Users, WifiOff } from 'lucide-react'
+import { CreditCard, ReceiptText, Users, WalletCards } from 'lucide-react'
 
 const featureCards = [
   {
@@ -14,16 +14,16 @@ const featureCards = [
     icon: Users,
   },
   {
-    title: 'Offline first',
+    title: 'Flexible split controls',
     description:
-      'Changes save in your browser right away so refreshes and bad signal don’t wipe your history.',
-    icon: WifiOff,
+      'Choose equal, percentage, or custom amounts so each bill matches what actually happened.',
+    icon: WalletCards,
   },
   {
-    title: 'Sync with your account',
+    title: 'Clear balances and settlements',
     description:
-      'When you’re online, data syncs to the cloud for backup, another device, and sharing with others.',
-    icon: RefreshCcw,
+      'See who owes whom and record payments to close out shared expenses with less back-and-forth.',
+    icon: CreditCard,
   },
 ] as const
 
