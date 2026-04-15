@@ -31,15 +31,15 @@ export function LandingFeatures() {
   return (
     <section id="features" className="scroll-mt-24 py-16 lg:py-24">
       <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
-        <div className="max-w-3xl">
+        <div className="mx-auto max-w-3xl text-center">
           <p className="text-sm font-semibold tracking-wide text-teal-800">Features</p>
           <h2 className="font-display mt-2 text-3xl font-semibold tracking-tight text-stone-900 sm:text-4xl lg:text-5xl">
             Everything you need to split expenses—without overcomplicating it.
           </h2>
-          <p className="mt-4 text-base leading-relaxed text-stone-600">
+          <p className="mx-auto mt-4 max-w-2xl text-base leading-relaxed text-stone-600">
             From mixed restaurant orders to recurring group bills, Kwenta is built for situations where
-            “split evenly” isn’t enough. Personal bills assume you’re the payer; group bills are for
-            collaborative circles where each member can add their own expenses.
+            “split evenly” isn’t enough. Personal bills are your ledger: expenses you paid for. Group
+            bills let members track what they fronted.
           </p>
         </div>
 

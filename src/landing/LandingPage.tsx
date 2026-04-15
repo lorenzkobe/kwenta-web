@@ -5,7 +5,6 @@ import { LandingHeader } from './LandingHeader'
 import { LandingHero } from './LandingHero'
 import { LandingHowItWorks } from './LandingHowItWorks'
 import { LandingOffline } from './LandingOffline'
-import { LandingProductDemo } from './LandingProductDemo'
 import { LandingTrustStrip } from './LandingTrustStrip'
 import { LandingUseCases } from './LandingUseCases'
 
@@ -15,7 +14,6 @@ export function LandingPage() {
       <LandingHeader />
       <main>
         <LandingHero />
-        <LandingProductDemo />
         <LandingTrustStrip />
         <LandingFeatures />
         <LandingHowItWorks />

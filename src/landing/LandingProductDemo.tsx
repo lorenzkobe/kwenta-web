@@ -17,6 +17,11 @@ const CURRENCIES = ['PHP', 'USD', 'EUR', 'JPY', 'KRW', 'GBP'] as const
 const SPLIT_TYPES: SplitType[] = ['equal', 'percentage', 'custom']
 
 type DemoMode = 'simple' | 'itemized'
+type LandingProductDemoVariant = 'standalone' | 'embedded'
+type LandingProductDemoProps = {
+  variant?: LandingProductDemoVariant
+  className?: string
+}
 
 type SimpleBill = {
   id: string
@@ -322,7 +327,13 @@ function totalItemizedBill(bill: ItemizedBill): number {
   return bill.items.reduce((sum, item) => sum + item.amount, 0)
 }
 
-export function LandingProductDemo() {
+function toSplitValueInputMap(bill: SimpleBill): Record<string, string> {
+  if (bill.splitType === 'equal') return {}
+  return Object.fromEntries(bill.splitWith.map((name) => [name, String(bill.splitValues[name] ?? 0)]))
+}
+
+export function LandingProductDemo({ variant = 'standalone', className }: LandingProductDemoProps) {
+  const isEmbedded = variant === 'embedded'
   const [mode, setMode] = useState<DemoMode>('simple')
   const [people, setPeople] = useState<string[]>(INITIAL_PEOPLE)
   const [newPersonName, setNewPersonName] = useState('')
@@ -355,6 +366,16 @@ export function LandingProductDemo() {
     () => itemizedBills.find((bill) => bill.id === itemizedSelectedId) ?? itemizedBills[0] ?? null,
     [itemizedBills, itemizedSelectedId],
   )
+
+  function selectSimpleBill(bill: SimpleBill) {
+    setSimpleSelectedId(bill.id)
+    setSimpleCurrency(bill.currency)
+    setSimpleAmount(String(roundToTwo(bill.amount)))
+    setSimpleSplitType(bill.splitType)
+    setSimpleSplitWith([...bill.splitWith])
+    setSimpleSplitValues(toSplitValueInputMap(bill))
+    setSimplePinnedSplits({})
+  }
 
   function addPerson() {
     const name = newPersonName.trim()
@@ -541,25 +562,27 @@ export function LandingProductDemo() {
     setLinePinnedSplits(next.pinned)
   }
 
-  function addSimpleBill(e: FormEvent) {
+  function saveSimpleBill(e: FormEvent) {
     e.preventDefault()
     const amount = Number.parseFloat(simpleAmount.replace(/,/g, ''))
     if (Number.isNaN(amount) || amount <= 0 || simpleSplitWith.length === 0) return
     if (!splitsAreValid(simpleSplitType, amount, simpleSplitWith, simpleSplitValues)) return
 
+    const billId = simpleSelected?.id ?? crypto.randomUUID()
     const bill: SimpleBill = {
-      id: crypto.randomUUID(),
+      id: billId,
       currency: simpleCurrency,
       amount,
       splitType: simpleSplitType,
       splitWith: [...simpleSplitWith],
       splitValues: parseSplitValueMap(simpleSplitValues, simpleSplitWith),
     }
-    setSimpleBills((prev) => [bill, ...prev])
-    setSimpleSelectedId(bill.id)
-    setSimpleAmount('')
-    setSimpleSplitValues({})
-    setSimplePinnedSplits({})
+    setSimpleBills((prev) => {
+      const existingIndex = prev.findIndex((entry) => entry.id === billId)
+      if (existingIndex === -1) return [bill, ...prev]
+      return prev.map((entry) => (entry.id === billId ? bill : entry))
+    })
+    selectSimpleBill(bill)
   }
 
   function addItemizedBill(e: FormEvent) {
@@ -613,25 +636,40 @@ export function LandingProductDemo() {
   return (
     <section
       id="demo"
-      className="scroll-mt-24 border-y border-stone-200/80 bg-[#f3efe8]/90 py-14 lg:py-20"
+      className={cn(
+        'scroll-mt-24',
+        isEmbedded ? 'w-full' : 'border-y border-stone-200/80 bg-[#f3efe8]/90 py-14 lg:py-20',
+        className,
+      )}
       aria-labelledby="demo-heading"
     >
-      <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
-        <div className="max-w-2xl">
-          <p className="text-sm font-semibold tracking-wide text-teal-800">Live experience</p>
-          <h2
-            id="demo-heading"
-            className="font-display mt-2 text-3xl font-semibold tracking-tight text-stone-900 sm:text-4xl"
-          >
-            Use Kwenta without signing in.
+      <div className={cn(isEmbedded ? 'w-full' : 'mx-auto max-w-7xl px-4 sm:px-6 lg:px-8')}>
+        {!isEmbedded ? (
+          <div className="max-w-2xl">
+            <p className="text-sm font-semibold tracking-wide text-teal-800">Live experience</p>
+            <h2
+              id="demo-heading"
+              className="font-display mt-2 text-3xl font-semibold tracking-tight text-stone-900 sm:text-4xl"
+            >
+              Use Kwenta without signing in.
+            </h2>
+            <p className="mt-3 text-base leading-relaxed text-stone-600">
+              See how Kwenta handles both simple totals and itemized bills with flexible split controls.
+              Sign in when you want long-term history and collaborative group tracking.
+            </p>
+          </div>
+        ) : (
+          <h2 id="demo-heading" className="sr-only">
+            Live experience
           </h2>
-          <p className="mt-3 text-base leading-relaxed text-stone-600">
-            See how Kwenta handles both simple totals and itemized bills with flexible split controls.
-            Sign in when you want long-term history and collaborative group tracking.
-          </p>
-        </div>
+        )}
 
-        <div className="mt-10 overflow-hidden rounded-[1.125rem] border border-stone-300/90 bg-[#faf7f2] shadow-[0_20px_70px_rgba(28,25,23,0.07)] ring-1 ring-stone-900/3">
+        <div
+          className={cn(
+            'overflow-hidden rounded-[1.125rem] border border-stone-300/90 bg-[#faf7f2] shadow-[0_20px_70px_rgba(28,25,23,0.07)] ring-1 ring-stone-900/3',
+            !isEmbedded && 'mt-10',
+          )}
+        >
           <div className="border-b border-stone-200/90 bg-stone-200/50 px-4 py-2.5">
             <span className="font-mono text-[0.65rem] font-medium tracking-wide text-stone-500">
               kwenta.app / guest-preview
@@ -717,7 +755,7 @@ export function LandingProductDemo() {
               {mode === 'simple' ? (
                 <>
                   <form
-                    onSubmit={addSimpleBill}
+                    onSubmit={saveSimpleBill}
                     className="mt-4 space-y-3 rounded-xl border border-dashed border-stone-200 bg-stone-50/60 p-3"
                   >
                     <p className="text-xs font-medium text-stone-600">New simple bill</p>
@@ -803,7 +841,7 @@ export function LandingProductDemo() {
                     />
                     <Button type="submit" className="h-10 w-full rounded-lg">
                       <Plus className="size-4" />
-                      Add bill
+                      Update bill
                     </Button>
                   </form>
 
@@ -821,7 +859,7 @@ export function LandingProductDemo() {
                         <li key={bill.id}>
                           <button
                             type="button"
-                            onClick={() => setSimpleSelectedId(bill.id)}
+                            onClick={() => selectSimpleBill(bill)}
                             className={cn(
                               'w-full rounded-xl border px-3 py-3 text-left text-sm transition-colors',
                               bill.id === simpleSelectedId
@@ -966,7 +1004,7 @@ export function LandingProductDemo() {
               )}
             </div>
 
-            <div className="p-5">
+            <div className="p-5 lg:max-h-[min(72vh,42rem)] lg:overflow-y-auto">
               {mode === 'simple' ? (
                 <>
                   <div className="flex items-center gap-2 text-stone-800">
@@ -999,13 +1037,13 @@ export function LandingProductDemo() {
                                   <Users className="size-3 shrink-0 text-stone-500" aria-hidden />
                                   {person}
                                 </span>
-                                <span className="tabular-nums font-medium">
-                                  {simpleSelected.splitType === 'equal'
-                                    ? 'Included'
-                                    : simpleSelected.splitType === 'percentage'
+                                {simpleSelected.splitType === 'equal' ? null : (
+                                  <span className="tabular-nums font-medium">
+                                    {simpleSelected.splitType === 'percentage'
                                       ? `${simpleSelected.splitValues[person] ?? 0}%`
                                       : formatCurrency(simpleSelected.splitValues[person] ?? 0, simpleSelected.currency)}
-                                </span>
+                                  </span>
+                                )}
                               </li>
                             ))}
                           </ul>
@@ -1087,7 +1125,7 @@ export function LandingProductDemo() {
                           </div>
                         )
                       })()}
-                      <div className="space-y-3">
+                      <div className="max-h-88 space-y-3 overflow-y-auto pr-1">
                         {itemizedSelected.items.length === 0 ? (
                           <p className="text-sm text-stone-500">No items yet. Add your first line from the left panel.</p>
                         ) : (
@@ -1129,13 +1167,13 @@ export function LandingProductDemo() {
                                         <Users className="size-3 shrink-0 text-stone-500" aria-hidden />
                                         {person}
                                       </span>
-                                      <span className="tabular-nums font-medium">
-                                        {item.splitType === 'equal'
-                                          ? 'Included'
-                                          : item.splitType === 'percentage'
+                                      {item.splitType === 'equal' ? null : (
+                                        <span className="tabular-nums font-medium">
+                                          {item.splitType === 'percentage'
                                             ? `${item.splitValues[person] ?? 0}%`
                                             : formatCurrency(item.splitValues[person] ?? 0, itemizedSelected.currency)}
-                                      </span>
+                                        </span>
+                                      )}
                                     </li>
                                   ))}
                                 </ul>

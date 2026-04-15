@@ -20,7 +20,7 @@ export function LandingUseCases() {
   return (
     <section className="border-t border-stone-200/70 bg-[#f7f4ef]/50 py-16 lg:py-24">
       <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
-        <div className="max-w-3xl">
+        <div className="mx-auto max-w-3xl text-center">
           <p className="text-sm font-semibold tracking-wide text-teal-800">Use cases</p>
           <h2 className="font-display mt-2 text-3xl font-semibold tracking-tight text-stone-900 sm:text-4xl">
             For everyday groups—not only one-off splits.
