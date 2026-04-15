@@ -23,6 +23,7 @@ import {
   formatPairwiseSummary,
   listBillsInvolvingPair,
   listPairwiseSettlementsBetween,
+  resolveFallbackIdentityForViewer,
   listSharedGroupsWithBalance,
   resolveProfileDisplay,
 } from '@/lib/people'
@@ -144,7 +145,12 @@ function LinkAccountSheet({
               </p>
             </div>
           </div>
-          {linkableRemotes && linkableRemotes.length > 0 ? (
+          {linkableRemotes === undefined ? (
+            <div className="flex items-center gap-2 text-xs text-stone-500">
+              <Loader2 className="size-3.5 animate-spin text-teal-800" />
+              Loading people from your groups…
+            </div>
+          ) : linkableRemotes.length > 0 ? (
             <Select onValueChange={(v) => void onPickRemote(v)}>
               <SelectTrigger className="w-full rounded-lg">
                 <SelectValue placeholder="Choose from your groups…" />
@@ -230,8 +236,13 @@ export function PersonDetailPage() {
 
   const display = useLiveQuery(async () => {
     if (!personId) return null
-    return resolveProfileDisplay(personId)
-  }, [personId])
+    return resolveProfileDisplay(personId, userId ?? undefined)
+  }, [personId, userId])
+
+  const fallbackIdentity = useLiveQuery(async () => {
+    if (!userId || !personId) return null
+    return resolveFallbackIdentityForViewer(userId, personId)
+  }, [userId, personId])
 
   const netByCurrency = useLiveQuery(async () => {
     if (!userId || !personId) return new Map<string, number>()
@@ -252,6 +263,9 @@ export function PersonDetailPage() {
     if (!userId || !personId) return []
     return listPairwiseSettlementsBetween(userId, personId)
   }, [userId, personId])
+  const billsLoading = bills === undefined
+  const sharedGroupsLoading = sharedGroups === undefined
+  const settlementsLoading = settlements === undefined
 
   const linkableRemotes = useLiveQuery(async () => {
     if (!userId || !personId) return []
@@ -315,10 +329,19 @@ export function PersonDetailPage() {
       { id: userId, label: meProfile?.display_name?.trim() || 'You' },
       {
         id: personId,
-        label: (display?.displayName ?? profile?.display_name ?? 'Contact').trim() || 'Contact',
+        label:
+          (display?.displayName ?? profile?.display_name ?? fallbackIdentity?.displayName ?? 'Contact')
+            .trim() || 'Contact',
       },
     ]
-  }, [userId, personId, meProfile?.display_name, display?.displayName, profile?.display_name])
+  }, [
+    userId,
+    personId,
+    meProfile?.display_name,
+    display?.displayName,
+    profile?.display_name,
+    fallbackIdentity?.displayName,
+  ])
 
   useEffect(() => {
     if (personId && userId && personId === userId) {
@@ -350,7 +373,18 @@ export function PersonDetailPage() {
     )
   }
 
+  if (profile === null && fallbackIdentity === undefined) {
+    return (
+      <div className="flex justify-center py-20">
+        <Loader2 className="size-5 animate-spin text-teal-800" />
+      </div>
+    )
+  }
+
   if (profile === null) {
+    if (fallbackIdentity) {
+      // Render fallback identity state below.
+    } else {
     return (
       <div className="space-y-4">
         <Button asChild variant="ghost" size="sm" className="rounded-full gap-1">
@@ -362,10 +396,14 @@ export function PersonDetailPage() {
         <p className="text-center text-sm text-stone-500">Person not found</p>
       </div>
     )
+    }
   }
 
-  const canLink = profile.is_local && !profile.linked_profile_id
-  const isLinked = Boolean(profile.linked_profile_id)
+  const canLink = Boolean(profile?.is_local && !profile.linked_profile_id)
+  const isLinked = Boolean(profile?.linked_profile_id)
+  const resolvedDisplayName =
+    display?.displayName ?? profile?.display_name ?? fallbackIdentity?.displayName ?? 'Contact'
+  const resolvedSubtitle = display?.subtitle ?? fallbackIdentity?.subtitle
 
   async function handleLink(remoteId: string) {
     if (!userId || !personId) return
@@ -548,25 +586,27 @@ export function PersonDetailPage() {
             People
           </Link>
         </Button>
-        <Button
-          variant="outline"
-          size="icon-sm"
-          className="rounded-full"
-          aria-label="Person options"
-          type="button"
-          onClick={() => setShowOptionsMenu(true)}
-        >
-          <MoreVertical className="size-4" />
-        </Button>
+        {profile && (
+          <Button
+            variant="outline"
+            size="icon-sm"
+            className="rounded-full"
+            aria-label="Person options"
+            type="button"
+            onClick={() => setShowOptionsMenu(true)}
+          >
+            <MoreVertical className="size-4" />
+          </Button>
+        )}
       </div>
 
       <div className="rounded-3xl border border-stone-200 bg-white p-5 shadow-sm">
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0 flex-1">
             <h1 className="text-2xl font-semibold tracking-tight">
-              {display?.displayName ?? profile.display_name}
+              {resolvedDisplayName}
             </h1>
-            {display?.subtitle && <p className="mt-1 text-sm text-stone-500">{display.subtitle}</p>}
+            {resolvedSubtitle && <p className="mt-1 text-sm text-stone-500">{resolvedSubtitle}</p>}
           </div>
           {isLinked ? (
             <span className="shrink-0 rounded-full border border-emerald-200/90 bg-emerald-50 px-3 py-1.5 text-xs font-medium text-emerald-900">
@@ -668,7 +708,7 @@ export function PersonDetailPage() {
           >
             <ReceiptText className="size-3.5" />
             Personal
-            {personalBills.length > 0 && (
+            {!billsLoading && personalBills.length > 0 && (
               <span className="rounded-full bg-stone-200/80 px-1.5 text-[0.65rem] font-semibold text-stone-600">
                 {personalBills.length}
               </span>
@@ -686,7 +726,7 @@ export function PersonDetailPage() {
           >
             <Users className="size-3.5" />
             Groups
-            {(sharedGroups?.length ?? 0) > 0 && (
+            {!sharedGroupsLoading && (sharedGroups?.length ?? 0) > 0 && (
               <span className="rounded-full bg-stone-200/80 px-1.5 text-[0.65rem] font-semibold text-stone-600">
                 {sharedGroups?.length}
               </span>
@@ -696,7 +736,19 @@ export function PersonDetailPage() {
 
         {billsScope === 'personal' && (
           <>
-            {personalBills.length === 0 ? (
+            {billsLoading ? (
+              <div className="mt-3 space-y-2">
+                {Array.from({ length: 3 }).map((_, i) => (
+                  <div
+                    key={`person-personal-skeleton-${i}`}
+                    className="rounded-xl border border-stone-200 bg-stone-100/60 px-4 py-3"
+                  >
+                    <div className="h-4 w-40 animate-pulse rounded bg-stone-200" />
+                    <div className="mt-2 h-3 w-24 animate-pulse rounded bg-stone-100" />
+                  </div>
+                ))}
+              </div>
+            ) : personalBills.length === 0 ? (
               <p className="mt-3 text-sm text-stone-500">
                 No personal bills yet where you’re both on the bill (selected on a line and/or as payer).
                 Group trips are under <strong>Groups</strong>.
@@ -752,7 +804,19 @@ export function PersonDetailPage() {
 
         {billsScope === 'groups' && (
           <>
-            {!sharedGroups || sharedGroups.length === 0 ? (
+            {sharedGroupsLoading ? (
+              <div className="mt-3 space-y-2">
+                {Array.from({ length: 3 }).map((_, i) => (
+                  <div
+                    key={`person-groups-skeleton-${i}`}
+                    className="rounded-xl border border-stone-200 bg-stone-100/60 px-4 py-3"
+                  >
+                    <div className="h-4 w-36 animate-pulse rounded bg-stone-200" />
+                    <div className="mt-2 h-3 w-52 animate-pulse rounded bg-stone-100" />
+                  </div>
+                ))}
+              </div>
+            ) : !sharedGroups || sharedGroups.length === 0 ? (
               <p className="mt-3 text-sm text-stone-500">
                 You’re not in any group with this person yet.
               </p>
@@ -773,11 +837,13 @@ export function PersonDetailPage() {
                               <span className="text-stone-400">Even in this group</span>
                             ) : g.theirNet > 0 ? (
                               <span className="font-medium text-emerald-700">
-                                Receive {formatCurrency(g.theirNet, g.currency)} in this group
+                                {resolvedDisplayName} gets {formatCurrency(g.theirNet, g.currency)} in this
+                                group
                               </span>
                             ) : (
                               <span className="font-medium text-amber-700">
-                                Pay {formatCurrency(Math.abs(g.theirNet), g.currency)} in this group
+                                {resolvedDisplayName} needs to pay{' '}
+                                {formatCurrency(Math.abs(g.theirNet), g.currency)} in this group
                               </span>
                             )}
                           </p>
@@ -797,7 +863,7 @@ export function PersonDetailPage() {
                                   : 'On net, they should pay into the group this much'
                               }
                             >
-                              {g.theirNet > 0 ? 'Receive' : 'Pay'}
+                              {g.theirNet > 0 ? 'Gets' : 'Needs to pay'}
                             </span>
                           )}
                           <ChevronRight className="size-4 text-stone-400" />
@@ -820,7 +886,12 @@ export function PersonDetailPage() {
           <Banknote className="size-4 text-teal-800" />
           <h2 className="text-lg font-semibold">Payments between you</h2>
         </div>
-        {(!settlements || settlements.length === 0) ? (
+        {settlementsLoading ? (
+          <div className="mt-3 flex items-center gap-2 text-sm text-stone-500">
+            <Loader2 className="size-4 animate-spin text-teal-800" />
+            Loading payments…
+          </div>
+        ) : (!settlements || settlements.length === 0) ? (
           <p className="mt-3 text-sm text-stone-500">No recorded payments yet.</p>
         ) : (
           <div className="mt-3">
@@ -849,7 +920,7 @@ export function PersonDetailPage() {
           defaultAmount={0}
           amountEditable
           fromName={meProfile?.display_name ?? 'You'}
-          toName={display?.displayName ?? profile.display_name}
+          toName={resolvedDisplayName}
           partyPicker={settlementParties}
           markedBy={userId}
           showPaymentModeToggle
@@ -875,7 +946,7 @@ export function PersonDetailPage() {
         />
       )}
 
-      {showOptionsMenu && (
+      {showOptionsMenu && profile && (
         <PersonOptionsMenu
           onClose={() => setShowOptionsMenu(false)}
           onRemoveContact={openDeleteFromMenu}

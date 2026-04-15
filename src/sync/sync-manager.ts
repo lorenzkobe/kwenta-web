@@ -45,6 +45,8 @@ function clearRetryTimer() {
 
 function scheduleRetry() {
   clearRetryTimer()
+  const retryAt = Date.now() + backoffMs
+  useAppStore.getState().setSyncRetryAt(retryAt)
   retryTimer = setTimeout(() => {
     retryTimer = null
     void runSync('explicit')
@@ -55,6 +57,7 @@ function scheduleRetry() {
 function resetBackoff() {
   backoffMs = BACKOFF_INITIAL_MS
   clearRetryTimer()
+  useAppStore.getState().setSyncRetryAt(null)
 }
 
 function onBrowserOnline() {
@@ -96,6 +99,7 @@ async function runSync(reason: SyncRunReason) {
 
   isSyncing = true
   useAppStore.getState().setSyncStatus('syncing')
+  useAppStore.getState().setSyncRetryAt(null)
 
   try {
     // After sign-out we clear IndexedDB + last-pull; on the next sign-in there is nothing to upload

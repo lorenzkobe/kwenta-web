@@ -76,6 +76,8 @@ export function SettingsPage() {
   const [signOutHasUnsynced, setSignOutHasUnsynced] = useState<boolean | null>(null)
   const [signOutBusy, setSignOutBusy] = useState(false)
   const [activityOpen, setActivityOpen] = useState(false)
+  const settlementHistoryLoading = settlementHistory === undefined
+  const recentActivityLoading = recentActivity === undefined
 
   function startEditing() {
     setDisplayName(profile?.display_name ?? '')
@@ -253,7 +255,12 @@ export function SettingsPage() {
           </Button>
         </div>
 
-        {paymentsInvolvingYou.length > 0 && (
+        {settlementHistoryLoading ? (
+          <div className="rounded-3xl border border-stone-200 bg-white p-5 shadow-sm">
+            <div className="h-4 w-40 animate-pulse rounded bg-stone-200" />
+            <div className="mt-3 h-12 animate-pulse rounded bg-stone-100" />
+          </div>
+        ) : paymentsInvolvingYou.length > 0 && (
           <div className="rounded-3xl border border-stone-200 bg-white p-5 shadow-sm">
             <div className="flex items-center gap-2">
               <History className="size-4 text-teal-800" aria-hidden />
@@ -273,7 +280,12 @@ export function SettingsPage() {
           </div>
         )}
 
-        {(recentActivity?.length ?? 0) > 0 && (
+        {recentActivityLoading ? (
+          <div className="rounded-3xl border border-stone-200 bg-white p-5 shadow-sm">
+            <div className="h-4 w-36 animate-pulse rounded bg-stone-200" />
+            <div className="mt-2 h-3 w-52 animate-pulse rounded bg-stone-100" />
+          </div>
+        ) : (recentActivity?.length ?? 0) > 0 && (
           <div className="rounded-3xl border border-stone-200 bg-white p-5 shadow-sm">
             <div className="flex items-start justify-between gap-3">
               <div className="flex items-start gap-2">

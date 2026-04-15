@@ -34,7 +34,7 @@ export function PeoplePage() {
     }[] = []
     for (const id of ids) {
       const net = await computePairwiseNet(userId, id)
-      const disp = await resolveProfileDisplay(id)
+      const disp = await resolveProfileDisplay(id, userId)
       const { lines, primaryLabel, tone } = formatPairwiseSummary(net)
       out.push({
         id,
@@ -80,6 +80,8 @@ export function PeoplePage() {
       </div>
     )
   }
+
+  const rowsLoading = rows === undefined
 
   return (
     <div className="space-y-5">
@@ -142,7 +144,20 @@ export function PeoplePage() {
         </div>
       )}
 
-      {(!rows || rows.length === 0) && !showAdd ? (
+      {rowsLoading && !showAdd ? (
+        <div className="space-y-2">
+          {Array.from({ length: 4 }).map((_, i) => (
+            <div
+              key={`people-skeleton-${i}`}
+              className="rounded-2xl border border-stone-200 bg-white p-4 shadow-sm"
+            >
+              <div className="h-4 w-36 animate-pulse rounded bg-stone-200" />
+              <div className="mt-2 h-3 w-28 animate-pulse rounded bg-stone-100" />
+              <div className="mt-2 h-3 w-52 animate-pulse rounded bg-stone-100" />
+            </div>
+          ))}
+        </div>
+      ) : (rows?.length ?? 0) === 0 && !showAdd ? (
         <div className="rounded-3xl border border-stone-200 bg-white p-5 shadow-sm">
           <div className="flex flex-col items-center py-12 text-center">
             <div className="rounded-2xl bg-stone-100 p-4">

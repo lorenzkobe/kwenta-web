@@ -97,7 +97,7 @@ export function BillDetailPage() {
     for (const oid of others) {
       const net = await computePairwiseNetForBill(billId, userId, oid)
       if (Math.abs(net) < 0.005) continue
-      const disp = await resolveProfileDisplay(oid)
+      const disp = await resolveProfileDisplay(oid, userId)
       rows.push({ otherId: oid, displayName: disp.displayName, net })
     }
     rows.sort((a, b) => a.displayName.localeCompare(b.displayName))

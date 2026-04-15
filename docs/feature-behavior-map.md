@@ -211,7 +211,8 @@ Status: Mostly working as implemented, with permission/sync mismatch noted later
 - **When you do:** Open People
 - **The app checks:** Related profile ids from personal/group interactions
 - **Then it saves:** New local contacts if created
-- **Then you see:** Per-person net summary across group + personal contexts
+- **Then you see:** A loading skeleton first, then per-person net summary across group + personal contexts
+- For group-added contacts that do not have a local `profiles` row on this device, the app now falls back to shared-group member names instead of showing `Unknown`.
 
 Person detail supports:
 
@@ -225,10 +226,15 @@ Person detail supports:
   - User must explicitly confirm credit application
 - Link local contact to remote profile
 - Remove local contact
+- Shared-group fallback identity:
+  - If the exact profile row is unavailable locally but the person is a shared group member, detail renders with fallback name/subtitle (instead of immediate `Person not found`).
+- Groups tab copy uses explicit direction:
+  - **You should receive from {PersonName} in this group**
+  - **You should pay {PersonName} in this group**
 
 Sources: `src/pages/PeoplePage.tsx`, `src/pages/PersonDetailPage.tsx`, `src/lib/people.ts`, `src/db/operations.ts`
 
-Status: Working as implemented.
+Status: Working as implemented, including loading states and fallback identity handling for shared-group contacts.
 
 ## 10) Balances (`/app/balances`)
 

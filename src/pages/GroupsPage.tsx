@@ -100,6 +100,7 @@ export function GroupsPage() {
     })
     return copy
   }, [groupsWithBalances, filter, sort])
+  const groupsLoading = groupsWithBalances === undefined
 
   async function handleCreate() {
     if (!userId || !name.trim()) return
@@ -119,7 +120,9 @@ export function GroupsPage() {
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Groups</h1>
           <p className="mt-1 text-sm text-stone-600">
-            {groupsWithBalances?.length ?? 0} group{(groupsWithBalances?.length ?? 0) !== 1 ? 's' : ''}
+            {groupsLoading
+              ? 'Loading groups…'
+              : `${groupsWithBalances?.length ?? 0} group${(groupsWithBalances?.length ?? 0) !== 1 ? 's' : ''}`}
           </p>
         </div>
         <Button className="h-10 rounded-full" onClick={() => setShowCreate(true)}>
@@ -211,7 +214,20 @@ export function GroupsPage() {
         </div>
       )}
 
-      {(!groupsWithBalances || groupsWithBalances.length === 0) ? (
+      {groupsLoading ? (
+        <div className="space-y-3">
+          {Array.from({ length: 3 }).map((_, i) => (
+            <div
+              key={`group-skeleton-${i}`}
+              className="rounded-2xl border border-stone-200 bg-white p-4 shadow-sm"
+            >
+              <div className="h-4 w-44 animate-pulse rounded bg-stone-200" />
+              <div className="mt-2 h-3 w-28 animate-pulse rounded bg-stone-100" />
+              <div className="mt-2 h-3 w-36 animate-pulse rounded bg-stone-100" />
+            </div>
+          ))}
+        </div>
+      ) : (!groupsWithBalances || groupsWithBalances.length === 0) ? (
         <div className="rounded-3xl border border-stone-200 bg-white p-5 shadow-sm">
           <div className="flex flex-col items-center py-12 text-center">
             <div className="rounded-2xl bg-stone-100 p-4">

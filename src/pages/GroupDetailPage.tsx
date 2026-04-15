@@ -4,6 +4,7 @@ import {
   ArrowRight,
   Check,
   History,
+  Loader2,
   MoreVertical,
   Pencil,
   Plus,
@@ -367,11 +368,13 @@ function EditGroupDialog({
 
 function PaymentHistoryDialog({
   items,
+  loading = false,
   currentUserId,
   onClose,
   onEdit,
 }: {
   items: SettlementHistoryItem[]
+  loading?: boolean
   currentUserId: string | null | undefined
   onClose: () => void
   onEdit?: (item: SettlementHistoryItem) => void
@@ -390,7 +393,11 @@ function PaymentHistoryDialog({
           </Button>
         </div>
         <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
-          {items.length === 0 ? (
+          {loading ? (
+            <div className="flex items-center justify-center py-8">
+              <Loader2 className="size-4 animate-spin text-teal-800" />
+            </div>
+          ) : items.length === 0 ? (
             <p className="py-8 text-center text-sm text-stone-400">No recorded payments yet</p>
           ) : (
             <>
@@ -534,6 +541,9 @@ export function GroupDetailPage() {
   }, [groupId])
 
   const membershipLoaded = Array.isArray(members)
+  const groupLoading = group === undefined
+  const membersLoading = members === undefined
+  const billsLoading = bills === undefined
   const currentUserHasActiveMembership = Boolean(
     userId && (members ?? []).some((m) => m.userId === userId),
   )
@@ -560,6 +570,14 @@ export function GroupDetailPage() {
     if (!isGroupCreator) return
     setShowOptionsMenu(false)
     setDeleteGroupConfirmOpen(true)
+  }
+
+  if (groupLoading) {
+    return (
+      <div className="flex justify-center py-20">
+        <Loader2 className="size-5 animate-spin text-teal-800" />
+      </div>
+    )
   }
 
   if (!group || group.is_deleted || (userId && membershipLoaded && !currentUserHasActiveMembership)) {
@@ -609,7 +627,10 @@ export function GroupDetailPage() {
         <div className="rounded-3xl border border-stone-200 bg-white p-5 shadow-sm">
           <h1 className="text-2xl font-semibold tracking-tight text-stone-900">{group.name}</h1>
           <p className="mt-1 text-sm text-stone-500">
-            {group.currency} · {members?.length ?? 0} member{(members?.length ?? 0) !== 1 ? 's' : ''}
+            {group.currency} ·{' '}
+            {membersLoading
+              ? 'Loading members…'
+              : `${members?.length ?? 0} member${(members?.length ?? 0) !== 1 ? 's' : ''}`}
           </p>
         </div>
 
@@ -623,7 +644,16 @@ export function GroupDetailPage() {
           </p>
 
           <ul className="mt-4 space-y-2">
-            {(members ?? []).map((m) => {
+            {membersLoading &&
+              Array.from({ length: 4 }).map((_, i) => (
+                <li
+                  key={`member-skeleton-${i}`}
+                  className="rounded-xl border border-stone-200 bg-stone-100/60 px-4 py-3"
+                >
+                  <div className="h-4 w-36 animate-pulse rounded bg-stone-200" />
+                </li>
+              ))}
+            {!membersLoading && (members ?? []).map((m) => {
               const raw = balanceByUser.get(m.userId) ?? 0
               const rounded = Math.round(raw * 100) / 100
               const amount = Math.abs(rounded) <= 0.01 ? 0 : rounded
@@ -741,7 +771,19 @@ export function GroupDetailPage() {
             </Button>
           </div>
 
-          {(!bills || bills.length === 0) ? (
+          {billsLoading ? (
+            <div className="mt-4 space-y-2">
+              {Array.from({ length: 3 }).map((_, i) => (
+                <div
+                  key={`group-bill-skeleton-${i}`}
+                  className="rounded-xl border border-stone-200 bg-stone-100/60 px-4 py-3"
+                >
+                  <div className="h-4 w-44 animate-pulse rounded bg-stone-200" />
+                  <div className="mt-2 h-3 w-28 animate-pulse rounded bg-stone-100" />
+                </div>
+              ))}
+            </div>
+          ) : (!bills || bills.length === 0) ? (
             <div className="mt-4 flex flex-col items-center py-8 text-center">
               <p className="text-sm text-stone-400">No bills in this group yet</p>
             </div>
@@ -814,6 +856,7 @@ export function GroupDetailPage() {
       {showPaymentHistory && (
         <PaymentHistoryDialog
           items={settlementHistory ?? []}
+          loading={settlementHistory === undefined}
           currentUserId={userId}
           onClose={() => setShowPaymentHistory(false)}
           onEdit={(item) => setEditingSettlement(item)}

@@ -183,6 +183,10 @@ export function AddBillPage() {
   }, 0)
 
   const simpleAmountNum = parseFloat(simpleAmount) || 0
+  const groupsLoading = groups === undefined
+  const groupMembersLoading = groupMembers === undefined
+  const personalMembersLoading = personalSplitMembers === undefined
+  const membersLoading = groupId ? groupMembersLoading : personalMembersLoading
   const members = groupId ? (groupMembers ?? []) : (personalSplitMembers ?? [])
   const isEdit = Boolean(editBillId)
 
@@ -757,7 +761,7 @@ export function AddBillPage() {
                   <Select
                     value={groupId ?? '_none'}
                     onValueChange={(val) => setGroupId(val === '_none' ? null : val)}
-                    disabled={isEdit}
+                    disabled={isEdit || groupsLoading}
                   >
                     <SelectTrigger>
                       <SelectValue />
@@ -771,6 +775,9 @@ export function AddBillPage() {
                       ))}
                     </SelectContent>
                   </Select>
+                  {groupsLoading && !isEdit && (
+                    <p className="text-xs text-stone-400">Loading your groups…</p>
+                  )}
                 </div>
               </div>
 
@@ -825,7 +832,13 @@ export function AddBillPage() {
                   />
                 </div>
 
-                {members.length > 0 && (
+                {membersLoading && (
+                  <div className="rounded-xl border border-stone-200 bg-stone-100/60 px-4 py-3">
+                    <div className="h-4 w-40 animate-pulse rounded bg-stone-200" />
+                  </div>
+                )}
+
+                {!membersLoading && members.length > 0 && (
                   <>
                     <div className="flex flex-col gap-2">
                       <label className="text-sm font-medium">Split type</label>
@@ -962,7 +975,7 @@ export function AddBillPage() {
                   </>
                 )}
 
-                {!groupId && members.length <= 1 && (
+                {!groupId && !membersLoading && members.length <= 1 && (
                   <p className="text-xs text-stone-400">
                     Add people under People (or join a group) to split personal bills with others.
                   </p>

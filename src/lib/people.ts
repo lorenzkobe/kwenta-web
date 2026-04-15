@@ -97,14 +97,54 @@ export interface ProfileDisplay {
   subtitle?: string
 }
 
+export interface SharedGroupFallbackIdentity {
+  displayName: string
+  subtitle?: string
+}
+
+async function resolveSharedGroupMemberFallbackIdentity(
+  viewerUserId: string,
+  profileId: string,
+): Promise<SharedGroupFallbackIdentity | null> {
+  const memberships = await db.group_members.where('user_id').equals(viewerUserId).toArray()
+  const myGroupIds = new Set(memberships.filter((m) => !m.is_deleted).map((m) => m.group_id))
+  if (myGroupIds.size === 0) return null
+
+  const candidateMemberships = await db.group_members.where('user_id').equals(profileId).toArray()
+  const shared = candidateMemberships.find((m) => !m.is_deleted && myGroupIds.has(m.group_id))
+  if (!shared || !shared.display_name.trim()) return null
+
+  const group = await db.groups.get(shared.group_id)
+  return {
+    displayName: shared.display_name.trim(),
+    subtitle: group && !group.is_deleted ? `Group member · ${group.name}` : 'Group member',
+  }
+}
+
+export async function resolveFallbackIdentityForViewer(
+  viewerUserId: string,
+  profileId: string,
+): Promise<SharedGroupFallbackIdentity | null> {
+  return resolveSharedGroupMemberFallbackIdentity(viewerUserId, profileId)
+}
+
 /** Resolved label for UI (linked accounts show remote name). */
-export async function resolveProfileDisplay(profileId: string): Promise<ProfileDisplay> {
+export async function resolveProfileDisplay(
+  profileId: string,
+  viewerUserId?: string,
+): Promise<ProfileDisplay> {
   let p = await db.profiles.get(profileId)
   if (!p) {
     await fetchRemoteProfileIntoDexie(profileId)
     p = await db.profiles.get(profileId)
   }
-  if (!p || p.is_deleted) return { displayName: 'Unknown' }
+  if (!p || p.is_deleted) {
+    if (viewerUserId) {
+      const fallback = await resolveSharedGroupMemberFallbackIdentity(viewerUserId, profileId)
+      if (fallback) return fallback
+    }
+    return { displayName: 'Unknown' }
+  }
   if (p.linked_profile_id) {
     let linked = await db.profiles.get(p.linked_profile_id)
     if (!linked) {
@@ -566,7 +606,7 @@ export async function getPersonalBalanceContactRows(meId: string): Promise<
     const m = await computePairwiseNetPersonalOnly(meId, oid)
     const has = [...m.values()].some((v) => Math.abs(v) > 0.005)
     if (!has) continue
-    const disp = await resolveProfileDisplay(oid)
+    const disp = await resolveProfileDisplay(oid, meId)
     rows.push({ otherId: oid, displayName: disp.displayName, netByCurrency: m })
   }
   rows.sort((a, b) => a.displayName.localeCompare(b.displayName))
