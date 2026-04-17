@@ -881,28 +881,55 @@ export async function deletePerson(personId: string, actorUserId: string): Promi
 
 export async function deleteGroup(groupId: string, userId: string) {
   const timestamp = now()
-  await db.transaction('rw', [db.groups, db.group_members, db.activity_log], async () => {
-    const group = await db.groups.get(groupId)
-    if (!group) return
-    if (group.created_by !== userId) return
+  await db.transaction(
+    'rw',
+    [db.groups, db.group_members, db.bills, db.bill_items, db.item_splits, db.settlements, db.activity_log],
+    async () => {
+      const group = await db.groups.get(groupId)
+      if (!group) return
+      if (group.created_by !== userId) return
 
-    await db.groups.update(groupId, { is_deleted: true, updated_at: timestamp })
+      const bills = await db.bills.where('group_id').equals(groupId).toArray()
+      for (const bill of bills) {
+        if (bill.is_deleted) continue
+        await db.bills.update(bill.id, { is_deleted: true, updated_at: timestamp })
 
-    const members = await db.group_members.where('group_id').equals(groupId).toArray()
-    for (const m of members) {
-      await db.group_members.update(m.id, { is_deleted: true, updated_at: timestamp })
-    }
+        const items = await db.bill_items.where('bill_id').equals(bill.id).toArray()
+        for (const item of items) {
+          if (item.is_deleted) continue
+          await db.bill_items.update(item.id, { is_deleted: true, updated_at: timestamp })
+          const splits = await db.item_splits.where('item_id').equals(item.id).toArray()
+          for (const split of splits) {
+            if (split.is_deleted) continue
+            await db.item_splits.update(split.id, { is_deleted: true, updated_at: timestamp })
+          }
+        }
+      }
 
-    await db.activity_log.add({
-      ...syncFields(),
-      group_id: groupId,
-      user_id: userId,
-      action: 'deleted',
-      entity_type: 'group',
-      entity_id: groupId,
-      description: `Deleted group "${group.name}"`,
-    })
-  })
+      const settlements = await db.settlements.where('group_id').equals(groupId).toArray()
+      for (const s of settlements) {
+        if (s.is_deleted) continue
+        await db.settlements.update(s.id, { is_deleted: true, updated_at: timestamp, synced_at: null })
+      }
+
+      await db.groups.update(groupId, { is_deleted: true, updated_at: timestamp })
+
+      const members = await db.group_members.where('group_id').equals(groupId).toArray()
+      for (const m of members) {
+        await db.group_members.update(m.id, { is_deleted: true, updated_at: timestamp })
+      }
+
+      await db.activity_log.add({
+        ...syncFields(),
+        group_id: groupId,
+        user_id: userId,
+        action: 'deleted',
+        entity_type: 'group',
+        entity_id: groupId,
+        description: `Deleted group "${group.name}"`,
+      })
+    },
+  )
   await notifySyncAfterMutation({
     actorUserId: userId,
     operation: 'delete_group',
