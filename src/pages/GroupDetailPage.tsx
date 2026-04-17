@@ -536,7 +536,15 @@ export function GroupDetailPage() {
     return Promise.all(
       active.map(async (bill) => {
         const creator = await db.profiles.get(bill.created_by)
-        return { ...bill, creatorName: creator?.display_name ?? 'Unknown' }
+        let creatorName = creator?.display_name
+        if (!creatorName) {
+          const member = await db.group_members
+            .where('[group_id+user_id]')
+            .equals([groupId, bill.created_by])
+            .first()
+          creatorName = member?.display_name
+        }
+        return { ...bill, creatorName: creatorName ?? 'Unknown' }
       }),
     )
   }, [groupId])

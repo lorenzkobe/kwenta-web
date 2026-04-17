@@ -1575,7 +1575,15 @@ export async function getBillWithDetails(billId: string) {
       const splitsWithNames = await Promise.all(
         activeSplits.map(async (split) => {
           const profile = await db.profiles.get(split.user_id)
-          return { ...split, displayName: profile?.display_name ?? 'Unknown' }
+          let displayName = profile?.display_name
+          if (!displayName && bill.group_id) {
+            const member = await db.group_members
+              .where('[group_id+user_id]')
+              .equals([bill.group_id, split.user_id])
+              .first()
+            displayName = member?.display_name
+          }
+          return { ...split, displayName: displayName ?? 'Unknown' }
         }),
       )
 
@@ -1584,10 +1592,18 @@ export async function getBillWithDetails(billId: string) {
   )
 
   const creator = await db.profiles.get(bill.created_by)
+  let creatorName = creator?.display_name
+  if (!creatorName && bill.group_id) {
+    const member = await db.group_members
+      .where('[group_id+user_id]')
+      .equals([bill.group_id, bill.created_by])
+      .first()
+    creatorName = member?.display_name
+  }
 
   return {
     ...bill,
-    creatorName: creator?.display_name ?? 'Unknown',
+    creatorName: creatorName ?? 'Unknown',
     items: itemsWithSplits,
   }
 }

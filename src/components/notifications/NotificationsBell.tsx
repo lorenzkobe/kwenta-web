@@ -10,7 +10,6 @@ import {
 } from '@/lib/kwenta-notifications'
 import { captureMetric, withMetric } from '@/lib/client-metrics'
 import { fullSync } from '@/sync/sync-service'
-import { isRuntimeFlagEnabled } from '@/lib/runtime-flags'
 import { supabase } from '@/lib/supabase'
 import { useAppStore } from '@/store/app-store'
 import { cn } from '@/lib/utils'
@@ -29,6 +28,7 @@ export function NotificationsBell({ userId }: { userId: string }) {
   const [deleteTarget, setDeleteTarget] = useState<KwentaNotificationRow | null>(null)
   const wrapRef = useRef<HTMLDivElement>(null)
   const initializedRef = useRef(false)
+  const loadListRef = useRef<() => Promise<void>>(() => Promise.resolve())
   const unreadCacheKey = `kwenta_notifications_unread:${userId}`
 
   const loadList = useCallback(async () => {
@@ -48,11 +48,19 @@ export function NotificationsBell({ userId }: { userId: string }) {
     }
   }, [userId, isOnline, unreadCacheKey])
 
+  // Keep loadListRef current so the subscription callback can call the latest version
+  // without being a reactive dependency of the subscription effect.
+  useEffect(() => {
+    loadListRef.current = loadList
+  }, [loadList])
+
   useEffect(() => {
     if (!open) return
     void loadList()
   }, [open, loadList])
 
+  // Seed the counter from localStorage immediately, then refresh from the server
+  // once online so the badge is never stuck showing a stale cached count.
   useEffect(() => {
     if (initializedRef.current) return
     initializedRef.current = true
@@ -61,6 +69,12 @@ export function NotificationsBell({ userId }: { userId: string }) {
       setUnread(cached)
     }
   }, [unreadCacheKey])
+
+  useEffect(() => {
+    if (!isOnline || !userId) return
+    void loadList()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOnline, userId]) // intentionally omit loadList — we want one fetch per online transition
 
   useEffect(() => {
     if (!isOnline) return
@@ -103,19 +117,21 @@ export function NotificationsBell({ userId }: { userId: string }) {
       )
       .subscribe((status) => {
         captureMetric('notifications.realtime.status', status !== 'CHANNEL_ERROR' && status !== 'TIMED_OUT', 0, { status })
-        if (status === 'SUBSCRIBED' && !isRuntimeFlagEnabled('notificationPushOnlyMode')) {
-          void loadList()
-        }
         if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
-          // Guarded fallback: only reconcile from server when realtime health degrades.
-          void loadList()
+          // Realtime health degraded — fall back to a server fetch to reconcile.
+          void loadListRef.current()
         }
       })
 
     return () => {
       void supabase.removeChannel(channel)
     }
-  }, [userId, isOnline, loadList])
+    // loadList is intentionally excluded: keeping it stable avoids tearing down and
+    // re-creating the subscription on every isOnline / loadList reference change,
+    // which was causing missed INSERT events. loadListRef.current is used instead for
+    // the error-recovery path so it always calls the latest version.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [userId, isOnline])
 
   useEffect(() => {
     localStorage.setItem(unreadCacheKey, String(unread))
