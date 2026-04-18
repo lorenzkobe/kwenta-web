@@ -13,6 +13,16 @@ npm run preview    # Preview production build locally
 
 No test suite is configured.
 
+After every edit, run `npm run build` to confirm no TypeScript errors. If the build reports `TS1127: Invalid character`, the Edit tool introduced Unicode curly quotes (`'`, `'`, `"`, `"`) into string literals. Fix with:
+
+```bash
+python3 -c "
+with open('PATH', 'rb') as f: content = f.read()
+content = content.replace(b'\xe2\x80\x98', b\"'\").replace(b'\xe2\x80\x99', b\"'\").replace(b'\xe2\x80\x9c', b'\"').replace(b'\xe2\x80\x9d', b'\"')
+with open('PATH', 'wb') as f: f.write(content)
+"
+```
+
 ---
 
 ## Tech Stack
