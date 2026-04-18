@@ -19,7 +19,8 @@ import { withMetric } from '@/lib/client-metrics'
 import { db } from '@/db/db'
 import { useAppStore } from '@/store/app-store'
 import { triggerSync } from '@/sync/sync-manager'
-import type { Profile, ProfileUserType } from '@/types'
+import { messageForAccountNotActive } from '@/lib/account-gate-messages'
+import type { Profile, ProfileAccountStatus, ProfileUserType } from '@/types'
 import { getDeviceId, now } from '@/lib/utils'
 
 /**
@@ -206,8 +207,33 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [setCurrentUserId])
 
   const signIn = useCallback(async (email: string, password: string) => {
-    const { error } = await supabase.auth.signInWithPassword({ email, password })
-    return { error }
+    const { data, error } = await supabase.auth.signInWithPassword({ email, password })
+    if (error) {
+      return { error }
+    }
+    if (!data.session?.user) {
+      return { error: new Error('Sign in failed. Try again.') }
+    }
+
+    const { data: prof, error: profError } = await supabase
+      .from('profiles')
+      .select('account_status')
+      .eq('id', data.session.user.id)
+      .maybeSingle()
+
+    if (profError) {
+      console.warn('[auth] signIn profile check failed', profError)
+      await supabase.auth.signOut()
+      return { error: new Error('Could not verify your account. Try again.') }
+    }
+
+    const status = prof?.account_status as ProfileAccountStatus | undefined
+    if (!prof || status !== 'active') {
+      await supabase.auth.signOut()
+      return { error: new Error(messageForAccountNotActive(status)) }
+    }
+
+    return { error: null }
   }, [])
 
   const signUp = useCallback(async (email: string, password: string) => {
@@ -219,7 +245,35 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         emailRedirectTo: authRedirectUrl('/login'),
       },
     })
-    return { error, requiresEmailConfirmation: !data.session }
+    if (error) {
+      return { error, requiresEmailConfirmation: false }
+    }
+
+    const requiresEmailConfirmation = !data.session
+
+    if (data.session?.user) {
+      const { data: prof, error: profError } = await supabase
+        .from('profiles')
+        .select('account_status')
+        .eq('id', data.session.user.id)
+        .maybeSingle()
+
+      if (profError) {
+        await supabase.auth.signOut()
+        return { error: new Error('Could not verify your account. Try again.'), requiresEmailConfirmation: false }
+      }
+
+      const status = prof?.account_status as ProfileAccountStatus | undefined
+      if (!prof || status !== 'active') {
+        await supabase.auth.signOut()
+        return {
+          error: new Error(messageForAccountNotActive(status)),
+          requiresEmailConfirmation: false,
+        }
+      }
+    }
+
+    return { error: null, requiresEmailConfirmation }
   }, [])
 
   const resetPassword = useCallback(async (email: string) => {

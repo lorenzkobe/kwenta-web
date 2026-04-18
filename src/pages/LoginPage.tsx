@@ -84,6 +84,8 @@ export function LoginPage() {
 
     try {
       if (mode === 'login') {
+        sessionStorage.removeItem(INACTIVE_ACCOUNT_MESSAGE_KEY)
+        setInactiveAccountNotice(false)
         const { error } = await signIn(email, password)
         if (error) {
           setError(error.message)
