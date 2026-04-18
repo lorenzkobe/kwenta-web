@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useState } from 'react'
-import { Loader2 } from 'lucide-react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import { ArrowDownAZ, ArrowUpAZ, Loader2, Search } from 'lucide-react'
 import { supabase } from '@/lib/supabase'
 import type { ProfileAccountStatus, ProfileUserType } from '@/types'
 import { useAppStore } from '@/store/app-store'
 import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
 import {
   Select,
   SelectContent,
@@ -11,6 +12,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
+import { Switch } from '@/components/ui/switch'
 import { cn } from '@/lib/utils'
 
 type AdminProfileRow = {
@@ -19,7 +21,24 @@ type AdminProfileRow = {
   display_name: string
   user_type: ProfileUserType
   account_status: ProfileAccountStatus
+  created_at: string
   updated_at: string
+}
+
+function accountStatusTitleCase(status: ProfileAccountStatus): string {
+  if (status === 'active') return 'Active'
+  if (status === 'inactive') return 'Inactive'
+  return 'Unconfirmed'
+}
+
+function formatCreatedAt(iso: string): string {
+  try {
+    const d = new Date(iso)
+    if (Number.isNaN(d.getTime())) return '—'
+    return d.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })
+  } catch {
+    return '—'
+  }
 }
 
 export function AdminUsersPage() {
@@ -28,6 +47,8 @@ export function AdminUsersPage() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [busyId, setBusyId] = useState<string | null>(null)
+  const [searchQuery, setSearchQuery] = useState('')
+  const [sortNewestFirst, setSortNewestFirst] = useState(true)
 
   const load = useCallback(async () => {
     setError(null)
@@ -48,6 +69,16 @@ export function AdminUsersPage() {
       setLoading(false)
     })()
   }, [load])
+
+  const filteredSortedRows = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase()
+    let list = q.length === 0 ? rows : rows.filter((r) => r.email.toLowerCase().includes(q))
+    list = [...list].sort((a, b) => {
+      const cmp = a.created_at.localeCompare(b.created_at)
+      return sortNewestFirst ? -cmp : cmp
+    })
+    return list
+  }, [rows, searchQuery, sortNewestFirst])
 
   async function setStatus(userId: string, status: ProfileAccountStatus) {
     setBusyId(userId)
@@ -106,28 +137,68 @@ export function AdminUsersPage() {
         <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">{error}</div>
       )}
 
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="relative max-w-md flex-1">
+          <Search
+            className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-stone-400"
+            aria-hidden
+          />
+          <Input
+            type="search"
+            placeholder="Search by email…"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            className="h-10 rounded-xl border-stone-200 bg-white pl-10"
+            autoComplete="off"
+            aria-label="Search users by email"
+          />
+        </div>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          className="h-10 shrink-0 gap-2 rounded-xl border-stone-300"
+          onClick={() => setSortNewestFirst((v) => !v)}
+        >
+          {sortNewestFirst ? (
+            <>
+              <ArrowDownAZ className="size-4" aria-hidden />
+              Newest first
+            </>
+          ) : (
+            <>
+              <ArrowUpAZ className="size-4" aria-hidden />
+              Oldest first
+            </>
+          )}
+        </Button>
+      </div>
+
       <div className="overflow-x-auto rounded-2xl border border-stone-200 bg-white shadow-sm">
-        <table className="w-full min-w-[640px] text-left text-sm">
+        <table className="w-full min-w-[720px] text-left text-sm">
           <thead>
             <tr className="border-b border-stone-200 bg-stone-50/80 text-xs font-semibold uppercase tracking-wide text-stone-500">
               <th className="px-4 py-3">Email</th>
               <th className="px-4 py-3">Name</th>
               <th className="px-4 py-3">Role</th>
               <th className="px-4 py-3">Status</th>
-              <th className="px-4 py-3">Actions</th>
+              <th className="px-4 py-3">Created</th>
+              <th className="px-4 py-3">Access</th>
             </tr>
           </thead>
           <tbody>
-            {rows.length === 0 ? (
+            {filteredSortedRows.length === 0 ? (
               <tr>
-                <td colSpan={5} className="px-4 py-8 text-center text-stone-500">
-                  No users found.
+                <td colSpan={6} className="px-4 py-8 text-center text-stone-500">
+                  {rows.length === 0 ? 'No users found.' : 'No users match your search.'}
                 </td>
               </tr>
             ) : (
-              rows.map((row) => {
+              filteredSortedRows.map((row) => {
                 const isBusy = busyId === row.id
                 const isSelf = row.id === currentUserId
+                const isActive = row.account_status === 'active'
+                const isUnconfirmed = row.account_status === 'unconfirmed'
                 return (
                   <tr key={row.id} className="border-b border-stone-100 last:border-0">
                     <td className="max-w-[200px] truncate px-4 py-3 font-mono text-xs text-stone-700">
@@ -165,33 +236,25 @@ export function AdminUsersPage() {
                           row.account_status === 'unconfirmed' && 'bg-amber-100 text-amber-950',
                         )}
                       >
-                        {row.account_status}
+                        {accountStatusTitleCase(row.account_status)}
                       </span>
                     </td>
+                    <td className="whitespace-nowrap px-4 py-3 text-xs tabular-nums text-stone-600">
+                      {formatCreatedAt(row.created_at)}
+                    </td>
                     <td className="px-4 py-3">
-                      <div className="flex flex-wrap gap-2">
-                        {row.account_status !== 'active' ? (
-                          <Button
-                            type="button"
-                            size="sm"
-                            className="h-8 rounded-lg text-xs"
-                            disabled={isBusy || isSelf}
-                            onClick={() => void setStatus(row.id, 'active')}
-                          >
-                            Activate
-                          </Button>
-                        ) : (
-                          <Button
-                            type="button"
-                            size="sm"
-                            variant="outline"
-                            className="h-8 rounded-lg text-xs"
-                            disabled={isBusy || isSelf}
-                            onClick={() => void setStatus(row.id, 'inactive')}
-                          >
-                            Deactivate
-                          </Button>
-                        )}
+                      <div className="flex items-center gap-3">
+                        <Switch
+                          checked={isActive}
+                          disabled={isBusy || isSelf || isUnconfirmed}
+                          onCheckedChange={(checked) =>
+                            void setStatus(row.id, checked ? 'active' : 'inactive')
+                          }
+                          aria-label={isActive ? 'Deactivate account' : 'Activate account'}
+                        />
+                        <span className="text-xs text-stone-500">
+                          {isActive ? 'Allowed' : isUnconfirmed ? 'Pending' : 'Blocked'}
+                        </span>
                       </div>
                     </td>
                   </tr>

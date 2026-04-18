@@ -238,16 +238,14 @@ export function LoginPage() {
           <div className="mt-4">
             {mode === 'login' ? (
               <p className="text-center text-sm text-stone-600">
-                Signups available soon.
-                {/*
                 Don&apos;t have an account?{' '}
                 <button
+                  type="button"
                   className="font-medium text-teal-800 underline-offset-4 hover:underline"
                   onClick={() => switchMode('signup')}
                 >
                   Sign up
                 </button>
-                */}
               </p>
             ) : (
               <p className="text-center text-sm text-stone-600">
