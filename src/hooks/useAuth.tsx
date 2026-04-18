@@ -179,7 +179,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     const {
       data: { subscription },
-    } = supabase.auth.onAuthStateChange(async (event, session) => {
+    } = supabase.auth.onAuthStateChange((event, session) => {
       const u = session?.user ?? null
       const nextId = u?.id ?? null
       const prevId = prevAuthUserIdRef.current
@@ -194,8 +194,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         }
       }
 
-      await applySession(session)
-      setLoading(false)
+      void applySession(session).then(() => {
+        if (!cancelled) setLoading(false)
+      })
     })
 
     return () => {

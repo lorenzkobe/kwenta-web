@@ -243,19 +243,20 @@ export function AdminUsersPage() {
                       {formatCreatedAt(row.created_at)}
                     </td>
                     <td className="px-4 py-3">
-                      <div className="flex items-center gap-3">
-                        <Switch
-                          checked={isActive}
-                          disabled={isBusy || isSelf || isUnconfirmed}
-                          onCheckedChange={(checked) =>
-                            void setStatus(row.id, checked ? 'active' : 'inactive')
-                          }
-                          aria-label={isActive ? 'Deactivate account' : 'Activate account'}
-                        />
-                        <span className="text-xs text-stone-500">
-                          {isActive ? 'Allowed' : isUnconfirmed ? 'Pending' : 'Blocked'}
-                        </span>
-                      </div>
+                      <Switch
+                        checked={isActive}
+                        disabled={isBusy || isSelf || isUnconfirmed}
+                        onCheckedChange={(checked) =>
+                          void setStatus(row.id, checked ? 'active' : 'inactive')
+                        }
+                        aria-label={
+                          isUnconfirmed
+                            ? 'Email not verified — activate after confirmation'
+                            : isActive
+                              ? 'Deactivate account access'
+                              : 'Activate account access'
+                        }
+                      />
                     </td>
                   </tr>
                 )
