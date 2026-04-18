@@ -77,12 +77,16 @@ function ManageMembersDialog({
   groupId,
   members,
   currentUserId,
+  creatorUserId,
+  isCreator,
   onClose,
   onChanged,
 }: {
   groupId: string
   members: MemberRow[]
   currentUserId: string
+  creatorUserId: string
+  isCreator: boolean
   onClose: () => void
   onChanged: () => void
 }) {
@@ -189,8 +193,11 @@ function ManageMembersDialog({
                     {m.isCurrentUser && (
                       <Badge className="ml-1.5 px-2.5 py-1 text-[0.65rem] leading-none">You</Badge>
                     )}
+                    {m.userId === creatorUserId && (
+                      <Badge className="ml-1.5 px-2.5 py-1 text-[0.65rem] leading-none bg-amber-100 text-amber-800 border-amber-200">Owner</Badge>
+                    )}
                   </span>
-                  {!m.isCurrentUser && (
+                  {!m.isCurrentUser && isCreator && (
                     <Button
                       variant="ghost"
                       size="icon-xs"
@@ -213,7 +220,7 @@ function ManageMembersDialog({
           )}
         </div>
 
-        <div className="border-t border-stone-100 px-5 py-4">
+        {isCreator && <div className="border-t border-stone-100 px-5 py-4">
           <p className="mb-3 text-xs font-medium text-stone-500">Add a member</p>
           {suggestions.filter((s) => !members.some((m) => m.userId === s.id)).length > 0 && (
             <div className="mb-3 flex flex-wrap gap-1.5">
@@ -264,7 +271,7 @@ function ManageMembersDialog({
             New names are saved to your phonebook (unique per name). Tap a suggestion to add someone
             you already know.
           </p>
-        </div>
+        </div>}
       </div>
     </div>
 
@@ -871,6 +878,8 @@ export function GroupDetailPage() {
           groupId={groupId}
           members={members ?? []}
           currentUserId={userId}
+          creatorUserId={group?.created_by ?? ''}
+          isCreator={isGroupCreator}
           onClose={() => setShowManage(false)}
           onChanged={refreshBalances}
         />
