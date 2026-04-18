@@ -888,23 +888,33 @@ export async function getMemberSuggestions(
 
   for (const p of all) {
     if (p.id === currentUserId) continue
-    const name = p.display_name.trim()
-    const lower = name.toLowerCase()
+    const localName = p.display_name.trim()
+    const localLower = localName.toLowerCase()
     const emailLower = (p.email ?? '').trim().toLowerCase()
-    const matchesName = lower.includes(q)
+
+    let linkedName: string | undefined
+    if (p.linked_profile_id) {
+      const linked = await db.profiles.get(p.linked_profile_id)
+      if (linked && !linked.is_deleted) linkedName = linked.display_name.trim()
+    }
+
+    const linkedLower = linkedName?.toLowerCase() ?? ''
+    const matchesLocal = localLower.includes(q)
+    const matchesLinked = linkedLower.length > 0 && linkedLower.includes(q)
     const matchesEmail = emailLower.length > 0 && emailLower.includes(q)
-    if (!matchesName && !matchesEmail) continue
+    if (!matchesLocal && !matchesLinked && !matchesEmail) continue
 
     const isMine = p.owner_id === currentUserId
     const inMyGroups = onlineInGroups.has(p.id)
     if (!isMine && !inMyGroups) continue
 
+    const displayName = linkedName ? `${linkedName} (${localName})` : localName
     const kind: 'local' | 'online' = isMine ? 'local' : 'online'
     let score = 0
-    if (lower.startsWith(q)) score += 10
+    if (localLower.startsWith(q) || linkedLower.startsWith(q)) score += 10
     if (isMine) score += 5
     if (inMyGroups) score += 3
-    scored.push({ id: p.id, displayName: name, kind, score })
+    scored.push({ id: p.id, displayName, kind, score })
   }
 
   scored.sort((a, b) => b.score - a.score || a.displayName.localeCompare(b.displayName))
