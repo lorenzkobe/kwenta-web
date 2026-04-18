@@ -8,14 +8,18 @@ import {
   useState,
   type ReactNode,
 } from 'react'
-import type { User } from '@supabase/supabase-js'
+import type { Session, User } from '@supabase/supabase-js'
 import { authRedirectUrl, supabase } from '@/lib/supabase'
-import { consumeVoluntarySignOut, SESSION_EXPIRED_MESSAGE_KEY } from '@/lib/auth-session-flags'
+import {
+  consumeVoluntarySignOut,
+  INACTIVE_ACCOUNT_MESSAGE_KEY,
+  SESSION_EXPIRED_MESSAGE_KEY,
+} from '@/lib/auth-session-flags'
 import { withMetric } from '@/lib/client-metrics'
 import { db } from '@/db/db'
 import { useAppStore } from '@/store/app-store'
 import { triggerSync } from '@/sync/sync-manager'
-import type { Profile } from '@/types'
+import type { Profile, ProfileUserType } from '@/types'
 import { getDeviceId, now } from '@/lib/utils'
 
 /**
@@ -58,6 +62,8 @@ async function ensureProfile(userId: string, email: string) {
     email,
     display_name: email.split('@')[0] || 'User',
     avatar_url: null,
+    user_type: 'user',
+    account_status: 'active',
     is_local: false,
     linked_profile_id: null,
     owner_id: null,
@@ -82,6 +88,11 @@ const ensureProfileInFlight = new Map<string, Promise<void>>()
 
 type AuthContextValue = {
   user: User | null
+  /**
+   * Mirrors `profiles.user_type` for the signed-in user. `null` only when logged out — never “unknown role”;
+   * the database column defaults to `user` and is NOT NULL.
+   */
+  userType: ProfileUserType | null
   loading: boolean
   isAuthenticated: boolean
   signIn: (email: string, password: string) => Promise<{ error: Error | null }>
@@ -102,34 +113,67 @@ const AuthContext = createContext<AuthContextValue | null>(null)
  */
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null)
+  const [userType, setUserType] = useState<ProfileUserType | null>(null)
   const [loading, setLoading] = useState(true)
   const setCurrentUserId = useAppStore((s) => s.setCurrentUserId)
   const prevAuthUserIdRef = useRef<string | null>(null)
 
   useEffect(() => {
+    let cancelled = false
+
+    async function applySession(session: Session | null) {
+      if (!session?.user) {
+        setUser(null)
+        setUserType(null)
+        setCurrentUserId(null)
+        return
+      }
+
+      const u = session.user
+      const { data: prof, error } = await withMetric('auth.accountGate', () =>
+        supabase.from('profiles').select('account_status, user_type').eq('id', u.id).maybeSingle(),
+      )
+
+      if (error) {
+        console.warn('[auth] account gate failed', error)
+        sessionStorage.setItem(INACTIVE_ACCOUNT_MESSAGE_KEY, '1')
+        await supabase.auth.signOut()
+        setUser(null)
+        setUserType(null)
+        setCurrentUserId(null)
+        return
+      }
+
+      if (!prof || prof.account_status !== 'active') {
+        sessionStorage.setItem(INACTIVE_ACCOUNT_MESSAGE_KEY, '1')
+        await supabase.auth.signOut()
+        setUser(null)
+        setUserType(null)
+        setCurrentUserId(null)
+        return
+      }
+
+      setUser(u)
+      setUserType(prof.user_type === 'admin' ? 'admin' : 'user')
+      setCurrentUserId(u.id)
+      try {
+        await ensureProfile(u.id, u.email ?? '')
+      } catch (e) {
+        console.warn('[auth] ensureProfile failed', e)
+      }
+    }
+
     void (async () => {
       try {
         const {
           data: { session },
         } = await supabase.auth.getSession()
-        const u = session?.user ?? null
-        setUser(u)
-        if (u) {
-          try {
-            await ensureProfile(u.id, u.email ?? '')
-          } catch (e) {
-            console.warn('[auth] ensureProfile failed during bootstrap', e)
-          }
-          setCurrentUserId(u.id)
-          prevAuthUserIdRef.current = u.id
-        } else {
-          setCurrentUserId(null)
-          prevAuthUserIdRef.current = null
-        }
+        if (cancelled) return
+        await applySession(session)
       } catch (e) {
         console.warn('[auth] session bootstrap failed', e)
       } finally {
-        setLoading(false)
+        if (!cancelled) setLoading(false)
       }
     })()
 
@@ -138,29 +182,26 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     } = supabase.auth.onAuthStateChange(async (event, session) => {
       const u = session?.user ?? null
       const nextId = u?.id ?? null
+      const prevId = prevAuthUserIdRef.current
+      prevAuthUserIdRef.current = nextId
 
-      if (!nextId && prevAuthUserIdRef.current && event === 'SIGNED_OUT') {
-        if (!consumeVoluntarySignOut()) {
+      if (!nextId && prevId && event === 'SIGNED_OUT') {
+        if (
+          !sessionStorage.getItem(INACTIVE_ACCOUNT_MESSAGE_KEY) &&
+          !consumeVoluntarySignOut()
+        ) {
           sessionStorage.setItem(SESSION_EXPIRED_MESSAGE_KEY, '1')
         }
       }
 
-      prevAuthUserIdRef.current = nextId
-
-      setUser(u)
-      if (u) {
-        try {
-          await ensureProfile(u.id, u.email ?? '')
-        } catch (e) {
-          console.warn('[auth] ensureProfile failed on auth change', e)
-        }
-        setCurrentUserId(u.id)
-      } else {
-        setCurrentUserId(null)
-      }
+      await applySession(session)
+      setLoading(false)
     })
 
-    return () => subscription.unsubscribe()
+    return () => {
+      cancelled = true
+      subscription.unsubscribe()
+    }
   }, [setCurrentUserId])
 
   const signIn = useCallback(async (email: string, password: string) => {
@@ -257,6 +298,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const value: AuthContextValue = {
     user,
+    userType,
     loading,
     isAuthenticated: !!user,
     signIn,

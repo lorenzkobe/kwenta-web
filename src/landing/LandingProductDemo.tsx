@@ -1,5 +1,15 @@
-import { useMemo, useState, type FormEvent } from 'react'
-import { LayoutList, Plus, ReceiptText, SplitSquareHorizontal, Trash2, UserPlus, Users, X } from 'lucide-react'
+import { useEffect, useMemo, useState, type FormEvent } from 'react'
+import {
+  LayoutList,
+  Plus,
+  ReceiptText,
+  RotateCcw,
+  SplitSquareHorizontal,
+  Trash2,
+  UserPlus,
+  Users,
+  X,
+} from 'lucide-react'
 import type { SplitType } from '@/types'
 import { normalizeAmountInput, stripLeadingZerosAmount } from '@/lib/amount-input'
 import {
@@ -12,11 +22,16 @@ import {
 import { cn, formatCurrency } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import {
+  buildLandingDemoPayload,
+  LANDING_DEMO_DEFAULTS,
+  LANDING_DEMO_STORAGE_KEY,
+  readLandingDemoInitialState,
+  type DemoMode,
+} from '@/landing/landing-demo-persistence'
 
 const CURRENCIES = ['PHP', 'USD', 'EUR', 'JPY', 'KRW', 'GBP'] as const
 const SPLIT_TYPES: SplitType[] = ['equal', 'percentage', 'custom']
-
-type DemoMode = 'simple' | 'itemized'
 type LandingProductDemoVariant = 'standalone' | 'embedded'
 type LandingProductDemoProps = {
   variant?: LandingProductDemoVariant
@@ -321,8 +336,6 @@ function SplitValuesEditor({
   )
 }
 
-const INITIAL_PEOPLE: string[] = []
-
 function totalItemizedBill(bill: ItemizedBill): number {
   return bill.items.reduce((sum, item) => sum + item.amount, 0)
 }
@@ -334,29 +347,114 @@ function toSplitValueInputMap(bill: SimpleBill): Record<string, string> {
 
 export function LandingProductDemo({ variant = 'standalone', className }: LandingProductDemoProps) {
   const isEmbedded = variant === 'embedded'
-  const [mode, setMode] = useState<DemoMode>('simple')
-  const [people, setPeople] = useState<string[]>(INITIAL_PEOPLE)
-  const [newPersonName, setNewPersonName] = useState('')
+  const [demoInit] = useState(() => readLandingDemoInitialState())
 
-  const [simpleCurrency, setSimpleCurrency] = useState<string>('PHP')
-  const [simpleAmount, setSimpleAmount] = useState('')
-  const [simpleSplitType, setSimpleSplitType] = useState<SplitType>('equal')
-  const [simpleSplitWith, setSimpleSplitWith] = useState<string[]>(INITIAL_PEOPLE)
-  const [simpleSplitValues, setSimpleSplitValues] = useState<Record<string, string>>({})
-  const [simplePinnedSplits, setSimplePinnedSplits] = useState<PinnedSplits>({})
-  const [simpleBills, setSimpleBills] = useState<SimpleBill[]>([])
-  const [simpleSelectedId, setSimpleSelectedId] = useState<string>('')
+  const [mode, setMode] = useState<DemoMode>(demoInit.mode)
+  const [people, setPeople] = useState<string[]>(demoInit.people)
+  const [newPersonName, setNewPersonName] = useState(demoInit.newPersonName)
 
-  const [itemizedCurrency, setItemizedCurrency] = useState<string>('PHP')
-  const [itemizedBills, setItemizedBills] = useState<ItemizedBill[]>([])
-  const [itemizedSelectedId, setItemizedSelectedId] = useState<string>('')
+  const [simpleCurrency, setSimpleCurrency] = useState<string>(demoInit.simpleCurrency)
+  const [simpleAmount, setSimpleAmount] = useState(demoInit.simpleAmount)
+  const [simpleSplitType, setSimpleSplitType] = useState<SplitType>(demoInit.simpleSplitType)
+  const [simpleSplitWith, setSimpleSplitWith] = useState<string[]>(demoInit.simpleSplitWith)
+  const [simpleSplitValues, setSimpleSplitValues] = useState<Record<string, string>>(demoInit.simpleSplitValues)
+  const [simplePinnedSplits, setSimplePinnedSplits] = useState<PinnedSplits>(demoInit.simplePinnedSplits)
+  const [simpleBills, setSimpleBills] = useState<SimpleBill[]>(demoInit.simpleBills as SimpleBill[])
+  const [simpleSelectedId, setSimpleSelectedId] = useState<string>(demoInit.simpleSelectedId)
 
-  const [lineName, setLineName] = useState('')
-  const [lineAmount, setLineAmount] = useState('')
-  const [lineSplitType, setLineSplitType] = useState<SplitType>('equal')
-  const [lineSplitWith, setLineSplitWith] = useState<string[]>(INITIAL_PEOPLE)
-  const [lineSplitValues, setLineSplitValues] = useState<Record<string, string>>({})
-  const [linePinnedSplits, setLinePinnedSplits] = useState<PinnedSplits>({})
+  const [itemizedCurrency, setItemizedCurrency] = useState<string>(demoInit.itemizedCurrency)
+  const [itemizedBills, setItemizedBills] = useState<ItemizedBill[]>(demoInit.itemizedBills as ItemizedBill[])
+  const [itemizedSelectedId, setItemizedSelectedId] = useState<string>(demoInit.itemizedSelectedId)
+
+  const [lineName, setLineName] = useState(demoInit.lineName)
+  const [lineAmount, setLineAmount] = useState(demoInit.lineAmount)
+  const [lineSplitType, setLineSplitType] = useState<SplitType>(demoInit.lineSplitType)
+  const [lineSplitWith, setLineSplitWith] = useState<string[]>(demoInit.lineSplitWith)
+  const [lineSplitValues, setLineSplitValues] = useState<Record<string, string>>(demoInit.lineSplitValues)
+  const [linePinnedSplits, setLinePinnedSplits] = useState<PinnedSplits>(demoInit.linePinnedSplits)
+
+  useEffect(() => {
+    const payload = buildLandingDemoPayload({
+      mode,
+      people,
+      newPersonName,
+      simpleCurrency,
+      simpleAmount,
+      simpleSplitType,
+      simpleSplitWith,
+      simpleSplitValues,
+      simplePinnedSplits,
+      simpleBills,
+      simpleSelectedId,
+      itemizedCurrency,
+      itemizedBills,
+      itemizedSelectedId,
+      lineName,
+      lineAmount,
+      lineSplitType,
+      lineSplitWith,
+      lineSplitValues,
+      linePinnedSplits,
+    })
+    const id = window.setTimeout(() => {
+      try {
+        localStorage.setItem(LANDING_DEMO_STORAGE_KEY, JSON.stringify(payload))
+      } catch {
+        /* quota */
+      }
+    }, 300)
+    return () => window.clearTimeout(id)
+  }, [
+    mode,
+    people,
+    newPersonName,
+    simpleCurrency,
+    simpleAmount,
+    simpleSplitType,
+    simpleSplitWith,
+    simpleSplitValues,
+    simplePinnedSplits,
+    simpleBills,
+    simpleSelectedId,
+    itemizedCurrency,
+    itemizedBills,
+    itemizedSelectedId,
+    lineName,
+    lineAmount,
+    lineSplitType,
+    lineSplitWith,
+    lineSplitValues,
+    linePinnedSplits,
+  ])
+
+  function resetDemo() {
+    try {
+      localStorage.removeItem(LANDING_DEMO_STORAGE_KEY)
+    } catch {
+      /* ignore */
+    }
+    const d = LANDING_DEMO_DEFAULTS
+    setMode(d.mode)
+    setPeople(d.people)
+    setNewPersonName(d.newPersonName)
+    setSimpleCurrency(d.simpleCurrency)
+    setSimpleAmount(d.simpleAmount)
+    setSimpleSplitType(d.simpleSplitType)
+    setSimpleSplitWith(d.simpleSplitWith)
+    setSimpleSplitValues(d.simpleSplitValues)
+    setSimplePinnedSplits(d.simplePinnedSplits)
+    setSimpleBills([])
+    setSimpleSelectedId('')
+    setItemizedCurrency(d.itemizedCurrency)
+    setItemizedBills([])
+    setItemizedSelectedId('')
+    setLineName(d.lineName)
+    setLineAmount(d.lineAmount)
+    setLineSplitType(d.lineSplitType)
+    setLineSplitWith(d.lineSplitWith)
+    setLineSplitValues(d.lineSplitValues)
+    setLinePinnedSplits(d.linePinnedSplits)
+  }
 
   const simpleSelected = useMemo(
     () => simpleBills.find((bill) => bill.id === simpleSelectedId) ?? simpleBills[0] ?? null,
@@ -677,7 +775,19 @@ export function LandingProductDemo({ variant = 'standalone', className }: Landin
           </div>
 
           <div className="border-b border-stone-200 bg-white px-5 py-4">
-            <p className="text-xs font-medium text-stone-500">Bill type</p>
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <p className="text-xs font-medium text-stone-500">Bill type</p>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="h-8 gap-1.5 rounded-lg border-stone-300 text-xs text-stone-700"
+                onClick={() => resetDemo()}
+              >
+                <RotateCcw className="size-3.5" aria-hidden />
+                Reset demo
+              </Button>
+            </div>
             <div className="mt-2 rounded-2xl border border-stone-200 bg-stone-50 p-1">
               <div className="grid grid-cols-2 gap-1" role="tablist" aria-label="Simple or itemized bill">
                 {(

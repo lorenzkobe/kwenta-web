@@ -5,6 +5,7 @@ import { Toaster } from 'sonner'
 import { LandingPage } from '@/landing/LandingPage'
 import { AppShell } from '@/components/layout/AppShell'
 import { RequireAuth } from '@/components/auth/RequireAuth'
+import { RequireAdmin } from '@/components/auth/RequireAdmin'
 import { AuthProvider } from '@/hooks/useAuth'
 
 const LoginPage = lazy(() => import('@/pages/LoginPage').then((m) => ({ default: m.LoginPage })))
@@ -20,6 +21,9 @@ const PersonDetailPage = lazy(() =>
   import('@/pages/PersonDetailPage').then((m) => ({ default: m.PersonDetailPage })),
 )
 const SettingsPage = lazy(() => import('@/pages/SettingsPage').then((m) => ({ default: m.SettingsPage })))
+const AdminUsersPage = lazy(() =>
+  import('@/pages/AdminUsersPage').then((m) => ({ default: m.AdminUsersPage })),
+)
 
 function PageLoader() {
   return (
@@ -57,6 +61,9 @@ function App() {
                 <Route path="people/:personId" element={<PersonDetailPage />} />
                 <Route path="balances" element={<BalancesPage />} />
                 <Route path="settings" element={<SettingsPage />} />
+                <Route element={<RequireAdmin />}>
+                  <Route path="users" element={<AdminUsersPage />} />
+                </Route>
               </Route>
             </Route>
 

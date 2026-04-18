@@ -7,10 +7,17 @@ export interface SyncFields {
   device_id: string
 }
 
+export type ProfileUserType = 'user' | 'admin'
+export type ProfileAccountStatus = 'unconfirmed' | 'inactive' | 'active'
+
 export interface Profile extends SyncFields {
   email: string
   display_name: string
   avatar_url: string | null
+  /** App role; only server / admin RPCs may change. DB is NOT NULL with default `user`. */
+  user_type: ProfileUserType
+  /** Signup + admin activation lifecycle; only server / admin RPCs may change */
+  account_status: ProfileAccountStatus
   /** Created offline / phonebook — not a signed-in account */
   is_local: boolean
   /** When set, this local profile is linked to another profile (usually a synced account) */

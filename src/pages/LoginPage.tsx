@@ -1,7 +1,10 @@
 import { useEffect, useState } from 'react'
 import { Link, useLocation, useNavigate, useSearchParams } from 'react-router-dom'
 import { ArrowRight, Eye, EyeOff, Loader2, Wallet } from 'lucide-react'
-import { SESSION_EXPIRED_MESSAGE_KEY } from '@/lib/auth-session-flags'
+import {
+  INACTIVE_ACCOUNT_MESSAGE_KEY,
+  SESSION_EXPIRED_MESSAGE_KEY,
+} from '@/lib/auth-session-flags'
 import { useAuth } from '@/hooks/useAuth'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -16,6 +19,7 @@ export function LoginPage() {
   const { signIn, signUp, resetPassword, isAuthenticated } = useAuth()
   const [mode, setMode] = useState<Mode>('login')
   const [sessionExpiredNotice, setSessionExpiredNotice] = useState(false)
+  const [inactiveAccountNotice, setInactiveAccountNotice] = useState(false)
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [showPassword, setShowPassword] = useState(false)
@@ -27,6 +31,10 @@ export function LoginPage() {
     if (sessionStorage.getItem(SESSION_EXPIRED_MESSAGE_KEY)) {
       sessionStorage.removeItem(SESSION_EXPIRED_MESSAGE_KEY)
       setSessionExpiredNotice(true)
+    }
+    if (sessionStorage.getItem(INACTIVE_ACCOUNT_MESSAGE_KEY)) {
+      sessionStorage.removeItem(INACTIVE_ACCOUNT_MESSAGE_KEY)
+      setInactiveAccountNotice(true)
     }
   }, [])
 
@@ -135,6 +143,15 @@ export function LoginPage() {
             >
               Your session ended. Your data is still saved on this device — sign in again to open the app
               and sync to the cloud.
+            </div>
+          )}
+
+          {inactiveAccountNotice && (
+            <div
+              role="status"
+              className="mt-4 rounded-xl border border-stone-200 bg-stone-100 px-4 py-3 text-sm text-stone-800"
+            >
+              Your account is inactive. Contact the administrator to activate it before you can use the app.
             </div>
           )}
 

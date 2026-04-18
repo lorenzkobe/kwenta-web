@@ -6,6 +6,7 @@ import {
   ReceiptText,
   Scale,
   UserRound,
+  Users,
   Wallet,
   WifiOff,
   Wifi,
@@ -13,6 +14,7 @@ import {
 import { useEffect, useState } from 'react'
 import { useLiveQuery } from 'dexie-react-hooks'
 import { Link, NavLink } from 'react-router-dom'
+import { useAuth } from '@/hooks/useAuth'
 import { useCurrentUser } from '@/hooks/useCurrentUser'
 import { hasUnsyncedLocalDataForUser } from '@/sync/sync-service'
 import { useAppStore } from '@/store/app-store'
@@ -21,7 +23,7 @@ import { cn } from '@/lib/utils'
 import { NotificationsBell } from '@/components/notifications/NotificationsBell'
 import { Button } from '@/components/ui/button'
 
-const navItems = [
+const baseNavItems = [
   { to: '/app', icon: Home, label: 'Home', end: true },
   { to: '/app/bills', icon: ReceiptText, label: 'Bills', end: false },
   { to: '/app/groups', icon: Layers3, label: 'Groups', end: false },
@@ -29,7 +31,11 @@ const navItems = [
   { to: '/app/balances', icon: Scale, label: 'Balances', end: false },
 ] as const
 
+const adminNavItem = { to: '/app/users', icon: Users, label: 'Users', end: false }
+
 export function AppHeader() {
+  const { userType } = useAuth()
+  const navItems = userType === 'admin' ? [...baseNavItems, adminNavItem] : [...baseNavItems]
   const isOnline = useAppStore((s) => s.isOnline)
   const syncStatus = useAppStore((s) => s.syncStatus)
   const syncRetryAt = useAppStore((s) => s.syncRetryAt)
