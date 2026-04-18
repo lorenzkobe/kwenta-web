@@ -10,7 +10,7 @@ import { formatCurrency } from '@/lib/utils'
  * Needed when RPC lookup finds a profile that hasn't been synced to this device.
  *
  * After sign-out / sign-in, normal sync pulls your own rows and owned local contacts, but not other
- * users’ account rows (RLS). Linked contacts still need the remote row for display — this RPC is
+ * users' account rows (RLS). Linked contacts still need the remote row for display — this RPC is
  * allowed to return that for linking.
  */
 export async function fetchRemoteProfileIntoDexie(profileId: string): Promise<void> {
@@ -46,7 +46,7 @@ const LINK_UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 
 /**
- * Resolve a remote profile id for “link local contact → account”.
+ * Resolve a remote profile id for "link local contact → account".
  * Accepts Kwenta profile UUID or the sign-in email (case-insensitive). Email must exist on this device.
  */
 export async function findRemoteProfileIdForLinking(input: string): Promise<string | null> {
@@ -168,7 +168,7 @@ export async function resolveProfileDisplay(
   }
 }
 
-/** Net balance per currency: positive = you should receive from them, negative = you should pay them. Same bill inclusion as `listBillsInvolvingPair`. Per line: if you paid (`created_by`) you are owed each other person’s share even when you are not on that line’s split; if they paid, only your split row counts. */
+/** Net balance per currency: positive = you should receive from them, negative = you should pay them. Personal bills use direct payer-split pairwise; group bills use each member's group-level net balance (same algorithm as computeGroupBalances) to derive the pairwise amount, so group settlements that consolidate multi-party debts are handled correctly. */
 export async function computePairwiseNet(
   meId: string,
   otherId: string,
@@ -178,9 +178,10 @@ export async function computePairwiseNet(
 
   const byCurrency = new Map<string, number>()
 
-  const bills = await db.bills.filter((b) => !b.is_deleted).toArray()
+  // Personal bills (group_id = null): direct payer-split pairwise approach
+  const personalBills = await db.bills.filter((b) => !b.is_deleted && b.group_id === null).toArray()
 
-  for (const bill of bills) {
+  for (const bill of personalBills) {
     const participantUnion = await participantUnionForBill(bill.id)
     const meOnBill = profileSetTouchesBill(meIds, bill, participantUnion)
     const otherOnBill = profileSetTouchesBill(otherIds, bill, participantUnion)
@@ -196,7 +197,6 @@ export async function computePairwiseNet(
       const cur = bill.currency
       const prev = byCurrency.get(cur) ?? 0
 
-      // Payer is often not on a line split; only require the split row that exists for that side.
       if (meIds.has(bill.created_by)) {
         if (!otherSplit) continue
         byCurrency.set(cur, prev + otherSplit.computed_amount)
@@ -207,8 +207,11 @@ export async function computePairwiseNet(
     }
   }
 
-  const settlements = await db.settlements.filter((s) => !s.is_deleted && s.is_settled).toArray()
-  for (const s of settlements) {
+  // Personal settlements only (group_id = null)
+  const personalSettlements = await db.settlements
+    .filter((s) => !s.is_deleted && s.is_settled && s.group_id === null)
+    .toArray()
+  for (const s of personalSettlements) {
     const fromMe = meIds.has(s.from_user_id)
     const toMe = meIds.has(s.to_user_id)
     const fromOther = otherIds.has(s.from_user_id)
@@ -217,12 +220,80 @@ export async function computePairwiseNet(
 
     const cur = s.currency
     const prev = byCurrency.get(cur) ?? 0
-    // from_user pays to_user: money reduces payer-side debt / payee-side receivable vs pairwise net
     if (fromOther && toMe) {
       byCurrency.set(cur, prev - s.amount)
     } else if (fromMe && toOther) {
       byCurrency.set(cur, prev + s.amount)
     }
+  }
+
+  // Group bills: derive pairwise from each member's group-level net balance.
+  // Group settlements consolidate multi-party debts (e.g. C pays A $80 to cover
+  // both A's $30 direct share and B's $50 indirect share), so applying them at
+  // the bill-level pairwise would produce wrong results. Instead, compute the
+  // full group net for me and other (the same algorithm as computeGroupBalances),
+  // then infer the pairwise amount from the two net balances.
+  const myMemberships = await db.group_members
+    .filter((m) => !m.is_deleted && meIds.has(m.user_id))
+    .toArray()
+  const myGroupIds = new Set(myMemberships.map((m) => m.group_id))
+  const otherMemberships = await db.group_members
+    .filter((m) => !m.is_deleted && otherIds.has(m.user_id))
+    .toArray()
+  const sharedGroupIds = [
+    ...new Set(otherMemberships.map((m) => m.group_id).filter((gid) => myGroupIds.has(gid))),
+  ]
+
+  for (const groupId of sharedGroupIds) {
+    const group = await db.groups.get(groupId)
+    if (!group || group.is_deleted) continue
+
+    const groupBills = await db.bills.where('group_id').equals(groupId).toArray()
+    let meGroupNet = 0
+    let otherGroupNet = 0
+
+    for (const bill of groupBills) {
+      if (bill.is_deleted) continue
+      const items = await db.bill_items.where('bill_id').equals(bill.id).toArray()
+      for (const item of items) {
+        if (item.is_deleted) continue
+        const splits = await db.item_splits.where('item_id').equals(item.id).toArray()
+        const active = splits.filter((s) => !s.is_deleted)
+        if (active.length === 0) continue
+        const totalSplit = active.reduce((sum, s) => sum + s.computed_amount, 0)
+
+        if (meIds.has(bill.created_by)) meGroupNet += totalSplit
+        if (otherIds.has(bill.created_by)) otherGroupNet += totalSplit
+        for (const split of active) {
+          if (meIds.has(split.user_id)) meGroupNet -= split.computed_amount
+          if (otherIds.has(split.user_id)) otherGroupNet -= split.computed_amount
+        }
+      }
+    }
+
+    const groupSettlements = await db.settlements.where('group_id').equals(groupId).toArray()
+    for (const s of groupSettlements) {
+      if (s.is_deleted || !s.is_settled) continue
+      if (meIds.has(s.from_user_id)) meGroupNet += s.amount
+      if (meIds.has(s.to_user_id)) meGroupNet -= s.amount
+      if (otherIds.has(s.from_user_id)) otherGroupNet += s.amount
+      if (otherIds.has(s.to_user_id)) otherGroupNet -= s.amount
+    }
+
+    meGroupNet = Math.round(meGroupNet * 100) / 100
+    otherGroupNet = Math.round(otherGroupNet * 100) / 100
+
+    const cur = group.currency
+    const prev = byCurrency.get(cur) ?? 0
+
+    if (meGroupNet > 0.005 && otherGroupNet < -0.005) {
+      // I should receive from the group, other should pay — other owes me up to min of both
+      byCurrency.set(cur, prev + Math.min(meGroupNet, Math.abs(otherGroupNet)))
+    } else if (meGroupNet < -0.005 && otherGroupNet > 0.005) {
+      // I should pay to the group, other should receive — I owe other up to min of both
+      byCurrency.set(cur, prev - Math.min(Math.abs(meGroupNet), otherGroupNet))
+    }
+    // Same sign or both ~0: no direct pairwise obligation between the two of us
   }
 
   return byCurrency
@@ -676,7 +747,7 @@ export async function collectRelatedProfileIds(meId: string): Promise<Set<string
     }
     if (!iParticipate) continue
 
-    // Include payer (created_by) even when not on any line — otherwise the other party’s
+    // Include payer (created_by) even when not on any line — otherwise the other party's
     // personal balances omit the person who paid.
     const union = await participantUnionForBill(bill.id)
     for (const uid of union) {
