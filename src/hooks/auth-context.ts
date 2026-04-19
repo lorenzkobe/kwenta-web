@@ -9,6 +9,11 @@ export type AuthContextValue = {
    * the database column defaults to `user` and is NOT NULL.
    */
   userType: ProfileUserType | null
+  /**
+   * `true` only after the signed-in user's profile row is seeded in Dexie (`ensureProfile` finished).
+   * Use with `user` to gate cloud sync so sync never runs before local profile bootstrap.
+   */
+  authReady: boolean
   loading: boolean
   isAuthenticated: boolean
   signIn: (email: string, password: string) => Promise<{ error: Error | null }>

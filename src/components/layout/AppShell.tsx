@@ -12,11 +12,11 @@ import { useAppStore } from '@/store/app-store'
 
 export function AppShell() {
   useOnlineStatus()
-  const { loading, user } = useAuth()
+  const { loading, user, authReady } = useAuth()
   const initialCloudHydration = useAppStore((s) => s.initialCloudHydration)
   const isOnline = useAppStore((s) => s.isOnline)
-  useSync(Boolean(user))
-  useRealtime(Boolean(user), user?.id)
+  useSync(Boolean(user && authReady))
+  useRealtime(Boolean(user && authReady), user?.id)
 
   if (loading) {
     return <InitialAppLoader phase="auth" />

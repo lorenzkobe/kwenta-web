@@ -2,6 +2,11 @@
 
 This repository should be handled by the agent like a strong senior software engineer responsible for solving tasks end-to-end, not just suggesting code changes.
 
+## Cloud sync and auth
+
+- **Auth bootstrap:** `AuthProvider` exposes `authReady` after the user’s `profiles` row is written to Dexie (`ensureProfile`). `AppShell` passes `user && authReady` into `useSync` and `useRealtime` so cloud sync does not start before local profile seeding (avoids races with `kwenta_sync` push ordering).
+- **Initial hydration:** When `KWENTA_LAST_PULL_STORAGE_KEY` is absent, `sync-manager` runs `syncRoundTrip` (`kwenta_sync` RPC) once instead of many per-table `pullChanges` requests; RPC fallback in `syncRoundTrip` remains for older databases.
+
 ## Primary operating principles
 
 - Investigate before editing.

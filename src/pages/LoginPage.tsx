@@ -16,7 +16,7 @@ export function LoginPage() {
   const location = useLocation()
   const [searchParams] = useSearchParams()
   const from = (location.state as { from?: string } | null)?.from ?? '/app'
-  const { signIn, signUp, resetPassword, isAuthenticated } = useAuth()
+  const { signIn, signUp, resetPassword, isAuthenticated, loading: authLoading, user } = useAuth()
   const [mode, setMode] = useState<Mode>('login')
   const [sessionExpiredNotice, setSessionExpiredNotice] = useState(false)
   const [inactiveAccountNotice, setInactiveAccountNotice] = useState(false)
@@ -37,6 +37,16 @@ export function LoginPage() {
       setInactiveAccountNotice(true)
     }
   }, [])
+
+  /** Inactive / gate failure sets this key in applySession after sign-in; show notice without a duplicate profiles fetch in signIn. */
+  useEffect(() => {
+    if (authLoading) return
+    if (user) return
+    if (sessionStorage.getItem(INACTIVE_ACCOUNT_MESSAGE_KEY)) {
+      sessionStorage.removeItem(INACTIVE_ACCOUNT_MESSAGE_KEY)
+      setInactiveAccountNotice(true)
+    }
+  }, [authLoading, user])
 
   useEffect(() => {
     const err = searchParams.get('error')

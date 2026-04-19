@@ -8,7 +8,7 @@ import {
   fullSync,
   getMillisecondsSinceLastPull,
   hasUnsyncedLocalDataForUser,
-  pullChanges,
+  syncRoundTrip,
 } from './sync-service'
 
 /** Slow backup in case a CRUD-triggered sync was missed */
@@ -102,14 +102,14 @@ async function runSync(reason: SyncRunReason) {
   useAppStore.getState().setSyncRetryAt(null)
 
   try {
-    // After sign-out we clear IndexedDB + last-pull; on the next sign-in there is nothing to upload
-    // until the user does work locally. Pull first; only run kwenta_sync (push + pull) if something
-    // is still unsynced (e.g. brand-new account stub, or session expiry with offline edits).
+    // After sign-out we clear IndexedDB + last-pull; on the next sign-in use one kwenta_sync round-trip
+    // (syncRoundTrip) instead of many pullChanges HTTP calls. Auth gates sync until Dexie has the profile row.
+    // If something is still unsynced after that (e.g. offline edits), fullSync runs next.
     const needsInitialPull = !localStorage.getItem(KWENTA_LAST_PULL_STORAGE_KEY)
     if (needsInitialPull) {
-      const pullResult = await pullChanges(userId)
-      if (pullResult.errors.length > 0) {
-        console.warn('[sync] initial pull failed:', pullResult.errors)
+      const initialResult = await syncRoundTrip(userId)
+      if (initialResult.errors.length > 0) {
+        console.warn('[sync] initial sync round-trip failed:', initialResult.errors)
         useAppStore.getState().setSyncStatus('error')
         useAppStore.getState().setInitialCloudHydration('failed')
         scheduleRetry()

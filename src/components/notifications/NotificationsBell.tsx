@@ -130,7 +130,6 @@ export function NotificationsBell({ userId }: { userId: string }) {
     // re-creating the subscription on every isOnline / loadList reference change,
     // which was causing missed INSERT events. loadListRef.current is used instead for
     // the error-recovery path so it always calls the latest version.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [userId, isOnline])
 
   useEffect(() => {

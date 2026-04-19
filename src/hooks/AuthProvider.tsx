@@ -16,8 +16,7 @@ import { withMetric } from '@/lib/client-metrics'
 import { db } from '@/db/db'
 import { useAppStore } from '@/store/app-store'
 import { triggerSync } from '@/sync/sync-manager'
-import { messageForAccountNotActive } from '@/lib/account-gate-messages'
-import type { Profile, ProfileAccountStatus, ProfileUserType } from '@/types'
+import type { Profile, ProfileUserType } from '@/types'
 import { getDeviceId, now } from '@/lib/utils'
 import type { AuthContextValue } from '@/hooks/auth-context'
 import { AuthContext } from '@/hooks/auth-context'
@@ -26,8 +25,10 @@ import { AuthContext } from '@/hooks/auth-context'
  * Seed Dexie with the server profile when possible. Avoid inserting a local stub before the first
  * sync: kwenta_sync applies pushes before pulls, and a stub would overwrite Postgres display_name.
  * Uses put() so parallel callers don't race on add().
+ *
+ * When `prefetched` is the row from `profiles` (e.g. account gate `select('*')`), skips a redundant fetch.
  */
-async function ensureProfile(userId: string, email: string) {
+async function ensureProfile(userId: string, email: string, prefetched?: Profile | null) {
   const cacheKey = `${userId}:${email}`
   if (ensureProfileInFlight.has(cacheKey)) {
     await ensureProfileInFlight.get(cacheKey)
@@ -37,6 +38,14 @@ async function ensureProfile(userId: string, email: string) {
   const task = (async () => {
     const existing = await db.profiles.get(userId)
     if (existing) return
+
+    if (prefetched) {
+      await db.profiles.put({
+        ...prefetched,
+        synced_at: prefetched.updated_at,
+      })
+      return
+    }
 
     const { data: remote, error } = await withMetric(
       'auth.ensureProfile.fetch',
@@ -94,6 +103,7 @@ const ensureProfileInFlight = new Map<string, Promise<void>>()
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null)
   const [userType, setUserType] = useState<ProfileUserType | null>(null)
+  const [authReady, setAuthReady] = useState(false)
   const [loading, setLoading] = useState(true)
   const setCurrentUserId = useAppStore((s) => s.setCurrentUserId)
   const prevAuthUserIdRef = useRef<string | null>(null)
@@ -105,13 +115,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (!session?.user) {
         setUser(null)
         setUserType(null)
+        setAuthReady(false)
         setCurrentUserId(null)
         return
       }
 
       const u = session.user
       const { data: prof, error } = await withMetric('auth.accountGate', () =>
-        supabase.from('profiles').select('account_status, user_type').eq('id', u.id).maybeSingle(),
+        supabase.from('profiles').select('*').eq('id', u.id).maybeSingle(),
       )
 
       if (error) {
@@ -120,6 +131,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         await supabase.auth.signOut()
         setUser(null)
         setUserType(null)
+        setAuthReady(false)
         setCurrentUserId(null)
         return
       }
@@ -129,18 +141,24 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         await supabase.auth.signOut()
         setUser(null)
         setUserType(null)
+        setAuthReady(false)
         setCurrentUserId(null)
         return
       }
 
-      setUser(u)
-      setUserType(prof.user_type === 'admin' ? 'admin' : 'user')
-      setCurrentUserId(u.id)
+      const fullProf = prof as Profile
       try {
-        await ensureProfile(u.id, u.email ?? '')
+        await ensureProfile(u.id, u.email ?? '', fullProf)
       } catch (e) {
         console.warn('[auth] ensureProfile failed', e)
       }
+
+      if (cancelled) return
+
+      setUser(u)
+      setUserType(fullProf.user_type === 'admin' ? 'admin' : 'user')
+      setCurrentUserId(u.id)
+      setAuthReady(true)
     }
 
     void (async () => {
@@ -194,24 +212,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       return { error: new Error('Sign in failed. Try again.') }
     }
 
-    const { data: prof, error: profError } = await supabase
-      .from('profiles')
-      .select('account_status')
-      .eq('id', data.session.user.id)
-      .maybeSingle()
-
-    if (profError) {
-      console.warn('[auth] signIn profile check failed', profError)
-      await supabase.auth.signOut()
-      return { error: new Error('Could not verify your account. Try again.') }
-    }
-
-    const status = prof?.account_status as ProfileAccountStatus | undefined
-    if (!prof || status !== 'active') {
-      await supabase.auth.signOut()
-      return { error: new Error(messageForAccountNotActive(status)) }
-    }
-
+    // Account gate + Dexie seed happen in applySession (avoids duplicate profiles HTTP calls).
     return { error: null }
   }, [])
 
@@ -230,27 +231,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     const requiresEmailConfirmation = !data.session
 
-    if (data.session?.user) {
-      const { data: prof, error: profError } = await supabase
-        .from('profiles')
-        .select('account_status')
-        .eq('id', data.session.user.id)
-        .maybeSingle()
-
-      if (profError) {
-        await supabase.auth.signOut()
-        return { error: new Error('Could not verify your account. Try again.'), requiresEmailConfirmation: false }
-      }
-
-      const status = prof?.account_status as ProfileAccountStatus | undefined
-      if (!prof || status !== 'active') {
-        await supabase.auth.signOut()
-        return {
-          error: new Error(messageForAccountNotActive(status)),
-          requiresEmailConfirmation: false,
-        }
-      }
-    }
+    // When a session is returned immediately, account gate + Dexie seed run in applySession.
 
     return { error: null, requiresEmailConfirmation }
   }, [])
@@ -333,6 +314,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const value: AuthContextValue = {
     user,
     userType,
+    authReady,
     loading,
     isAuthenticated: !!user,
     signIn,
