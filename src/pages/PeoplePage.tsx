@@ -45,7 +45,12 @@ export function PeoplePage() {
         lines,
       })
     }
-    out.sort((a, b) => a.displayName.localeCompare(b.displayName))
+    out.sort((a, b) => {
+      const aHasBalance = a.tone !== 'balanced'
+      const bHasBalance = b.tone !== 'balanced'
+      if (aHasBalance !== bHasBalance) return aHasBalance ? -1 : 1
+      return a.displayName.localeCompare(b.displayName)
+    })
     return out
   }, [userId])
 

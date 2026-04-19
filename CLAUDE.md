@@ -347,16 +347,17 @@ The `kwenta_sync` RPC is the single entry point for all sync: accepts push paylo
 - `/` — Public landing page (`src/landing/`)
 - `/login` — Auth page
 - `/app/*` — Authenticated shell (lazy routes):
-  - `/app/home` — Dashboard
-  - `/app/bills` — Personal bills list
-  - `/app/bills/add` — Add/edit bill
-  - `/app/bills/:id` — Bill detail
+  - `/app` — Home (dashboard stats, **to receive / to pay** rollups with personal vs group breakdown, quick actions, recent bills)
+  - `/app/bills` — Bills list
+  - `/app/bills/new` — Add bill
+  - `/app/bills/:billId` — Bill detail
   - `/app/groups` — Groups list
-  - `/app/groups/:id` — Group detail (members, bills, balances, settlements)
+  - `/app/groups/:groupId` — Group detail (members, bills, balances, settlements)
   - `/app/people` — Contacts
-  - `/app/people/:id` — Person detail (pairwise net, shared bills, settlements)
-  - `/app/balances` — All group balances + settlement suggestions
+  - `/app/people/:personId` — Person detail (pairwise net, shared bills, settlements)
+  - `/app/balances` — Redirects to `/app` (legacy bookmark)
   - `/app/settings` — Profile + app settings
+  - `/app/users` — Admin users (admin only)
 
 ---
 

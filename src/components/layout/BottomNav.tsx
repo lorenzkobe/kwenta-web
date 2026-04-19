@@ -1,4 +1,4 @@
-import { BookUser, Home, Layers3, ReceiptText, Scale, UserRound, Users } from 'lucide-react'
+import { BookUser, Home, Layers3, ReceiptText, UserRound, Users } from 'lucide-react'
 import { NavLink } from 'react-router-dom'
 import { useAuth } from '@/hooks/useAuth'
 import { cn } from '@/lib/utils'
@@ -8,7 +8,6 @@ const baseNavItems = [
   { to: '/app/bills', icon: ReceiptText, label: 'Bills', end: false },
   { to: '/app/groups', icon: Layers3, label: 'Groups', end: false },
   { to: '/app/people', icon: BookUser, label: 'People', end: false },
-  { to: '/app/balances', icon: Scale, label: 'Balances', end: false },
 ] as const
 
 const adminNavItem = { to: '/app/users', icon: Users, label: 'Users', end: false }
@@ -24,7 +23,7 @@ export function BottomNav() {
       <div
         className={cn(
           'mx-auto grid max-w-136 gap-0 px-1 py-1',
-          userType === 'admin' ? 'grid-cols-7' : 'grid-cols-6',
+          userType === 'admin' ? 'grid-cols-6' : 'grid-cols-5',
         )}
       >
         {navItems.map(({ to, icon: Icon, label, end }) => (

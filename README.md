@@ -2,7 +2,7 @@
 
 Offline-first bill splitting for real-life groups.
 
-Kwenta is a mobile-first PWA for tracking shared expenses, itemized bills, groups, balances, and settlements.
+Kwenta is a mobile-first PWA for tracking shared expenses, itemized bills, groups, and settlements; **home** shows your overall to receive / to pay with personal and group breakdown.
 
 **Product model:** Personal bills (no group) are **your** expenses—you are treated as the payer. Group bills are where the group shares a ledger; if someone else paid for something in real life, they add it on **their** Kwenta account.
  It works locally without an account, then syncs to Supabase when the user signs in and has an internet connection.
@@ -15,7 +15,7 @@ Kwenta is a mobile-first PWA for tracking shared expenses, itemized bills, group
 - Use the app without an account through local browser storage
 - Sync and back up data to Supabase when signed in
 - Install as a PWA and continue using it offline
-- Review balances and settlement suggestions
+- See balance rollups on the home dashboard; settlement suggestions remain in group detail where relevant
 
 ## Tech Stack
 

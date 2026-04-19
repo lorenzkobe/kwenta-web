@@ -4,7 +4,6 @@ import {
   Home,
   Layers3,
   ReceiptText,
-  Scale,
   UserRound,
   Users,
   Wallet,
@@ -28,7 +27,6 @@ const baseNavItems = [
   { to: '/app/bills', icon: ReceiptText, label: 'Bills', end: false },
   { to: '/app/groups', icon: Layers3, label: 'Groups', end: false },
   { to: '/app/people', icon: BookUser, label: 'People', end: false },
-  { to: '/app/balances', icon: Scale, label: 'Balances', end: false },
 ] as const
 
 const adminNavItem = { to: '/app/users', icon: Users, label: 'Users', end: false }
