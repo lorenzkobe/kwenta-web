@@ -336,7 +336,7 @@ export function startRealtimeForUser(userId: string): () => void {
     })
   }
 
-  const lastSeen = localStorage.getItem(LAST_SEEN_EVENT_KEY(userId)) ?? '1970-01-01T00:00:00.000Z'
+  const lastSeen = localStorage.getItem(LAST_SEEN_EVENT_KEY(userId)) ?? now()
   scheduleCatchUp(lastSeen)
 
   async function flush() {
@@ -373,7 +373,7 @@ export function startRealtimeForUser(userId: string): () => void {
     .subscribe((status) => {
       // On reconnect, do a quick catch-up query based on last seen timestamp.
       if (status === 'SUBSCRIBED') {
-        const sinceIso = localStorage.getItem(LAST_SEEN_EVENT_KEY(userId)) ?? '1970-01-01T00:00:00.000Z'
+        const sinceIso = localStorage.getItem(LAST_SEEN_EVENT_KEY(userId)) ?? now()
         scheduleCatchUp(sinceIso)
       }
     })
