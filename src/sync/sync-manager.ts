@@ -3,11 +3,11 @@ import { flushQueuedKwentaNotifications, hasQueuedKwentaNotifications } from '@/
 import { markPendingMutationsApplied, markPendingMutationsConflict } from '@/sync/cloud-first-mutations'
 import { supabase } from '@/lib/supabase'
 import { useAppStore } from '@/store/app-store'
+import { KWENTA_LAST_PULL_STORAGE_KEY } from '@/lib/kwenta-storage-keys'
 import {
   fullSync,
   getMillisecondsSinceLastPull,
   hasUnsyncedLocalDataForUser,
-  KWENTA_LAST_PULL_STORAGE_KEY,
   pullChanges,
 } from './sync-service'
 
@@ -111,6 +111,7 @@ async function runSync(reason: SyncRunReason) {
       if (pullResult.errors.length > 0) {
         console.warn('[sync] initial pull failed:', pullResult.errors)
         useAppStore.getState().setSyncStatus('error')
+        useAppStore.getState().setInitialCloudHydration('failed')
         scheduleRetry()
         return
       }
@@ -129,6 +130,9 @@ async function runSync(reason: SyncRunReason) {
       console.warn('[sync] errors:', result.errors)
       await markPendingMutationsConflict(userId, 'replay_sync_error', result.errors.join(' | '))
       useAppStore.getState().setSyncStatus('error')
+      if (!localStorage.getItem(KWENTA_LAST_PULL_STORAGE_KEY)) {
+        useAppStore.getState().setInitialCloudHydration('failed')
+      }
       scheduleRetry()
     } else {
       await markPendingMutationsApplied(userId)
@@ -145,6 +149,9 @@ async function runSync(reason: SyncRunReason) {
     }
     console.warn('[sync] failed:', err)
     useAppStore.getState().setSyncStatus('error')
+    if (!localStorage.getItem(KWENTA_LAST_PULL_STORAGE_KEY)) {
+      useAppStore.getState().setInitialCloudHydration('failed')
+    }
     scheduleRetry()
   } finally {
     isSyncing = false

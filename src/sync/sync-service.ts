@@ -3,6 +3,8 @@ import { db } from '@/db/db'
 import { supabase } from '@/lib/supabase'
 import { captureMetric, withMetric } from '@/lib/client-metrics'
 import { isRuntimeFlagEnabled } from '@/lib/runtime-flags'
+import { KWENTA_LAST_PULL_STORAGE_KEY } from '@/lib/kwenta-storage-keys'
+import { useAppStore } from '@/store/app-store'
 import { now } from '@/lib/utils'
 import type {
   ActivityLog,
@@ -44,7 +46,7 @@ async function resolveSettlementPartyIdForPush(localUserId: string): Promise<str
   return localUserId
 }
 
-export const KWENTA_LAST_PULL_STORAGE_KEY = 'kwenta_last_pull'
+export { KWENTA_LAST_PULL_STORAGE_KEY } from '@/lib/kwenta-storage-keys'
 
 /** Time since we last advanced `KWENTA_LAST_PULL_STORAGE_KEY` after a successful sync. */
 export function getMillisecondsSinceLastPull(): number {
@@ -386,6 +388,7 @@ export async function pullChanges(userId: string): Promise<{ pulled: number; err
 
   if (errors.length === 0) {
     localStorage.setItem(KWENTA_LAST_PULL_STORAGE_KEY, now())
+    useAppStore.getState().setInitialCloudHydration('ready')
   }
 
   captureMetric('sync.pullChanges', errors.length === 0, performance.now() - startedAt, { pulled, errors: errors.length })
@@ -754,6 +757,7 @@ export async function syncRoundTrip(userId: string): Promise<{
   }
 
   localStorage.setItem(KWENTA_LAST_PULL_STORAGE_KEY, now())
+  useAppStore.getState().setInitialCloudHydration('ready')
 
   let pushedCount = 0
   for (const rows of Object.values(pPush)) {

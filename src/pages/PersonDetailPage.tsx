@@ -336,6 +336,7 @@ export function PersonDetailPage() {
   const [peerToLinkConfirm, setPeerToLinkConfirm] = useState<{ id: string; displayName: string } | null>(
     null,
   )
+  const [peerLinkToUnlink, setPeerLinkToUnlink] = useState<ProfilePeerLink | null>(null)
   const [billsScope, setBillsScope] = useState<'personal' | 'groups'>('personal')
   const { confirm: confirmFlow, dialog: flowConfirmDialog } = useConfirmDialog()
 
@@ -522,6 +523,7 @@ export function PersonDetailPage() {
     setLinkAccountOpen(false)
     setLinkPeerOpen(false)
     setPeerToLinkConfirm(null)
+    setPeerLinkToUnlink(null)
   }, [personId])
 
   if (!userId || !personId) {
@@ -599,13 +601,26 @@ export function PersonDetailPage() {
 
   async function handleConfirmPeerLink() {
     if (!userId || !personId || !peerToLinkConfirm) return
-    await addProfilePeerLink(personId, peerToLinkConfirm.id, userId)
-    setPeerToLinkConfirm(null)
+    try {
+      await addProfilePeerLink(personId, peerToLinkConfirm.id, userId)
+      toast.success('Profiles linked.')
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : 'Could not save the link.'
+      toast.error(msg)
+      throw e
+    }
   }
 
-  async function handleUnlinkPeer(row: ProfilePeerLink) {
-    if (!userId) return
-    await removeProfilePeerLink(row.id, userId)
+  async function handleConfirmUnlinkPeer() {
+    if (!userId || !peerLinkToUnlink) return
+    try {
+      await removeProfilePeerLink(peerLinkToUnlink.id, userId)
+      toast.success('Link removed.')
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : 'Could not remove the link.'
+      toast.error(msg)
+      throw e
+    }
   }
 
   async function handleLinkByIdOrEmail() {
@@ -876,7 +891,7 @@ export function PersonDetailPage() {
                             ? 'Unlink the Kwenta account from “Link account” first (coming soon).'
                             : 'Unlink this profile'
                         }
-                        onClick={() => void handleUnlinkPeer(row)}
+                        onClick={() => setPeerLinkToUnlink(row)}
                       >
                         <Unlink className="size-4" />
                         <span className="sr-only">Unlink</span>
@@ -1214,7 +1229,19 @@ export function PersonDetailPage() {
         title="Link this profile?"
         description={`Activity involving ${peerToLinkConfirm?.displayName ?? 'them'} will show on this contact.`}
         confirmLabel="Link"
-        onConfirm={() => void handleConfirmPeerLink()}
+        onConfirm={() => handleConfirmPeerLink()}
+      />
+
+      <ConfirmDialog
+        open={peerLinkToUnlink !== null}
+        onOpenChange={(o) => {
+          if (!o) setPeerLinkToUnlink(null)
+        }}
+        title="Unlink this profile?"
+        description="They’ll no longer be treated as the same person as this contact. Balances and bills won’t be combined here until you link them again."
+        confirmLabel="Unlink"
+        variant="danger"
+        onConfirm={() => handleConfirmUnlinkPeer()}
       />
 
       {linkAccountOpen && canLink && (

@@ -692,12 +692,26 @@ export async function addProfilePeerLink(
   peerProfileId: string,
   actorUserId: string,
 ): Promise<void> {
-  if (anchorLocalId === peerProfileId) return
+  if (anchorLocalId === peerProfileId) {
+    throw new Error('Cannot link a profile to itself.')
+  }
   const anchor = await db.profiles.get(anchorLocalId)
-  if (!anchor || anchor.is_deleted || !anchor.is_local || anchor.owner_id !== actorUserId) return
-  const peer = await db.profiles.get(peerProfileId)
-  if (!peer || peer.is_deleted) return
-  if (peerProfileId === actorUserId) return
+  if (!anchor || anchor.is_deleted || !anchor.is_local || anchor.owner_id !== actorUserId) {
+    throw new Error('Only your local contacts can be link anchors.')
+  }
+  let peer = await db.profiles.get(peerProfileId)
+  if (!peer || peer.is_deleted) {
+    await fetchRemoteProfileIntoDexie(peerProfileId)
+    peer = await db.profiles.get(peerProfileId)
+  }
+  if (!peer || peer.is_deleted) {
+    throw new Error(
+      'Could not load that person’s profile from the server. Check your connection, or make sure you share a group with them.',
+    )
+  }
+  if (peerProfileId === actorUserId) {
+    throw new Error('You can’t link your own account as a duplicate.')
+  }
 
   const dupe = await db.profile_peer_links
     .filter(
@@ -708,7 +722,9 @@ export async function addProfilePeerLink(
         l.peer_profile_id === peerProfileId,
     )
     .first()
-  if (dupe) return
+  if (dupe) {
+    throw new Error('That profile is already linked to this contact.')
+  }
 
   const row: ProfilePeerLink = {
     ...syncFields(),
@@ -717,7 +733,6 @@ export async function addProfilePeerLink(
     peer_profile_id: peerProfileId,
   }
   await db.profile_peer_links.add(row)
-  await fetchRemoteProfileIntoDexie(peerProfileId)
   await notifySyncAfterMutation({
     actorUserId,
     operation: 'add_profile_peer_link',

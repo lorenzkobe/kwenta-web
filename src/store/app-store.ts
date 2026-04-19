@@ -1,6 +1,15 @@
 import { create } from 'zustand'
+import { KWENTA_LAST_PULL_STORAGE_KEY } from '@/lib/kwenta-storage-keys'
 
 type SyncStatus = 'idle' | 'syncing' | 'error'
+
+/** First cloud pull after sign-in (no last-pull cursor) — gate shell until success or offline/error escape hatch. */
+export type InitialCloudHydration = 'pending' | 'ready' | 'failed'
+
+function initialCloudHydrationFromStorage(): InitialCloudHydration {
+  if (typeof localStorage === 'undefined') return 'pending'
+  return localStorage.getItem(KWENTA_LAST_PULL_STORAGE_KEY) ? 'ready' : 'pending'
+}
 type RuntimeFlagKey =
   | 'dedupeSyncEnabled'
   | 'realtimeCatchupSingleRun'
@@ -16,6 +25,7 @@ interface AppState {
   currentUserId: string | null
   realtimeNotice: { message: string; at: number } | null
   runtimeFlags: RuntimeFlags
+  initialCloudHydration: InitialCloudHydration
 
   setOnline: (online: boolean) => void
   setSyncStatus: (status: SyncStatus) => void
@@ -23,6 +33,7 @@ interface AppState {
   setCurrentUserId: (id: string | null) => void
   setRealtimeNotice: (message: string | null) => void
   setRuntimeFlag: (key: RuntimeFlagKey, enabled: boolean) => void
+  setInitialCloudHydration: (state: InitialCloudHydration) => void
 }
 
 export const useAppStore = create<AppState>((set) => ({
@@ -31,6 +42,7 @@ export const useAppStore = create<AppState>((set) => ({
   syncRetryAt: null,
   currentUserId: null,
   realtimeNotice: null,
+  initialCloudHydration: initialCloudHydrationFromStorage(),
   runtimeFlags: {
     dedupeSyncEnabled: true,
     realtimeCatchupSingleRun: true,
@@ -46,4 +58,5 @@ export const useAppStore = create<AppState>((set) => ({
     set({ realtimeNotice: message ? { message, at: Date.now() } : null }),
   setRuntimeFlag: (key, enabled) =>
     set((state) => ({ runtimeFlags: { ...state.runtimeFlags, [key]: enabled } })),
+  setInitialCloudHydration: (initialCloudHydration) => set({ initialCloudHydration }),
 }))

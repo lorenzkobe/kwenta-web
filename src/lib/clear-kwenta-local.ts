@@ -1,5 +1,6 @@
 import { db } from '@/db/db'
-import { KWENTA_LAST_PULL_STORAGE_KEY } from '@/sync/sync-service'
+import { useAppStore } from '@/store/app-store'
+import { KWENTA_LAST_PULL_STORAGE_KEY } from '@/lib/kwenta-storage-keys'
 
 export const KWENTA_LOCAL_USER_KEY = 'kwenta_local_user_id'
 
@@ -14,6 +15,7 @@ export async function clearKwentaLocalData(): Promise<void> {
   })
   localStorage.removeItem(KWENTA_LOCAL_USER_KEY)
   localStorage.removeItem(KWENTA_LAST_PULL_STORAGE_KEY)
+  useAppStore.getState().setInitialCloudHydration('pending')
   for (const k of EXTRA_KEYS) {
     localStorage.removeItem(k)
   }

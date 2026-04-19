@@ -13,19 +13,21 @@ import { formatCurrency } from '@/lib/utils'
  * users' account rows (RLS). Linked contacts still need the remote row for display — this RPC is
  * allowed to return that for linking.
  */
-export async function fetchRemoteProfileIntoDexie(profileId: string): Promise<void> {
+/** Returns true if a row was loaded into Dexie (or was already present). */
+export async function fetchRemoteProfileIntoDexie(profileId: string): Promise<boolean> {
   const existing = await db.profiles.get(profileId)
-  if (existing) return
+  if (existing && !existing.is_deleted) return true
 
   const { data, error } = await supabase.rpc('kwenta_fetch_profile_for_linking', {
     p_id: profileId,
   })
   if (error || !data) {
     console.warn('[linkLookup] Failed to fetch profile for local cache:', error?.message)
-    return
+    return false
   }
   const row = data as Record<string, unknown>
   await db.profiles.put({ ...row, synced_at: row.updated_at } as import('@/types').Profile)
+  return true
 }
 
 /** After pull/sync, load remote rows for any owned local contacts that reference `linked_profile_id`. */

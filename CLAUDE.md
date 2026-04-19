@@ -233,7 +233,7 @@ Notifications are queued in `localStorage` (`kwenta_notification_outbox_v1`) and
 
 **`findRemoteProfileIdForLinking(input)`** — accepts UUID or email; looks up locally, then calls `kwenta_lookup_profile_id_by_email` RPC if needed
 
-**`fetchRemoteProfileIntoDexie(profileId)`** — fetches a remote profile via `kwenta_fetch_profile_for_linking` RPC and upserts into Dexie
+**`fetchRemoteProfileIntoDexie(profileId)`** — returns `Promise<boolean>`; fetches via `kwenta_fetch_profile_for_linking` RPC and upserts into Dexie (RPC allows co-members’ rows, including `is_local`, when you share a group — see migration `029`)
 
 **`getMemberSuggestions(currentUserId, query, limit)`** — returns ranked member suggestions (local contacts + online group members) for the add-member flow
 
@@ -317,6 +317,7 @@ Migrations are numbered; there are two `021_` files. Core RPCs:
 | `023` | `bundle_id` on settlements |
 | `024` | Fix group deletion propagation: pull groups/settlements using all membership rows (any `is_deleted`), not just active |
 | `028` | `profile_peer_links` table + RLS; `kwenta_push_profile_peer_links`; extend `kwenta_sync` / pull bundle / `kwenta_empty_reconcile_bundle` / `kwenta_reconcile_user_event` |
+| `029` | `kwenta_fetch_profile_for_linking`: also return profiles you share a group with (including `is_local`), not only non-local accounts |
 
 The `kwenta_sync` RPC is the single entry point for all sync: accepts push payload, applies it server-side, returns pull bundle for `p_since`. Push validators enforce the same RLS rules the client filters apply.
 
