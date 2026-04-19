@@ -9,6 +9,7 @@ import {
   MoreVertical,
   ReceiptText,
   Trash2,
+  Unlink,
   Users,
 } from 'lucide-react'
 import { useLiveQuery } from 'dexie-react-hooks'
@@ -28,10 +29,12 @@ import {
   resolveProfileDisplay,
 } from '@/lib/people'
 import {
+  addProfilePeerLink,
   applyGeneralCreditToPersonalBills,
   createPersonalPaymentWithDistribution,
   deletePerson,
   linkProfileToRemote,
+  removeProfilePeerLink,
 } from '@/db/operations'
 import { ConfirmDialog } from '@/components/common/ConfirmDialog'
 import { useConfirmDialog } from '@/hooks/useConfirmDialog'
@@ -44,7 +47,7 @@ import { SettlementHistoryList } from '@/components/common/SettlementHistoryList
 import { EditSettlementDialog } from '@/components/common/EditSettlementDialog'
 import { RecordSettlementDialog } from '@/components/common/RecordSettlementDialog'
 import type { SettlementHistoryItem } from '@/lib/settlement'
-import type { Profile } from '@/types'
+import type { Profile, ProfilePeerLink } from '@/types'
 import {
   Select,
   SelectContent,
@@ -92,6 +95,118 @@ function PersonOptionsMenu({
         <Button variant="ghost" className="mt-1 w-full rounded-xl text-stone-500" onClick={onClose}>
           Cancel
         </Button>
+      </div>
+    </div>
+  )
+}
+
+function PeerLinkRowLabel({
+  peerId,
+  viewerId,
+  isPrimaryAccount,
+}: {
+  peerId: string
+  viewerId: string
+  isPrimaryAccount: boolean
+}) {
+  const label = useLiveQuery(
+    async () => resolveProfileDisplay(peerId, viewerId),
+    [peerId, viewerId],
+  )
+  return (
+    <div className="min-w-0">
+      <p className="truncate text-sm font-medium text-stone-900">{label?.displayName ?? '…'}</p>
+      <p className="truncate text-xs text-stone-500">
+        {isPrimaryAccount ? 'Kwenta account (primary link)' : (label?.subtitle ?? 'Linked profile')}
+      </p>
+    </div>
+  )
+}
+
+function LinkPeerProfileSheet({
+  onClose,
+  candidates,
+  onPick,
+}: {
+  onClose: () => void
+  candidates: { id: string; displayName: string; subtitle: string }[] | undefined
+  onPick: (peerId: string) => void | Promise<void>
+}) {
+  const [q, setQ] = useState('')
+  const filtered = useMemo(() => {
+    const list = candidates ?? []
+    const n = q.trim().toLowerCase()
+    if (!n) return list
+    return list.filter(
+      (c) =>
+        c.displayName.toLowerCase().includes(n) ||
+        c.subtitle.toLowerCase().includes(n) ||
+        c.id.toLowerCase().includes(n),
+    )
+  }, [candidates, q])
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-end justify-center p-4 sm:items-center">
+      {sheetBackdrop(onClose)}
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="link-peer-title"
+        className="relative z-1 flex max-h-[min(90vh,560px)] w-full max-w-sm animate-[slideUp_0.25s_ease-out] flex-col overflow-hidden rounded-3xl border border-stone-200 bg-white shadow-[0_20px_60px_rgba(28,25,23,0.18)]"
+      >
+        <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-4">
+          <div className="flex items-start gap-2">
+            <Users className="mt-0.5 size-4 shrink-0 text-teal-800" />
+            <div className="min-w-0 space-y-1">
+              <p id="link-peer-title" className="text-sm font-medium text-stone-800">
+                Link another profile
+              </p>
+              <p className="text-xs text-stone-500">
+                Choose someone from your groups who is the same person as this contact. Bills and balances
+                that involve that profile will show here too.
+              </p>
+            </div>
+          </div>
+          <Input
+            placeholder="Search by name or group…"
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+            className="rounded-lg text-sm"
+            autoComplete="off"
+          />
+          {candidates === undefined ? (
+            <div className="flex items-center gap-2 text-xs text-stone-500">
+              <Loader2 className="size-3.5 animate-spin text-teal-800" />
+              Loading…
+            </div>
+          ) : filtered.length === 0 ? (
+            <p className="text-xs text-stone-500">
+              {candidates.length === 0
+                ? 'Join a group with the other person first, or they’re already linked.'
+                : 'No matches — try another search.'}
+            </p>
+          ) : (
+            <ul className="space-y-1">
+              {filtered.map((c) => (
+                <li key={c.id}>
+                  <button
+                    type="button"
+                    className="flex w-full flex-col rounded-xl border border-stone-200 bg-stone-50/80 px-3 py-2.5 text-left text-sm transition-colors hover:bg-stone-100"
+                    onClick={() => void onPick(c.id)}
+                  >
+                    <span className="font-medium text-stone-900">{c.displayName}</span>
+                    <span className="text-xs text-stone-500">{c.subtitle}</span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+        <div className="shrink-0 border-t border-stone-200 p-2">
+          <Button variant="ghost" className="w-full rounded-xl text-stone-500" type="button" onClick={onClose}>
+            Cancel
+          </Button>
+        </div>
       </div>
     </div>
   )
@@ -217,6 +332,10 @@ export function PersonDetailPage() {
   const [linkByIdError, setLinkByIdError] = useState<string | null>(null)
   const [linkByIdPending, setLinkByIdPending] = useState(false)
   const [linkAccountOpen, setLinkAccountOpen] = useState(false)
+  const [linkPeerOpen, setLinkPeerOpen] = useState(false)
+  const [peerToLinkConfirm, setPeerToLinkConfirm] = useState<{ id: string; displayName: string } | null>(
+    null,
+  )
   const [billsScope, setBillsScope] = useState<'personal' | 'groups'>('personal')
   const { confirm: confirmFlow, dialog: flowConfirmDialog } = useConfirmDialog()
 
@@ -288,6 +407,56 @@ export function PersonDetailPage() {
     return out
   }, [userId, personId])
 
+  const peerLinksForAnchor = useLiveQuery(async () => {
+    if (!userId || !personId) return []
+    return db.profile_peer_links
+      .where('[owner_user_id+anchor_profile_id]')
+      .equals([userId, personId])
+      .filter((l) => !l.is_deleted)
+      .toArray()
+  }, [userId, personId])
+
+  const peerLinkCandidates = useLiveQuery(async () => {
+    if (!userId || !personId) return []
+    const anchor = await db.profiles.get(personId)
+    if (!anchor || anchor.is_deleted || !anchor.is_local || anchor.owner_id !== userId) return []
+
+    // Collect all peer_profile_ids already linked to any anchor owned by this user, so we
+    // don't show a profile that would end up mapped to two different anchors.
+    const allLinks = await db.profile_peer_links
+      .where('owner_user_id')
+      .equals(userId)
+      .filter((l) => !l.is_deleted)
+      .toArray()
+    const linkedPeerIds = new Set(allLinks.map((l) => l.peer_profile_id))
+    // Also exclude the anchor's primary account link so it doesn't appear as a duplicate candidate.
+    if (anchor.linked_profile_id) linkedPeerIds.add(anchor.linked_profile_id)
+
+    const memberships = await db.group_members.where('user_id').equals(userId).toArray()
+    const groupIds = memberships.filter((m) => !m.is_deleted).map((m) => m.group_id)
+    const seen = new Set<string>()
+    const out: { id: string; displayName: string; subtitle: string }[] = []
+    for (const gid of groupIds) {
+      const g = await db.groups.get(gid)
+      const gname = g && !g.is_deleted ? g.name : 'Group'
+      const members = await db.group_members.where('group_id').equals(gid).toArray()
+      for (const m of members) {
+        if (m.is_deleted) continue
+        // Exclude the anchor (by local id and by rewritten linked_profile_id after linkProfileToRemote).
+        if (m.user_id === personId || m.user_id === anchor.linked_profile_id) continue
+        if (m.user_id === userId) continue
+        if (linkedPeerIds.has(m.user_id)) continue
+        if (seen.has(m.user_id)) continue
+        seen.add(m.user_id)
+        const p = await db.profiles.get(m.user_id)
+        const name = (p?.display_name ?? m.display_name).trim() || 'Unknown'
+        out.push({ id: m.user_id, displayName: name, subtitle: `Group · ${gname}` })
+      }
+    }
+    out.sort((a, b) => a.displayName.localeCompare(b.displayName))
+    return out
+  }, [userId, personId])
+
   const summary = useMemo(() => {
     if (!netByCurrency) return null
     return formatPairwiseSummary(netByCurrency)
@@ -351,6 +520,8 @@ export function PersonDetailPage() {
 
   useEffect(() => {
     setLinkAccountOpen(false)
+    setLinkPeerOpen(false)
+    setPeerToLinkConfirm(null)
   }, [personId])
 
   if (!userId || !personId) {
@@ -401,6 +572,7 @@ export function PersonDetailPage() {
 
   const canLink = Boolean(profile?.is_local && !profile.linked_profile_id)
   const isLinked = Boolean(profile?.linked_profile_id)
+  const isMyLocal = Boolean(profile?.is_local && profile.owner_id === userId)
   const resolvedDisplayName =
     display?.displayName ?? profile?.display_name ?? fallbackIdentity?.displayName ?? 'Contact'
   const resolvedSubtitle = display?.subtitle ?? fallbackIdentity?.subtitle
@@ -414,6 +586,26 @@ export function PersonDetailPage() {
     if (updated?.linked_profile_id === remoteId) {
       setLinkAccountOpen(false)
     }
+  }
+
+  function handlePickPeerProfile(peerId: string) {
+    const c = peerLinkCandidates?.find((x) => x.id === peerId)
+    setPeerToLinkConfirm({
+      id: peerId,
+      displayName: c?.displayName ?? 'Profile',
+    })
+    setLinkPeerOpen(false)
+  }
+
+  async function handleConfirmPeerLink() {
+    if (!userId || !personId || !peerToLinkConfirm) return
+    await addProfilePeerLink(personId, peerToLinkConfirm.id, userId)
+    setPeerToLinkConfirm(null)
+  }
+
+  async function handleUnlinkPeer(row: ProfilePeerLink) {
+    if (!userId) return
+    await removeProfilePeerLink(row.id, userId)
   }
 
   async function handleLinkByIdOrEmail() {
@@ -643,6 +835,59 @@ export function PersonDetailPage() {
           Totals include bills where one of you paid or the other paid (not when a third person paid for
           both). All recorded payments with this person are included.
         </p>
+
+        {isMyLocal && (
+          <div className="mt-5 rounded-2xl border border-stone-200 bg-stone-50/80 p-4">
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <p className="text-sm font-medium text-stone-800">Linked identities</p>
+                <p className="text-xs text-stone-500">
+                  Group placeholders and other profiles you merge with this contact.
+                </p>
+              </div>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="shrink-0 rounded-full border-stone-300 text-xs font-medium text-stone-600 hover:bg-stone-50"
+                onClick={() => setLinkPeerOpen(true)}
+              >
+                Link another profile
+              </Button>
+            </div>
+            {peerLinksForAnchor && peerLinksForAnchor.length > 0 && (
+              <ul className="mt-3 space-y-2">
+                {peerLinksForAnchor.map((row) => {
+                  const isPrimaryAccount = Boolean(profile?.linked_profile_id === row.peer_profile_id)
+                  return (
+                    <li
+                      key={row.id}
+                      className="flex items-center justify-between gap-2 rounded-xl border border-stone-200 bg-white px-3 py-2.5"
+                    >
+                      <PeerLinkRowLabel peerId={row.peer_profile_id} viewerId={userId} isPrimaryAccount={isPrimaryAccount} />
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        className="shrink-0 rounded-full text-stone-500"
+                        disabled={isPrimaryAccount}
+                        title={
+                          isPrimaryAccount
+                            ? 'Unlink the Kwenta account from “Link account” first (coming soon).'
+                            : 'Unlink this profile'
+                        }
+                        onClick={() => void handleUnlinkPeer(row)}
+                      >
+                        <Unlink className="size-4" />
+                        <span className="sr-only">Unlink</span>
+                      </Button>
+                    </li>
+                  )
+                })}
+              </ul>
+            )}
+          </div>
+        )}
 
         <div className="mt-4">
           <div className="flex flex-wrap items-center gap-2">
@@ -952,6 +1197,25 @@ export function PersonDetailPage() {
           onRemoveContact={openDeleteFromMenu}
         />
       )}
+
+      {linkPeerOpen && isMyLocal && (
+        <LinkPeerProfileSheet
+          onClose={() => setLinkPeerOpen(false)}
+          candidates={peerLinkCandidates}
+          onPick={(peerId) => handlePickPeerProfile(peerId)}
+        />
+      )}
+
+      <ConfirmDialog
+        open={peerToLinkConfirm !== null}
+        onOpenChange={(o) => {
+          if (!o) setPeerToLinkConfirm(null)
+        }}
+        title="Link this profile?"
+        description={`Activity involving ${peerToLinkConfirm?.displayName ?? 'them'} will show on this contact.`}
+        confirmLabel="Link"
+        onConfirm={() => void handleConfirmPeerLink()}
+      />
 
       {linkAccountOpen && canLink && (
         <LinkAccountSheet

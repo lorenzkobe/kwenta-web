@@ -3,7 +3,18 @@ import { db } from '@/db/db'
 import { captureMetric, withMetric } from '@/lib/client-metrics'
 import { isRuntimeFlagEnabled } from '@/lib/runtime-flags'
 import { now } from '@/lib/utils'
-import type { SyncFields, Bill, BillItem, ItemSplit, Group, GroupMember, Settlement, Profile, ActivityLog } from '@/types'
+import type {
+  SyncFields,
+  Bill,
+  BillItem,
+  ItemSplit,
+  Group,
+  GroupMember,
+  Settlement,
+  Profile,
+  ActivityLog,
+  ProfilePeerLink,
+} from '@/types'
 import { pullChanges } from '@/sync/sync-service'
 
 type UserEventRow = {
@@ -18,7 +29,15 @@ type UserEventRow = {
 }
 type ReconcileBundle = Partial<
   Record<
-    'profiles' | 'groups' | 'group_members' | 'bills' | 'bill_items' | 'item_splits' | 'settlements' | 'activity_log',
+    | 'profiles'
+    | 'groups'
+    | 'group_members'
+    | 'bills'
+    | 'bill_items'
+    | 'item_splits'
+    | 'settlements'
+    | 'activity_log'
+    | 'profile_peer_links',
     SyncFields[]
   >
 >
@@ -108,6 +127,10 @@ async function applyReconcileBundle(bundle: ReconcileBundle): Promise<number> {
   }
   for (const row of bundleRows<ActivityLog>(bundle, 'activity_log')) {
     await upsertRemoteRow('activity_log', row)
+    applied++
+  }
+  for (const row of bundleRows<ProfilePeerLink>(bundle, 'profile_peer_links')) {
+    await upsertRemoteRow('profile_peer_links', row)
     applied++
   }
   return applied

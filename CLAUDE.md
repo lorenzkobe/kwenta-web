@@ -112,7 +112,7 @@ Three profile flavors in Dexie (`src/types/index.ts`):
 - **Local contact** — `is_local: true, owner_id: creatorId` — phonebook entry, only visible to its creator
 - **Linked contact** — local contact with `linked_profile_id` set to a remote Supabase profile UUID
 
-`membershipUserIdForProfile(p)` (`src/db/operations.ts:44`) returns `p.linked_profile_id ?? p.id` — rewrites `group_members.user_id` to the remote UUID when a contact is linked, so Postgres RLS and sync match `auth.uid()`. Split rows may reference either the local id or the remote id; `expandProfileIdsForSplitMatching` (`src/lib/people.ts`) builds the full set for balance queries.
+`membershipUserIdForProfile(p)` (`src/db/operations.ts:44`) returns `p.linked_profile_id ?? p.id` — rewrites `group_members.user_id` to the remote UUID when a contact is linked, so Postgres RLS and sync match `auth.uid()`. Split rows may reference either the local id or the remote id; `expandProfileIdsForSplitMatching` (`src/lib/people.ts`) builds the full set for balance queries (account link + optional `viewerUserId`-scoped `profile_peer_links` cluster).
 
 ### Realtime Subscriptions
 
@@ -131,7 +131,7 @@ Three profile flavors in Dexie (`src/types/index.ts`):
 
 ## Dexie Schema (`src/db/db.ts`)
 
-Current version: **6**. All tables extend sync fields: `id` (UUID PK), `created_at`, `updated_at`, `synced_at` (null = unsynced), `is_deleted`, `device_id`.
+Current version: **8**. All tables extend sync fields: `id` (UUID PK), `created_at`, `updated_at`, `synced_at` (null = unsynced), `is_deleted`, `device_id`.
 
 | Table | Indexes | Purpose |
 |-------|---------|---------|
@@ -143,6 +143,7 @@ Current version: **6**. All tables extend sync fields: `id` (UUID PK), `created_
 | `item_splits` | `id, item_id, user_id, synced_at, is_deleted` | Per-person allocations; `split_type`, `split_value`, `computed_amount` |
 | `settlements` | `id, group_id, bill_id, bundle_id, from_user_id, to_user_id, is_settled, synced_at, is_deleted` | Payments; `bundle_id` groups multiple recipients into one logical payment |
 | `activity_log` | `id, group_id, user_id, entity_type, entity_id, created_at, synced_at, is_deleted` | Audit trail |
+| `profile_peer_links` | `id, owner_user_id, anchor_profile_id, peer_profile_id, synced_at, is_deleted, [owner_user_id+anchor_profile_id]` | Manual “same person” edges (local anchor → peer); server-backed sync |
 | `pending_mutations` | `id, actor_user_id, status, entity_type, entity_id, created_at, updated_at` | Cloud-first conflict tracking |
 | `not_applied_changes` | `id, actor_user_id, resolution, entity_type, entity_id, [entity_type+entity_id], created_at, pending_mutation_id` | Failed mutations surfaced to user |
 
@@ -182,6 +183,7 @@ Backup sync skips if no unsynced data, no new pull data expected, and no queued 
 
 Before pushing, `buildPushFilterContext` determines what the user is allowed to push. Per-table rules mirror Supabase RLS:
 - **profiles**: own profile OR owned local contacts
+- **profile_peer_links**: `owner_user_id` is current user (anchor must be an owned local contact)
 - **groups**: created by user
 - **group_members**: creator of group OR the member row belongs to user
 - **bills**: created by user OR member of the bill's group
@@ -227,7 +229,7 @@ Notifications are queued in `localStorage` (`kwenta_notification_outbox_v1`) and
 
 **`resolveSharedGroupMemberFallbackIdentity(viewerUserId, profileId)`** — finds a shared group to get the display_name from group_members when the profile itself isn't accessible
 
-**`expandProfileIdsForSplitMatching(profileId)`** — returns `Set<string>` including the id, its `linked_profile_id`, and all other profiles pointing to the same remote id. Used for balance queries since split rows may use either the local or linked id.
+**`expandProfileIdsForSplitMatching(profileId, viewerUserId?)`** — returns `Set<string>` including the id, its `linked_profile_id`, all other profiles pointing to the same remote id, and (when `viewerUserId` is set) every id in the same manual peer-link cluster for that owner. Used for balance queries since split rows may use either the local or linked id. **`expandAnchorProfileIds(anchorId, viewerUserId)`** aliases the same expansion for a local anchor.
 
 **`findRemoteProfileIdForLinking(input)`** — accepts UUID or email; looks up locally, then calls `kwenta_lookup_profile_id_by_email` RPC if needed
 
@@ -314,6 +316,7 @@ Migrations are numbered; there are two `021_` files. Core RPCs:
 | `022` | Pull group_members including own deleted rows (so removals reach removed user) |
 | `023` | `bundle_id` on settlements |
 | `024` | Fix group deletion propagation: pull groups/settlements using all membership rows (any `is_deleted`), not just active |
+| `028` | `profile_peer_links` table + RLS; `kwenta_push_profile_peer_links`; extend `kwenta_sync` / pull bundle / `kwenta_empty_reconcile_bundle` / `kwenta_reconcile_user_event` |
 
 The `kwenta_sync` RPC is the single entry point for all sync: accepts push payload, applies it server-side, returns pull bundle for `p_since`. Push validators enforce the same RLS rules the client filters apply.
 

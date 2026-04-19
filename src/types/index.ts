@@ -93,6 +93,13 @@ export interface ActivityLog extends SyncFields {
   description: string
 }
 
+/** Manual link: same real person as local anchor (owner_user_id); does not rewrite bills/splits. */
+export interface ProfilePeerLink extends SyncFields {
+  owner_user_id: string
+  anchor_profile_id: string
+  peer_profile_id: string
+}
+
 export type PendingMutationStatus = 'pending' | 'applied' | 'conflict' | 'dismissed'
 
 export type MutationEntityType =
@@ -101,6 +108,7 @@ export type MutationEntityType =
   | 'group_member'
   | 'settlement'
   | 'profile'
+  | 'profile_peer_link'
   | 'activity_log'
   | 'unknown'
 

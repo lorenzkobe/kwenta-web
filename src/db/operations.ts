@@ -7,6 +7,7 @@ import type {
   GroupMember,
   ItemSplit,
   MutationEntityType,
+  ProfilePeerLink,
   SplitType,
 } from '@/types'
 import { generateId, getDeviceId, now } from '@/lib/utils'
@@ -685,6 +686,71 @@ export async function linkProfileToRemote(
   })
 }
 
+/** Link another profile (e.g. group “Sam”) to this local contact; balances aggregate by resolution logic. */
+export async function addProfilePeerLink(
+  anchorLocalId: string,
+  peerProfileId: string,
+  actorUserId: string,
+): Promise<void> {
+  if (anchorLocalId === peerProfileId) return
+  const anchor = await db.profiles.get(anchorLocalId)
+  if (!anchor || anchor.is_deleted || !anchor.is_local || anchor.owner_id !== actorUserId) return
+  const peer = await db.profiles.get(peerProfileId)
+  if (!peer || peer.is_deleted) return
+  if (peerProfileId === actorUserId) return
+
+  const dupe = await db.profile_peer_links
+    .filter(
+      (l) =>
+        !l.is_deleted &&
+        l.owner_user_id === actorUserId &&
+        l.anchor_profile_id === anchorLocalId &&
+        l.peer_profile_id === peerProfileId,
+    )
+    .first()
+  if (dupe) return
+
+  const row: ProfilePeerLink = {
+    ...syncFields(),
+    owner_user_id: actorUserId,
+    anchor_profile_id: anchorLocalId,
+    peer_profile_id: peerProfileId,
+  }
+  await db.profile_peer_links.add(row)
+  await fetchRemoteProfileIntoDexie(peerProfileId)
+  await notifySyncAfterMutation({
+    actorUserId,
+    operation: 'add_profile_peer_link',
+    entityType: 'profile_peer_link',
+    entityId: row.id,
+    payload: { anchorLocalId, peerProfileId },
+    routeHint: `/app/people/${anchorLocalId}`,
+  })
+}
+
+export async function removeProfilePeerLink(linkId: string, actorUserId: string): Promise<void> {
+  const row = await db.profile_peer_links.get(linkId)
+  if (!row || row.is_deleted || row.owner_user_id !== actorUserId) return
+  const anchor = await db.profiles.get(row.anchor_profile_id)
+  const isPrimaryAccountLink = Boolean(anchor?.linked_profile_id && anchor.linked_profile_id === row.peer_profile_id)
+  if (isPrimaryAccountLink) return
+
+  const timestamp = now()
+  await db.profile_peer_links.update(linkId, {
+    is_deleted: true,
+    updated_at: timestamp,
+    synced_at: null,
+  })
+  await notifySyncAfterMutation({
+    actorUserId,
+    operation: 'remove_profile_peer_link',
+    entityType: 'profile_peer_link',
+    entityId: linkId,
+    payload: { anchorLocalId: row.anchor_profile_id, peerProfileId: row.peer_profile_id },
+    routeHint: `/app/people/${row.anchor_profile_id}`,
+  })
+}
+
 export async function removeGroupMember(
   groupId: string,
   memberUserId: string,
@@ -858,6 +924,23 @@ export async function deletePerson(personId: string, actorUserId: string): Promi
   }
 
   const timestamp = now()
+
+  const peerLinks = await db.profile_peer_links
+    .filter(
+      (l) =>
+        !l.is_deleted &&
+        l.owner_user_id === actorUserId &&
+        (l.anchor_profile_id === personId || l.peer_profile_id === personId),
+    )
+    .toArray()
+  for (const l of peerLinks) {
+    await db.profile_peer_links.update(l.id, {
+      is_deleted: true,
+      updated_at: timestamp,
+      synced_at: null,
+    })
+  }
+
   await db.profiles.update(personId, {
     is_deleted: true,
     updated_at: timestamp,

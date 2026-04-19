@@ -119,7 +119,7 @@ export function BillDetailPage() {
 
     let cancelled = false
     void (async () => {
-      const myIds = await expandProfileIdsForSplitMatching(userId)
+      const myIds = await expandProfileIdsForSplitMatching(userId, userId)
       let total = 0
       let included = false
       for (const item of bill.items) {

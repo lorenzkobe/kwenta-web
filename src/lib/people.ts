@@ -173,8 +173,8 @@ export async function computePairwiseNet(
   meId: string,
   otherId: string,
 ): Promise<Map<string, number>> {
-  const meIds = await expandProfileIdsForSplitMatching(meId)
-  const otherIds = await expandProfileIdsForSplitMatching(otherId)
+  const meIds = await expandProfileIdsForSplitMatching(meId, meId)
+  const otherIds = await expandProfileIdsForSplitMatching(otherId, meId)
 
   const byCurrency = new Map<string, number>()
 
@@ -308,8 +308,8 @@ export async function computePairwiseNetForBill(
   meId: string,
   otherId: string,
 ): Promise<number> {
-  const meIds = await expandProfileIdsForSplitMatching(meId)
-  const otherIds = await expandProfileIdsForSplitMatching(otherId)
+  const meIds = await expandProfileIdsForSplitMatching(meId, meId)
+  const otherIds = await expandProfileIdsForSplitMatching(otherId, meId)
   const bill = await db.bills.get(billId)
   if (!bill || bill.is_deleted) return 0
 
@@ -472,8 +472,8 @@ export async function computeAvailableGeneralCredit(params: {
   toUserId: string
   currency: string
 }): Promise<number> {
-  const fromIds = await expandProfileIdsForSplitMatching(params.fromUserId)
-  const toIds = await expandProfileIdsForSplitMatching(params.toUserId)
+  const fromIds = await expandProfileIdsForSplitMatching(params.fromUserId, params.meId)
+  const toIds = await expandProfileIdsForSplitMatching(params.toUserId, params.meId)
   const all = await db.settlements.filter((s) => !s.is_deleted && s.is_settled).toArray()
   let total = 0
   for (const s of all) {
@@ -553,8 +553,8 @@ export async function computePairwiseNetPersonalOnly(
   meId: string,
   otherId: string,
 ): Promise<Map<string, number>> {
-  const meIds = await expandProfileIdsForSplitMatching(meId)
-  const otherIds = await expandProfileIdsForSplitMatching(otherId)
+  const meIds = await expandProfileIdsForSplitMatching(meId, meId)
+  const otherIds = await expandProfileIdsForSplitMatching(otherId, meId)
 
   const byCurrency = new Map<string, number>()
 
@@ -610,7 +610,7 @@ export async function computePairwiseNetPersonalOnly(
 /** One logical peer per person (dedupes local contact + linked remote). */
 async function iterCanonicalPeerIds(meId: string): Promise<string[]> {
   const related = await collectRelatedProfileIds(meId)
-  const meIds = await expandProfileIdsForSplitMatching(meId)
+  const meIds = await expandProfileIdsForSplitMatching(meId, meId)
   const seenPeer = new Set<string>()
   const out: string[] = []
   for (const oid of related) {
@@ -627,8 +627,17 @@ async function iterCanonicalPeerIds(meId: string): Promise<string[]> {
         .first()
       if (localLinked) {
         canonical = localLinked.id
-      } else if (p?.linked_profile_id) {
-        canonical = p.linked_profile_id
+      } else {
+        const peerAsPeer = await db.profile_peer_links
+          .where('owner_user_id')
+          .equals(meId)
+          .filter((l) => !l.is_deleted && l.peer_profile_id === oid)
+          .first()
+        if (peerAsPeer) {
+          canonical = peerAsPeer.anchor_profile_id
+        } else if (p?.linked_profile_id) {
+          canonical = p.linked_profile_id
+        }
       }
     }
     if (meIds.has(canonical)) continue
@@ -712,7 +721,7 @@ export function formatPairwiseSummary(byCurrency: Map<string, number>): {
 /** Profile ids you share expenses with (groups, bills, settlements). */
 export async function collectRelatedProfileIds(meId: string): Promise<Set<string>> {
   const ids = new Set<string>()
-  const meIds = await expandProfileIdsForSplitMatching(meId)
+  const meIds = await expandProfileIdsForSplitMatching(meId, meId)
 
   const memberships = await db.group_members.where('user_id').equals(meId).toArray()
   const myGroupIds = new Set(
@@ -770,11 +779,52 @@ export async function collectRelatedProfileIds(meId: string): Promise<Set<string
  * IDs that refer to the same real person for matching `item_splits.user_id` / settlement parties.
  * The local contact row stays in Dexie; linking adds `linked_profile_id` and sync may rewrite split
  * rows to the remote id—queries need to accept either id without merging rows.
+ * When `viewerUserId` is set, also unions manual peer links (`profile_peer_links`) owned by that user.
  */
-export async function expandProfileIdsForSplitMatching(profileId: string): Promise<Set<string>> {
+async function unionPeerLinkClusterForViewer(ids: Set<string>, viewerUserId: string): Promise<void> {
+  const links = await db.profile_peer_links
+    .where('owner_user_id')
+    .equals(viewerUserId)
+    .filter((l) => !l.is_deleted)
+    .toArray()
+  if (links.length === 0) return
+  const adj = new Map<string, Set<string>>()
+  for (const l of links) {
+    if (!adj.has(l.anchor_profile_id)) adj.set(l.anchor_profile_id, new Set())
+    if (!adj.has(l.peer_profile_id)) adj.set(l.peer_profile_id, new Set())
+    adj.get(l.anchor_profile_id)!.add(l.peer_profile_id)
+    adj.get(l.peer_profile_id)!.add(l.anchor_profile_id)
+  }
+  const queue = [...ids]
+  let i = 0
+  while (i < queue.length) {
+    const cur = queue[i++]!
+    const neighbors = adj.get(cur)
+    if (!neighbors) continue
+    for (const n of neighbors) {
+      if (!ids.has(n)) {
+        ids.add(n)
+        queue.push(n)
+      }
+    }
+  }
+}
+
+/** All profile ids that represent the same person as this anchor for the viewer (account link + peer links). */
+export async function expandAnchorProfileIds(anchorId: string, viewerUserId: string): Promise<Set<string>> {
+  return expandProfileIdsForSplitMatching(anchorId, viewerUserId)
+}
+
+export async function expandProfileIdsForSplitMatching(
+  profileId: string,
+  viewerUserId?: string,
+): Promise<Set<string>> {
   const ids = new Set<string>([profileId])
   const p = await db.profiles.get(profileId)
-  if (!p || p.is_deleted) return ids
+  if (!p || p.is_deleted) {
+    if (viewerUserId) await unionPeerLinkClusterForViewer(ids, viewerUserId)
+    return ids
+  }
   if (p.linked_profile_id) {
     ids.add(p.linked_profile_id)
     const sameRemote = await db.profiles
@@ -788,6 +838,9 @@ export async function expandProfileIdsForSplitMatching(profileId: string): Promi
   const linkToThis = await db.profiles.where('linked_profile_id').equals(profileId).toArray()
   for (const x of linkToThis) {
     if (!x.is_deleted) ids.add(x.id)
+  }
+  if (viewerUserId) {
+    await unionPeerLinkClusterForViewer(ids, viewerUserId)
   }
   return ids
 }
@@ -826,8 +879,8 @@ export interface BillWithContext extends Bill {
 
 /** Bills where you and this person both belong: selected on any line and/or recorded as payer (`created_by`). They do not need to share the same line item. */
 export async function listBillsInvolvingPair(meId: string, otherId: string): Promise<BillWithContext[]> {
-  const meIds = await expandProfileIdsForSplitMatching(meId)
-  const otherIds = await expandProfileIdsForSplitMatching(otherId)
+  const meIds = await expandProfileIdsForSplitMatching(meId, meId)
+  const otherIds = await expandProfileIdsForSplitMatching(otherId, meId)
 
   const bills = await db.bills.filter((b) => !b.is_deleted).toArray()
   const out: BillWithContext[] = []
@@ -925,8 +978,8 @@ export async function listPairwiseSettlementsBetween(
   meId: string,
   otherId: string,
 ): Promise<SettlementHistoryItem[]> {
-  const meIds = await expandProfileIdsForSplitMatching(meId)
-  const otherIds = await expandProfileIdsForSplitMatching(otherId)
+  const meIds = await expandProfileIdsForSplitMatching(meId, meId)
+  const otherIds = await expandProfileIdsForSplitMatching(otherId, meId)
 
   const all = await db.settlements.filter((s) => !s.is_deleted && s.is_settled).toArray()
   const pair = all.filter((s) => {
@@ -990,7 +1043,7 @@ export async function listSharedGroupsWithBalance(
   meId: string,
   personId: string,
 ): Promise<SharedGroupWithPersonRow[]> {
-  const otherIds = await expandProfileIdsForSplitMatching(personId)
+  const otherIds = await expandProfileIdsForSplitMatching(personId, meId)
   const myMemberships = await db.group_members.where('user_id').equals(meId).toArray()
   const myGroupIds = new Set(
     myMemberships.filter((m) => !m.is_deleted).map((m) => m.group_id),

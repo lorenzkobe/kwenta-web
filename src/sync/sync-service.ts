@@ -12,6 +12,7 @@ import type {
   GroupMember,
   ItemSplit,
   Profile,
+  ProfilePeerLink,
   Settlement,
   SyncFields,
 } from '@/types'
@@ -63,6 +64,7 @@ const TABLE_NAMES = [
   'item_splits',
   'settlements',
   'activity_log',
+  'profile_peer_links',
 ] as const
 
 type TableName = (typeof TABLE_NAMES)[number]
@@ -185,6 +187,8 @@ function filterUnsyncedForPush(
         if (a.group_id && ctx.memberGroupIds.has(a.group_id)) return true
         return false
       })
+    case 'profile_peer_links':
+      return unsynced.filter((r) => (r as ProfilePeerLink).owner_user_id === userId)
     default:
       return unsynced
   }
@@ -552,6 +556,9 @@ async function fetchRemoteRows(
       } else {
         query = query.or(`user_id.eq.${userId},group_id.in.(${groupIds.join(',')})`)
       }
+      break
+    case 'profile_peer_links':
+      query = query.eq('owner_user_id', userId)
       break
   }
 
