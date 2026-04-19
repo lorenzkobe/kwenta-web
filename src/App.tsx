@@ -6,7 +6,7 @@ import { LandingPage } from '@/landing/LandingPage'
 import { AppShell } from '@/components/layout/AppShell'
 import { RequireAuth } from '@/components/auth/RequireAuth'
 import { RequireAdmin } from '@/components/auth/RequireAdmin'
-import { AuthProvider } from '@/hooks/useAuth'
+import { AuthProvider } from '@/hooks/AuthProvider'
 
 const LoginPage = lazy(() => import('@/pages/LoginPage').then((m) => ({ default: m.LoginPage })))
 const HomePage = lazy(() => import('@/pages/HomePage').then((m) => ({ default: m.HomePage })))
