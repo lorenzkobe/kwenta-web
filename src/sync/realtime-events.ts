@@ -15,7 +15,7 @@ import type {
   ActivityLog,
   ProfilePeerLink,
 } from '@/types'
-import { pullChanges } from '@/sync/sync-service'
+import { pullChanges, syncRoundTrip } from '@/sync/sync-service'
 
 type UserEventRow = {
   id: string
@@ -268,6 +268,9 @@ async function processEvent(userId: string, ev: UserEventRow): Promise<void> {
   }
 }
 
+// Above this threshold, per-event RPCs are more expensive than a single syncRoundTrip.
+const CATCH_UP_BULK_THRESHOLD = 5
+
 async function catchUpSince(userId: string, sinceIso: string, onEvent: (ev: UserEventRow) => Promise<void>): Promise<void> {
   const { data, error } = await supabase
     .from('kwenta_user_events')
@@ -275,7 +278,7 @@ async function catchUpSince(userId: string, sinceIso: string, onEvent: (ev: User
     .eq('user_id', userId)
     .gt('created_at', sinceIso)
     .order('created_at', { ascending: true })
-    .limit(500)
+    .limit(CATCH_UP_BULK_THRESHOLD + 1)
 
   if (error) {
     console.warn('[realtime] catch-up query failed', error.message)
@@ -283,6 +286,15 @@ async function catchUpSince(userId: string, sinceIso: string, onEvent: (ev: User
   }
 
   const events = (data ?? []) as UserEventRow[]
+  if (events.length === 0) return
+
+  if (events.length > CATCH_UP_BULK_THRESHOLD) {
+    // Many missed events — one syncRoundTrip is far cheaper than N individual RPCs.
+    await syncRoundTrip(userId)
+    localStorage.setItem(LAST_SEEN_EVENT_KEY(userId), now())
+    return
+  }
+
   for (const ev of events) {
     await onEvent(ev)
   }
