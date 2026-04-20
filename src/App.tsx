@@ -5,6 +5,7 @@ import { Toaster } from 'sonner'
 import { LandingPage } from '@/landing/LandingPage'
 import { AppShell } from '@/components/layout/AppShell'
 import { RequireAuth } from '@/components/auth/RequireAuth'
+import { RequireGuest } from '@/components/auth/RequireGuest'
 import { RequireAdmin } from '@/components/auth/RequireAdmin'
 import { AuthProvider } from '@/hooks/AuthProvider'
 
@@ -47,7 +48,9 @@ function App() {
         <Suspense fallback={<PageLoader />}>
           <Routes>
             <Route path="/" element={<LandingPage />} />
-            <Route path="/login" element={<LoginPage />} />
+            <Route element={<RequireGuest />}>
+              <Route path="/login" element={<LoginPage />} />
+            </Route>
             <Route element={<RequireAuth />}>
               <Route path="/app" element={<AppShell />}>
                 <Route index element={<HomePage />} />

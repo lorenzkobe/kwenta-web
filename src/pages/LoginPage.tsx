@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Link, useLocation, useNavigate, useSearchParams } from 'react-router-dom'
+import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { ArrowRight, Eye, EyeOff, Loader2, Wallet } from 'lucide-react'
 import {
   INACTIVE_ACCOUNT_MESSAGE_KEY,
@@ -13,10 +13,8 @@ type Mode = 'login' | 'signup' | 'forgot'
 
 export function LoginPage() {
   const navigate = useNavigate()
-  const location = useLocation()
   const [searchParams] = useSearchParams()
-  const from = (location.state as { from?: string } | null)?.from ?? '/app'
-  const { signIn, signUp, resetPassword, isAuthenticated, loading: authLoading, user } = useAuth()
+  const { signIn, signUp, resetPassword, loading: authLoading, user } = useAuth()
   const [mode, setMode] = useState<Mode>('login')
   const [sessionExpiredNotice, setSessionExpiredNotice] = useState(false)
   const [inactiveAccountNotice, setInactiveAccountNotice] = useState(false)
@@ -63,16 +61,6 @@ export function LoginPage() {
     setError(message)
     navigate('/login', { replace: true })
   }, [searchParams, navigate])
-
-  useEffect(() => {
-    if (isAuthenticated) {
-      navigate(from.startsWith('/') ? from : `/${from}`, { replace: true })
-    }
-  }, [isAuthenticated, navigate, from])
-
-  if (isAuthenticated) {
-    return null
-  }
 
   const title = {
     login: 'Welcome back',
