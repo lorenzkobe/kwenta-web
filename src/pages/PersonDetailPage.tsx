@@ -15,7 +15,7 @@ import {
 import { useLiveQuery } from 'dexie-react-hooks'
 import { db } from '@/db/db'
 import {
-  buildManualGeneralCreditApplyPlan,
+  buildManualGeneralCreditSelectionPlan,
   buildPersonalBillAllocationPlan,
   computePairwiseNetForBill,
   computePairwiseNet,
@@ -23,6 +23,7 @@ import {
   findRemoteProfileIdForLinking,
   formatPairwiseSummary,
   listBillsInvolvingPair,
+  listEligibleSharedGroupsForGeneralCredit,
   listPairwiseSettlementsBetween,
   resolveFallbackIdentityForViewer,
   listSharedGroupsWithBalance,
@@ -30,7 +31,7 @@ import {
 } from '@/lib/people'
 import {
   addProfilePeerLink,
-  applyGeneralCreditToPersonalBills,
+  applyGeneralCreditToSelection,
   createPersonalPaymentWithDistribution,
   deletePerson,
   linkProfileToRemote,
@@ -46,6 +47,7 @@ import { Input } from '@/components/ui/input'
 import { SettlementHistoryList } from '@/components/common/SettlementHistoryList'
 import { EditSettlementDialog } from '@/components/common/EditSettlementDialog'
 import { RecordSettlementDialog } from '@/components/common/RecordSettlementDialog'
+import { ApplyGeneralCreditDialog } from '@/components/common/ApplyGeneralCreditDialog'
 import type { SettlementHistoryItem } from '@/lib/settlement'
 import type { Profile, ProfilePeerLink } from '@/types'
 import {
@@ -326,6 +328,7 @@ export function PersonDetailPage() {
   const [record, setRecord] = useState<{ currency: string } | null>(null)
   const [paymentMode, setPaymentMode] = useState<'general' | 'distributed'>('general')
   const [applyingGeneralCredit, setApplyingGeneralCredit] = useState(false)
+  const [applyCreditOpen, setApplyCreditOpen] = useState(false)
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false)
   const [showOptionsMenu, setShowOptionsMenu] = useState(false)
   const [linkByIdInput, setLinkByIdInput] = useState('')
@@ -481,17 +484,41 @@ export function PersonDetailPage() {
   const defaultCurrency = useMemo(() => {
     const pb = personalBills[0]
     if (pb) return pb.currency
-    return bills?.[0]?.currency ?? 'PHP'
-  }, [personalBills, bills])
+    const anyBillCurrency = bills?.[0]?.currency
+    if (anyBillCurrency) return anyBillCurrency
+    const settlementCurrency = settlements?.[0]?.currency
+    if (settlementCurrency) return settlementCurrency
+    const sharedGroupCurrency = sharedGroups?.[0]?.currency
+    return sharedGroupCurrency ?? 'PHP'
+  }, [personalBills, bills, settlements, sharedGroups])
 
   const manualGeneralCreditPlan = useLiveQuery(async () => {
     if (!userId || !personId) return null
-    return buildManualGeneralCreditApplyPlan({
-      meId: userId,
-      otherId: personId,
-      currency: defaultCurrency,
-    })
-  }, [userId, personId, defaultCurrency, settlements, personalBills, personalBillDirection])
+    const candidateCurrencies = [
+      ...new Set(
+        [
+          ...personalBills.map((bill) => bill.currency),
+          ...(bills ?? []).map((bill) => bill.currency),
+          ...(settlements ?? []).map((settlement) => settlement.currency),
+          ...(sharedGroups ?? []).map((group) => group.currency),
+        ].filter(Boolean),
+      ),
+    ]
+
+    const currencies = candidateCurrencies.length > 0 ? candidateCurrencies : [defaultCurrency]
+    const plans = await Promise.all(
+      currencies.map((currency) =>
+        buildManualGeneralCreditSelectionPlan({
+          meId: userId,
+          otherId: personId,
+          currency,
+        }),
+      ),
+    )
+    return plans
+      .filter((plan): plan is NonNullable<typeof plan> => Boolean(plan))
+      .sort((a, b) => b.maxApplicableAmount - a.maxApplicableAmount)[0] ?? null
+  }, [userId, personId, defaultCurrency, bills, settlements, sharedGroups, personalBills, personalBillDirection])
 
   const settlementParties = useMemo((): { id: string; label: string }[] | undefined => {
     if (!userId || !personId) return undefined
@@ -748,34 +775,68 @@ export function PersonDetailPage() {
 
   async function handleApplyGeneralCredit() {
     if (!manualGeneralCreditPlan || !userId || !personId) return
-    if (manualGeneralCreditPlan.appliedAmount <= 0.005 || manualGeneralCreditPlan.slices.length === 0) {
-      toast.info('No unpaid personal bills to apply credit to.')
+    if (manualGeneralCreditPlan.maxApplicableAmount <= 0.005) {
+      toast.info('No eligible bills or groups to apply credit to.')
       return
     }
-    const ok = await confirmFlow({
-      title: 'Apply available credit to bills',
-      description: `Apply ${formatCurrency(
-        manualGeneralCreditPlan.appliedAmount,
-        defaultCurrency,
-      )} to ${manualGeneralCreditPlan.affectedBillCount} unpaid personal bill${
-        manualGeneralCreditPlan.affectedBillCount === 1 ? '' : 's'
-      }?`,
-      confirmLabel: 'Apply',
-    })
-    if (!ok) return
+    setApplyCreditOpen(true)
+  }
 
+  async function handleApplyGeneralCreditSubmit(args: {
+    appliedAmount: number
+    personalAmount: number
+    groupAllocations: { groupId: string; amount: number }[]
+  }) {
+    if (!manualGeneralCreditPlan || !userId || !personId) return
     setApplyingGeneralCredit(true)
     try {
-      await applyGeneralCreditToPersonalBills({
+      let personalSlices: { billId: string; amount: number }[] = []
+      if (args.personalAmount > 0.005) {
+        const personalPlan = await buildPersonalBillAllocationPlan({
+          meId: userId,
+          otherId: personId,
+          fromUserId: manualGeneralCreditPlan.fromUserId,
+          toUserId: manualGeneralCreditPlan.toUserId,
+          currency: manualGeneralCreditPlan.currency,
+          amountToApply: args.personalAmount,
+        })
+        if (personalPlan.appliedAmount + 0.005 < args.personalAmount) {
+          throw new Error('Personal bill balances changed. Refresh and try again.')
+        }
+        personalSlices = personalPlan.slices.map((slice) => ({ billId: slice.billId, amount: slice.amount }))
+      }
+
+      if (args.groupAllocations.length > 0) {
+        const currentEligibleGroups = await listEligibleSharedGroupsForGeneralCredit({
+          meId: userId,
+          otherId: personId,
+          fromUserId: manualGeneralCreditPlan.fromUserId,
+          toUserId: manualGeneralCreditPlan.toUserId,
+          currency: manualGeneralCreditPlan.currency,
+        })
+        const currentAmountByGroupId = new Map(
+          currentEligibleGroups.map((group) => [group.groupId, group.allocatableAmount]),
+        )
+        for (const group of args.groupAllocations) {
+          const currentAmount = currentAmountByGroupId.get(group.groupId) ?? 0
+          if (group.amount > currentAmount + 0.005) {
+            throw new Error('A selected group balance changed. Refresh and try again.')
+          }
+        }
+      }
+
+      await applyGeneralCreditToSelection({
         fromUserId: manualGeneralCreditPlan.fromUserId,
         toUserId: manualGeneralCreditPlan.toUserId,
-        currency: defaultCurrency,
+        currency: manualGeneralCreditPlan.currency,
         markedBy: userId,
-        appliedAmount: manualGeneralCreditPlan.appliedAmount,
-        slices: manualGeneralCreditPlan.slices.map((s) => ({ billId: s.billId, amount: s.amount })),
+        appliedAmount: args.appliedAmount,
+        personalSlices,
+        groupAllocations: args.groupAllocations,
         routeHint: `/app/people/${personId}`,
       })
-      toast.success('Applied available general credit to unpaid bills.')
+      setApplyCreditOpen(false)
+      toast.success('Applied available general credit.')
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Could not apply credit right now.'
       toast.error(message)
@@ -925,7 +986,7 @@ export function PersonDetailPage() {
               disabled={
                 applyingGeneralCredit ||
                 !manualGeneralCreditPlan ||
-                manualGeneralCreditPlan.appliedAmount <= 0.005
+                manualGeneralCreditPlan.maxApplicableAmount <= 0.005
               }
               onClick={() => void handleApplyGeneralCredit()}
             >
@@ -934,14 +995,21 @@ export function PersonDetailPage() {
           </div>
           <p className="mt-2 text-xs text-stone-500">
             General payments reduce your total balance only. Distributed payments are split to your oldest
-            unpaid bills.
+            unpaid bills. Applied credit can go to personal bills, selected groups, or both.
           </p>
-          {manualGeneralCreditPlan && manualGeneralCreditPlan.appliedAmount > 0.005 && (
+          {manualGeneralCreditPlan && manualGeneralCreditPlan.maxApplicableAmount > 0.005 && (
             <p className="mt-1 text-xs text-stone-500">
               Available general credit you can apply now:{' '}
-              {formatCurrency(manualGeneralCreditPlan.appliedAmount, defaultCurrency)} across{' '}
-              {manualGeneralCreditPlan.affectedBillCount} bill
-              {manualGeneralCreditPlan.affectedBillCount === 1 ? '' : 's'}.
+              {formatCurrency(manualGeneralCreditPlan.maxApplicableAmount, manualGeneralCreditPlan.currency)}
+              {manualGeneralCreditPlan.personalPlan.affectedBillCount > 0 &&
+                ` across ${manualGeneralCreditPlan.personalPlan.affectedBillCount} bill${
+                  manualGeneralCreditPlan.personalPlan.affectedBillCount === 1 ? '' : 's'
+                }`}
+              {manualGeneralCreditPlan.eligibleGroups.length > 0 &&
+                `${manualGeneralCreditPlan.personalPlan.affectedBillCount > 0 ? ' and ' : ' across '}${
+                  manualGeneralCreditPlan.eligibleGroups.length
+                } group${manualGeneralCreditPlan.eligibleGroups.length === 1 ? '' : 's'}`}
+              .
             </p>
           )}
         </div>
@@ -1260,6 +1328,16 @@ export function PersonDetailPage() {
           linkByIdError={linkByIdError}
           linkByIdPending={linkByIdPending}
           onLinkByIdOrEmail={() => void handleLinkByIdOrEmail()}
+        />
+      )}
+
+      {applyCreditOpen && manualGeneralCreditPlan && (
+        <ApplyGeneralCreditDialog
+          open
+          onOpenChange={setApplyCreditOpen}
+          plan={manualGeneralCreditPlan}
+          saving={applyingGeneralCredit}
+          onSubmit={handleApplyGeneralCreditSubmit}
         />
       )}
 

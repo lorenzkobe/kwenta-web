@@ -493,60 +493,216 @@ export interface ManualGeneralCreditApplyPlan extends PersonalBillAllocationPlan
   availableGeneralCredit: number
 }
 
+export interface GeneralCreditEligibleGroupOption {
+  groupId: string
+  groupName: string
+  currency: string
+  yourNet: number
+  theirNet: number
+  allocatableAmount: number
+}
+
+export interface ManualGeneralCreditSelectionPlan {
+  fromUserId: string
+  toUserId: string
+  currency: string
+  availableGeneralCredit: number
+  personalPlan: PersonalBillAllocationPlan
+  eligibleGroups: GeneralCreditEligibleGroupOption[]
+  personalAllocatableAmount: number
+  groupAllocatableAmount: number
+  totalAllocatableAmount: number
+  maxApplicableAmount: number
+}
+
+export async function listEligibleSharedGroupsForGeneralCredit(params: {
+  meId: string
+  otherId: string
+  fromUserId: string
+  toUserId: string
+  currency: string
+}): Promise<GeneralCreditEligibleGroupOption[]> {
+  const direction = resolvePersonalDirection({
+    meId: params.meId,
+    otherId: params.otherId,
+    fromUserId: params.fromUserId,
+    toUserId: params.toUserId,
+  })
+  if (!direction) return []
+
+  const sharedGroups = await listSharedGroupsWithBalance(params.meId, params.otherId)
+  const eligible: GeneralCreditEligibleGroupOption[] = []
+
+  for (const row of sharedGroups) {
+    if (row.currency !== params.currency) continue
+
+    const summary = await computeGroupBalances(row.groupId, params.meId)
+    if (!summary) continue
+
+    let allocatableAmount = 0
+    if (direction === 'other_to_me' && summary.totalToReceive > 0.005 && row.theirNet < -0.005) {
+      allocatableAmount = Math.min(summary.totalToReceive, Math.abs(row.theirNet))
+    } else if (direction === 'me_to_other' && summary.totalToPay > 0.005 && row.theirNet > 0.005) {
+      allocatableAmount = Math.min(summary.totalToPay, row.theirNet)
+    }
+
+    const roundedAllocatableAmount = Math.round(allocatableAmount * 100) / 100
+    if (roundedAllocatableAmount <= 0.005) continue
+
+    eligible.push({
+      groupId: row.groupId,
+      groupName: row.groupName,
+      currency: row.currency,
+      yourNet:
+        direction === 'other_to_me'
+          ? Math.round(summary.totalToReceive * 100) / 100
+          : Math.round(summary.totalToPay * 100) / 100,
+      theirNet: Math.round(row.theirNet * 100) / 100,
+      allocatableAmount: roundedAllocatableAmount,
+    })
+  }
+
+  return eligible
+}
+
+function buildManualGeneralCreditSelectionPlanResult(params: {
+  fromUserId: string
+  toUserId: string
+  currency: string
+  availableGeneralCredit: number
+  personalPlan: PersonalBillAllocationPlan
+  eligibleGroups: GeneralCreditEligibleGroupOption[]
+}): ManualGeneralCreditSelectionPlan {
+  const personalAllocatableAmount = Math.round(params.personalPlan.allocatableTotal * 100) / 100
+  const groupAllocatableAmount = Math.round(
+    params.eligibleGroups.reduce((sum, group) => sum + group.allocatableAmount, 0) * 100,
+  ) / 100
+  const totalAllocatableAmount = Math.round((personalAllocatableAmount + groupAllocatableAmount) * 100) / 100
+  const maxApplicableAmount = Math.min(
+    Math.round(params.availableGeneralCredit * 100) / 100,
+    totalAllocatableAmount,
+  )
+
+  return {
+    fromUserId: params.fromUserId,
+    toUserId: params.toUserId,
+    currency: params.currency,
+    availableGeneralCredit: Math.round(params.availableGeneralCredit * 100) / 100,
+    personalPlan: params.personalPlan,
+    eligibleGroups: params.eligibleGroups,
+    personalAllocatableAmount,
+    groupAllocatableAmount,
+    totalAllocatableAmount,
+    maxApplicableAmount: Math.round(maxApplicableAmount * 100) / 100,
+  }
+}
+
+async function buildManualGeneralCreditSelectionPlanForDirection(params: {
+  meId: string
+  otherId: string
+  fromUserId: string
+  toUserId: string
+  currency: string
+}): Promise<ManualGeneralCreditSelectionPlan> {
+  const availableGeneralCredit = await computeAvailableGeneralCredit({
+    meId: params.meId,
+    otherId: params.otherId,
+    fromUserId: params.fromUserId,
+    toUserId: params.toUserId,
+    currency: params.currency,
+  })
+  const [personalPlan, eligibleGroups] = await Promise.all([
+    buildPersonalBillAllocationPlan({
+      meId: params.meId,
+      otherId: params.otherId,
+      fromUserId: params.fromUserId,
+      toUserId: params.toUserId,
+      currency: params.currency,
+      amountToApply: availableGeneralCredit,
+    }),
+    listEligibleSharedGroupsForGeneralCredit({
+      meId: params.meId,
+      otherId: params.otherId,
+      fromUserId: params.fromUserId,
+      toUserId: params.toUserId,
+      currency: params.currency,
+    }),
+  ])
+
+  return buildManualGeneralCreditSelectionPlanResult({
+    fromUserId: params.fromUserId,
+    toUserId: params.toUserId,
+    currency: params.currency,
+    availableGeneralCredit,
+    personalPlan,
+    eligibleGroups,
+  })
+}
+
+export async function buildManualGeneralCreditSelectionPlan(params: {
+  meId: string
+  otherId: string
+  currency: string
+}): Promise<ManualGeneralCreditSelectionPlan | null> {
+  const [receiveDirectionPlan, payDirectionPlan] = await Promise.all([
+    buildManualGeneralCreditSelectionPlanForDirection({
+      meId: params.meId,
+      otherId: params.otherId,
+      fromUserId: params.otherId,
+      toUserId: params.meId,
+      currency: params.currency,
+    }),
+    buildManualGeneralCreditSelectionPlanForDirection({
+      meId: params.meId,
+      otherId: params.otherId,
+      fromUserId: params.meId,
+      toUserId: params.otherId,
+      currency: params.currency,
+    }),
+  ])
+
+  if (receiveDirectionPlan.maxApplicableAmount <= 0.005 && payDirectionPlan.maxApplicableAmount <= 0.005) {
+    return null
+  }
+
+  if (receiveDirectionPlan.maxApplicableAmount >= payDirectionPlan.maxApplicableAmount) {
+    return receiveDirectionPlan
+  }
+  return payDirectionPlan
+}
+
 export async function buildManualGeneralCreditApplyPlan(params: {
   meId: string
   otherId: string
   currency: string
 }): Promise<ManualGeneralCreditApplyPlan | null> {
-  const receiveDirectionCredit = await computeAvailableGeneralCredit({
-    meId: params.meId,
-    otherId: params.otherId,
-    fromUserId: params.otherId,
-    toUserId: params.meId,
-    currency: params.currency,
-  })
-  const receiveDirectionPlan = await buildPersonalBillAllocationPlan({
-    meId: params.meId,
-    otherId: params.otherId,
-    fromUserId: params.otherId,
-    toUserId: params.meId,
-    currency: params.currency,
-    amountToApply: receiveDirectionCredit,
-  })
-
-  const payDirectionCredit = await computeAvailableGeneralCredit({
-    meId: params.meId,
-    otherId: params.otherId,
-    fromUserId: params.meId,
-    toUserId: params.otherId,
-    currency: params.currency,
-  })
-  const payDirectionPlan = await buildPersonalBillAllocationPlan({
-    meId: params.meId,
-    otherId: params.otherId,
-    fromUserId: params.meId,
-    toUserId: params.otherId,
-    currency: params.currency,
-    amountToApply: payDirectionCredit,
-  })
-
-  const receiveApplied = receiveDirectionPlan.appliedAmount
-  const payApplied = payDirectionPlan.appliedAmount
-  if (receiveApplied <= 0.005 && payApplied <= 0.005) return null
-
-  if (receiveApplied >= payApplied) {
-    return {
-      ...receiveDirectionPlan,
+  const [receiveDirectionPlan, payDirectionPlan] = await Promise.all([
+    buildManualGeneralCreditSelectionPlanForDirection({
+      meId: params.meId,
+      otherId: params.otherId,
       fromUserId: params.otherId,
       toUserId: params.meId,
-      availableGeneralCredit: receiveDirectionCredit,
-    }
-  }
+      currency: params.currency,
+    }),
+    buildManualGeneralCreditSelectionPlanForDirection({
+      meId: params.meId,
+      otherId: params.otherId,
+      fromUserId: params.meId,
+      toUserId: params.otherId,
+      currency: params.currency,
+    }),
+  ])
+
+  const receiveApplied = receiveDirectionPlan.personalPlan.appliedAmount
+  const payApplied = payDirectionPlan.personalPlan.appliedAmount
+  if (receiveApplied <= 0.005 && payApplied <= 0.005) return null
+
+  const chosenPlan = receiveApplied >= payApplied ? receiveDirectionPlan : payDirectionPlan
   return {
-    ...payDirectionPlan,
-    fromUserId: params.meId,
-    toUserId: params.otherId,
-    availableGeneralCredit: payDirectionCredit,
+    ...chosenPlan.personalPlan,
+    fromUserId: chosenPlan.fromUserId,
+    toUserId: chosenPlan.toUserId,
+    availableGeneralCredit: chosenPlan.availableGeneralCredit,
   }
 }
 
@@ -1064,8 +1220,7 @@ export async function listSharedGroupsWithBalance(
     let theirNet = 0
     for (const b of summary.balances) {
       if (otherIds.has(b.userId)) {
-        theirNet = b.amount
-        break
+        theirNet += b.amount
       }
     }
 
