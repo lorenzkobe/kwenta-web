@@ -12,6 +12,7 @@ import {
   INACTIVE_ACCOUNT_MESSAGE_KEY,
   SESSION_EXPIRED_MESSAGE_KEY,
 } from '@/lib/auth-session-flags'
+import { messageForAccountNotActive } from '@/lib/account-gate-messages'
 import { withMetric } from '@/lib/client-metrics'
 import { db } from '@/db/db'
 import { useAppStore } from '@/store/app-store'
@@ -208,11 +209,26 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (error) {
       return { error }
     }
-    if (!data.session?.user) {
+    const sessionUser = data.session?.user
+    if (!sessionUser) {
       return { error: new Error('Sign in failed. Try again.') }
     }
 
-    // Account gate + Dexie seed happen in applySession (avoids duplicate profiles HTTP calls).
+    const { data: prof, error: gateError } = await withMetric('auth.accountGate.signIn', () =>
+      supabase.from('profiles').select('account_status').eq('id', sessionUser.id).maybeSingle(),
+    )
+
+    if (gateError) {
+      await supabase.auth.signOut()
+      return { error: new Error('Could not verify your account right now. Please try again.') }
+    }
+
+    if (!prof || prof.account_status !== 'active') {
+      await supabase.auth.signOut()
+      return { error: new Error(messageForAccountNotActive(prof?.account_status)) }
+    }
+
+    // applySession still seeds Dexie + userType from the full profile payload.
     return { error: null }
   }, [])
 
