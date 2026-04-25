@@ -67,6 +67,27 @@ export async function computeGroupBalances(
 
   const bills = await db.bills.where('group_id').equals(groupId).toArray()
   const activeBills = bills.filter((b) => !b.is_deleted)
+  const billIds = activeBills.map((bill) => bill.id)
+  const allItems =
+    billIds.length > 0 ? await db.bill_items.where('bill_id').anyOf(billIds).toArray() : []
+  const activeItems = allItems.filter((item) => !item.is_deleted)
+  const itemsByBillId = new Map<string, typeof activeItems>()
+  for (const item of activeItems) {
+    const rows = itemsByBillId.get(item.bill_id) ?? []
+    rows.push(item)
+    itemsByBillId.set(item.bill_id, rows)
+  }
+
+  const itemIds = activeItems.map((item) => item.id)
+  const allSplits =
+    itemIds.length > 0 ? await db.item_splits.where('item_id').anyOf(itemIds).toArray() : []
+  const activeSplits = allSplits.filter((split) => !split.is_deleted)
+  const splitsByItemId = new Map<string, typeof activeSplits>()
+  for (const split of activeSplits) {
+    const rows = splitsByItemId.get(split.item_id) ?? []
+    rows.push(split)
+    splitsByItemId.set(split.item_id, rows)
+  }
 
   const netBalance = new Map<string, number>()
   for (const m of activeMembers) {
@@ -74,12 +95,8 @@ export async function computeGroupBalances(
   }
 
   for (const bill of activeBills) {
-    const items = await db.bill_items.where('bill_id').equals(bill.id).toArray()
-    const activeItems = items.filter((i) => !i.is_deleted)
-
-    for (const item of activeItems) {
-      const splits = await db.item_splits.where('item_id').equals(item.id).toArray()
-      const activeSplits = splits.filter((s) => !s.is_deleted)
+    for (const item of itemsByBillId.get(bill.id) ?? []) {
+      const activeSplits = splitsByItemId.get(item.id) ?? []
 
       if (activeSplits.length === 0) continue
 

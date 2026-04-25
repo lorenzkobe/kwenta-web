@@ -8,6 +8,7 @@ import { isPersonalBillFullySettled } from '@/lib/personal-bill-status'
 import { participantUnionForBill } from '@/lib/people'
 import { useCurrentUser } from '@/hooks/useCurrentUser'
 import { formatCurrency, timeAgo, cn } from '@/lib/utils'
+import type { Bill } from '@/types'
 import { Button } from '@/components/ui/button'
 import { ConfirmDialog } from '@/components/common/ConfirmDialog'
 import {
@@ -43,16 +44,23 @@ export function BillsPage() {
   const billBuckets = useLiveQuery(async () => {
     if (!userId) return { myBills: [] as EnrichedBill[], sharedBills: [] as EnrichedBill[] }
     const currentUserId = userId
-    const allPersonal = (await db.bills.toArray()).filter((b) => !b.is_deleted && b.group_id === null)
-    const myRaw = allPersonal.filter((b) => b.created_by === currentUserId)
-    const sharedRaw: typeof allPersonal = []
-    for (const bill of allPersonal) {
-      if (bill.created_by === currentUserId) continue
-      const union = await participantUnionForBill(bill.id)
-      if (union.has(currentUserId)) sharedRaw.push(bill)
-    }
+    const myRaw = (await db.bills.where('created_by').equals(currentUserId).toArray()).filter(
+      (b) => !b.is_deleted && b.group_id === null,
+    )
 
-    async function enrichBill(bill: (typeof allPersonal)[number]): Promise<EnrichedBill> {
+    const mySplits = (await db.item_splits.where('user_id').equals(currentUserId).toArray()).filter(
+      (split) => !split.is_deleted,
+    )
+    const itemIds = [...new Set(mySplits.map((split) => split.item_id))]
+    const splitItems =
+      itemIds.length > 0 ? await db.bill_items.where('id').anyOf(itemIds).toArray() : []
+    const billIds = [...new Set(splitItems.filter((item) => !item.is_deleted).map((item) => item.bill_id))]
+    const splitBills = billIds.length > 0 ? await db.bills.where('id').anyOf(billIds).toArray() : []
+    const sharedRaw = splitBills.filter(
+      (bill) => !bill.is_deleted && bill.group_id === null && bill.created_by !== currentUserId,
+    )
+
+    async function enrichBill(bill: Bill): Promise<EnrichedBill> {
       const items = await db.bill_items.where('bill_id').equals(bill.id).toArray()
       const activeItems = items.filter((i) => !i.is_deleted)
       const union = await participantUnionForBill(bill.id)

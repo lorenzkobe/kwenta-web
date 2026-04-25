@@ -181,19 +181,67 @@ export async function computePairwiseNet(
   const byCurrency = new Map<string, number>()
 
   // Personal bills (group_id = null): direct payer-split pairwise approach
-  const personalBills = await db.bills.filter((b) => !b.is_deleted && b.group_id === null).toArray()
+  const participantIds = [...new Set([...meIds, ...otherIds])]
+  const createdByEither = await db.bills.where('created_by').anyOf(participantIds).toArray()
+  const participantSplits = await db.item_splits.where('user_id').anyOf(participantIds).toArray()
+  const participantItemIds = [
+    ...new Set(participantSplits.filter((split) => !split.is_deleted).map((split) => split.item_id)),
+  ]
+  const participantItems =
+    participantItemIds.length > 0
+      ? await db.bill_items.where('id').anyOf(participantItemIds).toArray()
+      : []
+  const participantBillIds = [
+    ...new Set(participantItems.filter((item) => !item.is_deleted).map((item) => item.bill_id)),
+  ]
+  const participantBills =
+    participantBillIds.length > 0 ? await db.bills.where('id').anyOf(participantBillIds).toArray() : []
+  const personalBills = [
+    ...new Map(
+      [...createdByEither, ...participantBills]
+        .filter((bill) => !bill.is_deleted && bill.group_id === null)
+        .map((bill) => [bill.id, bill]),
+    ).values(),
+  ]
+  const personalBillIds = personalBills.map((bill) => bill.id)
+  const personalItems =
+    personalBillIds.length > 0
+      ? await db.bill_items.where('bill_id').anyOf(personalBillIds).toArray()
+      : []
+  const activePersonalItems = personalItems.filter((item) => !item.is_deleted)
+  const personalItemsByBillId = new Map<string, typeof activePersonalItems>()
+  for (const item of activePersonalItems) {
+    const rows = personalItemsByBillId.get(item.bill_id) ?? []
+    rows.push(item)
+    personalItemsByBillId.set(item.bill_id, rows)
+  }
+
+  const personalItemIds = activePersonalItems.map((item) => item.id)
+  const personalSplits =
+    personalItemIds.length > 0
+      ? await db.item_splits.where('item_id').anyOf(personalItemIds).toArray()
+      : []
+  const activePersonalSplits = personalSplits.filter((split) => !split.is_deleted)
+  const personalSplitsByItemId = new Map<string, typeof activePersonalSplits>()
+  for (const split of activePersonalSplits) {
+    const rows = personalSplitsByItemId.get(split.item_id) ?? []
+    rows.push(split)
+    personalSplitsByItemId.set(split.item_id, rows)
+  }
 
   for (const bill of personalBills) {
-    const participantUnion = await participantUnionForBill(bill.id)
+    const participantUnion = new Set<string>([bill.created_by])
+    for (const item of personalItemsByBillId.get(bill.id) ?? []) {
+      for (const split of personalSplitsByItemId.get(item.id) ?? []) {
+        participantUnion.add(split.user_id)
+      }
+    }
     const meOnBill = profileSetTouchesBill(meIds, bill, participantUnion)
     const otherOnBill = profileSetTouchesBill(otherIds, bill, participantUnion)
     if (!meOnBill || !otherOnBill) continue
 
-    const items = await db.bill_items.where('bill_id').equals(bill.id).toArray()
-    for (const item of items) {
-      if (item.is_deleted) continue
-      const splits = await db.item_splits.where('item_id').equals(item.id).toArray()
-      const active = splits.filter((s) => !s.is_deleted)
+    for (const item of personalItemsByBillId.get(bill.id) ?? []) {
+      const active = personalSplitsByItemId.get(item.id) ?? []
       const mySplit = active.find((s) => meIds.has(s.user_id))
       const otherSplit = active.find((s) => otherIds.has(s.user_id))
       const cur = bill.currency
@@ -236,14 +284,17 @@ export async function computePairwiseNet(
   // full group net for me and other (the same algorithm as computeGroupBalances),
   // then infer the pairwise amount from the two net balances.
   const myMemberships = await db.group_members
-    .filter((m) => !m.is_deleted && meIds.has(m.user_id))
+    .where('user_id')
+    .anyOf([...meIds])
     .toArray()
-  const myGroupIds = new Set(myMemberships.map((m) => m.group_id))
+  const myGroupIds = new Set(myMemberships.filter((m) => !m.is_deleted).map((m) => m.group_id))
   const otherMemberships = await db.group_members
-    .filter((m) => !m.is_deleted && otherIds.has(m.user_id))
+    .where('user_id')
+    .anyOf([...otherIds])
     .toArray()
+  const activeOtherMemberships = otherMemberships.filter((m) => !m.is_deleted)
   const sharedGroupIds = [
-    ...new Set(otherMemberships.map((m) => m.group_id).filter((gid) => myGroupIds.has(gid))),
+    ...new Set(activeOtherMemberships.map((m) => m.group_id).filter((gid) => myGroupIds.has(gid))),
   ]
 
   for (const groupId of sharedGroupIds) {
@@ -251,16 +302,35 @@ export async function computePairwiseNet(
     if (!group || group.is_deleted) continue
 
     const groupBills = await db.bills.where('group_id').equals(groupId).toArray()
+    const activeGroupBills = groupBills.filter((bill) => !bill.is_deleted)
+    const groupBillIds = activeGroupBills.map((bill) => bill.id)
+    const groupItems =
+      groupBillIds.length > 0 ? await db.bill_items.where('bill_id').anyOf(groupBillIds).toArray() : []
+    const activeGroupItems = groupItems.filter((item) => !item.is_deleted)
+    const groupItemsByBillId = new Map<string, typeof activeGroupItems>()
+    for (const item of activeGroupItems) {
+      const rows = groupItemsByBillId.get(item.bill_id) ?? []
+      rows.push(item)
+      groupItemsByBillId.set(item.bill_id, rows)
+    }
+
+    const groupItemIds = activeGroupItems.map((item) => item.id)
+    const groupSplits =
+      groupItemIds.length > 0 ? await db.item_splits.where('item_id').anyOf(groupItemIds).toArray() : []
+    const activeGroupSplits = groupSplits.filter((split) => !split.is_deleted)
+    const groupSplitsByItemId = new Map<string, typeof activeGroupSplits>()
+    for (const split of activeGroupSplits) {
+      const rows = groupSplitsByItemId.get(split.item_id) ?? []
+      rows.push(split)
+      groupSplitsByItemId.set(split.item_id, rows)
+    }
+
     let meGroupNet = 0
     let otherGroupNet = 0
 
-    for (const bill of groupBills) {
-      if (bill.is_deleted) continue
-      const items = await db.bill_items.where('bill_id').equals(bill.id).toArray()
-      for (const item of items) {
-        if (item.is_deleted) continue
-        const splits = await db.item_splits.where('item_id').equals(item.id).toArray()
-        const active = splits.filter((s) => !s.is_deleted)
+    for (const bill of activeGroupBills) {
+      for (const item of groupItemsByBillId.get(bill.id) ?? []) {
+        const active = groupSplitsByItemId.get(item.id) ?? []
         if (active.length === 0) continue
         const totalSplit = active.reduce((sum, s) => sum + s.computed_amount, 0)
 

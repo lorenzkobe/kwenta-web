@@ -4,6 +4,7 @@ import { useLiveQuery } from 'dexie-react-hooks'
 import { db } from '@/db/db'
 import { useCurrentUser } from '@/hooks/useCurrentUser'
 import { useOverallBalanceRollups } from '@/hooks/useOverallBalanceRollups'
+import { mapById, uniqueStrings } from '@/lib/db-query-helpers'
 import { formatCurrency, timeAgo } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -105,23 +106,18 @@ export function HomePage() {
     const active = bills.filter((b) => !b.is_deleted)
     active.sort((a, b) => b.created_at.localeCompare(a.created_at))
     const slice = active.slice(0, 5)
-    return Promise.all(
-      slice.map(async (b) => {
-        let groupName: string | undefined
-        if (b.group_id) {
-          const g = await db.groups.get(b.group_id)
-          if (g && !g.is_deleted) groupName = g.name
-        }
-        return {
-          id: b.id,
-          title: b.title,
-          amount: b.total_amount,
-          currency: b.currency,
-          createdAt: b.created_at,
-          groupName,
-        }
-      }),
-    )
+    const groupIds = uniqueStrings(slice.map((bill) => bill.group_id))
+    const groups = groupIds.length > 0 ? await db.groups.where('id').anyOf(groupIds).toArray() : []
+    const groupById = mapById(groups.filter((group) => !group.is_deleted))
+
+    return slice.map((b) => ({
+      id: b.id,
+      title: b.title,
+      amount: b.total_amount,
+      currency: b.currency,
+      createdAt: b.created_at,
+      groupName: b.group_id ? groupById.get(b.group_id)?.name : undefined,
+    }))
   }, [userId])
 
   const statsLoading = stats === undefined
