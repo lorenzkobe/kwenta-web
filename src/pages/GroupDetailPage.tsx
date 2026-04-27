@@ -9,6 +9,7 @@ import {
   Pencil,
   Plus,
   ReceiptText,
+  Share2,
   Trash2,
   UserMinus,
   UserPlus,
@@ -26,6 +27,7 @@ import {
   removeGroupMember,
   deleteGroup,
   updateGroup,
+  getBillWithDetails,
 } from '@/db/operations'
 import {
   computeGroupBalances,
@@ -44,6 +46,9 @@ import { SettlementHistoryList } from '@/components/common/SettlementHistoryList
 import { EditSettlementDialog } from '@/components/common/EditSettlementDialog'
 import { RecordSettlementDialog } from '@/components/common/RecordSettlementDialog'
 import { ConfirmDialog } from '@/components/common/ConfirmDialog'
+import { ExportImageDialog } from '@/components/export/ExportImageDialog'
+import { GroupExportCard } from '@/components/export/GroupExportCard'
+import { GroupMemberExportCard, type GroupMemberBillEntry } from '@/components/export/GroupMemberExportCard'
 import { useGroupSettlementHistory } from '@/db/hooks'
 import { getMemberSuggestions } from '@/lib/people'
 
@@ -504,6 +509,39 @@ export function GroupDetailPage() {
     recipients: { toUserId: string; toName: string; amount: number }[]
   } | null>(null)
   const [deleteGroupConfirmOpen, setDeleteGroupConfirmOpen] = useState(false)
+  const [exportOpen, setExportOpen] = useState(false)
+  const [exportMember, setExportMember] = useState<{
+    userId: string
+    profileName: string
+    netBalance: number
+    bills: GroupMemberBillEntry[]
+  } | null>(null)
+
+  async function handleMemberShare(member: { userId: string; profileName: string }) {
+    if (!group) return
+    const net = Math.round((balanceByUser.get(member.userId) ?? 0) * 100) / 100
+    const memberBills: GroupMemberBillEntry[] = []
+    for (const bill of bills ?? []) {
+      const details = await getBillWithDetails(bill.id)
+      if (!details) continue
+      let share = 0
+      for (const item of details.items) {
+        for (const split of item.splits) {
+          if (split.user_id === member.userId) share += split.computed_amount
+        }
+      }
+      if (share > 0.005) {
+        memberBills.push({
+          id: bill.id,
+          title: bill.title,
+          note: details.note ?? null,
+          currency: bill.currency,
+          memberShare: Math.round(share * 100) / 100,
+        })
+      }
+    }
+    setExportMember({ userId: member.userId, profileName: member.profileName, netBalance: net, bills: memberBills })
+  }
 
   const settlementHistory = useGroupSettlementHistory(groupId)
 
@@ -629,15 +667,26 @@ export function GroupDetailPage() {
               Back
             </Link>
           </Button>
-          <Button
-            variant="outline"
-            size="icon-sm"
-            className="rounded-full"
-            aria-label="Group options"
-            onClick={() => setShowOptionsMenu(true)}
-          >
-            <MoreVertical className="size-4" />
-          </Button>
+          <div className="flex items-center gap-1">
+            <Button
+              variant="outline"
+              size="icon-sm"
+              className="rounded-full"
+              aria-label="Share group summary"
+              onClick={() => setExportOpen(true)}
+            >
+              <Share2 className="size-4" />
+            </Button>
+            <Button
+              variant="outline"
+              size="icon-sm"
+              className="rounded-full"
+              aria-label="Group options"
+              onClick={() => setShowOptionsMenu(true)}
+            >
+              <MoreVertical className="size-4" />
+            </Button>
+          </div>
         </div>
 
         <div className="rounded-3xl border border-stone-200 bg-white p-5 shadow-sm">
@@ -697,9 +746,20 @@ export function GroupDetailPage() {
                       </p>
                     </div>
                   </div>
-                  <p className={cn('shrink-0 text-right text-sm font-semibold tabular-nums', amountClass)}>
-                    {formatCurrency(amount, group.currency)}
-                  </p>
+                  <div className="flex shrink-0 items-center gap-2">
+                    <p className={cn('text-right text-sm font-semibold tabular-nums', amountClass)}>
+                      {formatCurrency(amount, group.currency)}
+                    </p>
+                    <Button
+                      variant="ghost"
+                      size="icon-xs"
+                      className="rounded-full text-stone-400 hover:text-stone-600"
+                      aria-label={`Share ${m.profileName}'s share`}
+                      onClick={() => void handleMemberShare(m)}
+                    >
+                      <Share2 className="size-3.5" />
+                    </Button>
+                  </div>
                 </li>
               )
             })}
@@ -947,6 +1007,47 @@ export function GroupDetailPage() {
         variant="danger"
         onConfirm={executeDeleteGroup}
       />
+
+      {exportOpen && balanceSummary && (
+        <ExportImageDialog
+          filename={`${group.name.toLowerCase().replace(/\s+/g, '-')}-group.png`}
+          onClose={() => setExportOpen(false)}
+        >
+          <GroupExportCard
+            groupName={group.name}
+            currency={group.currency}
+            members={(members ?? []).map((m) => ({
+              userId: m.userId,
+              profileName: m.profileName,
+            }))}
+            balanceSummary={balanceSummary}
+            bills={(bills ?? []).map((b) => ({
+              id: b.id,
+              title: b.title,
+              note: (b as { note?: string | null }).note ?? null,
+              total_amount: b.total_amount,
+              currency: b.currency,
+              created_at: b.created_at,
+              creatorName: b.creatorName,
+            }))}
+          />
+        </ExportImageDialog>
+      )}
+
+      {exportMember && group && (
+        <ExportImageDialog
+          filename={`${exportMember.profileName.toLowerCase().replace(/\s+/g, '-')}-${group.name.toLowerCase().replace(/\s+/g, '-')}.png`}
+          onClose={() => setExportMember(null)}
+        >
+          <GroupMemberExportCard
+            groupName={group.name}
+            memberName={exportMember.profileName}
+            currency={group.currency}
+            netBalance={exportMember.netBalance}
+            bills={exportMember.bills}
+          />
+        </ExportImageDialog>
+      )}
 
       {detailBillId && userId && (
         <BillDetailModal

@@ -8,6 +8,7 @@ import {
   Loader2,
   MoreVertical,
   ReceiptText,
+  Share2,
   Trash2,
   Unlink,
   Users,
@@ -34,6 +35,7 @@ import {
   applyGeneralCreditToSelection,
   createPersonalPaymentWithDistribution,
   deletePerson,
+  getBillWithDetails,
   linkProfileToRemote,
   removeProfilePeerLink,
 } from '@/db/operations'
@@ -48,6 +50,8 @@ import { SettlementHistoryList } from '@/components/common/SettlementHistoryList
 import { EditSettlementDialog } from '@/components/common/EditSettlementDialog'
 import { RecordSettlementDialog } from '@/components/common/RecordSettlementDialog'
 import { ApplyGeneralCreditDialog } from '@/components/common/ApplyGeneralCreditDialog'
+import { ExportImageDialog } from '@/components/export/ExportImageDialog'
+import { PersonExportCard, type PersonBillEntry } from '@/components/export/PersonExportCard'
 import type { SettlementHistoryItem } from '@/lib/settlement'
 import type { Profile, ProfilePeerLink } from '@/types'
 import {
@@ -341,6 +345,7 @@ export function PersonDetailPage() {
   )
   const [peerLinkToUnlink, setPeerLinkToUnlink] = useState<ProfilePeerLink | null>(null)
   const [billsScope, setBillsScope] = useState<'personal' | 'groups'>('personal')
+  const [exportOpen, setExportOpen] = useState(false)
   const { confirm: confirmFlow, dialog: flowConfirmDialog } = useConfirmDialog()
 
   const profile = useLiveQuery(
@@ -480,6 +485,27 @@ export function PersonDetailPage() {
     }
     return out
   }, [userId, personId, personalBills])
+
+  const exportBillDetails = useLiveQuery(async () => {
+    if (!exportOpen || !userId || !personId) return [] as PersonBillEntry[]
+    const unsettled = personalBills.filter(
+      (b) => Math.abs(personalBillDirection?.get(b.id) ?? 0) > 0.005,
+    )
+    const results = await Promise.all(
+      unsettled.map(async (b) => {
+        const details = await getBillWithDetails(b.id)
+        if (!details) return null
+        return {
+          title: details.title,
+          note: details.note ?? null,
+          currency: details.currency,
+          net: personalBillDirection?.get(b.id) ?? 0,
+          items: details.items,
+        }
+      }),
+    )
+    return results.filter((r) => r !== null) as PersonBillEntry[]
+  }, [exportOpen, userId, personId, personalBills, personalBillDirection])
 
   const defaultCurrency = useMemo(() => {
     const pb = personalBills[0]
@@ -854,18 +880,30 @@ export function PersonDetailPage() {
             People
           </Link>
         </Button>
-        {profile && (
+        <div className="flex items-center gap-1">
           <Button
             variant="outline"
             size="icon-sm"
             className="rounded-full"
-            aria-label="Person options"
+            aria-label="Share person summary"
             type="button"
-            onClick={() => setShowOptionsMenu(true)}
+            onClick={() => setExportOpen(true)}
           >
-            <MoreVertical className="size-4" />
+            <Share2 className="size-4" />
           </Button>
-        )}
+          {profile && (
+            <Button
+              variant="outline"
+              size="icon-sm"
+              className="rounded-full"
+              aria-label="Person options"
+              type="button"
+              onClick={() => setShowOptionsMenu(true)}
+            >
+              <MoreVertical className="size-4" />
+            </Button>
+          )}
+        </div>
       </div>
 
       <div className="rounded-3xl border border-stone-200 bg-white p-5 shadow-sm">
@@ -1351,6 +1389,24 @@ export function PersonDetailPage() {
         onConfirm={handleDeletePerson}
       />
       {flowConfirmDialog}
+
+      {exportOpen && (
+        <ExportImageDialog
+          filename={`${resolvedDisplayName.toLowerCase().replace(/\s+/g, '-')}-balance.png`}
+          onClose={() => setExportOpen(false)}
+        >
+          <PersonExportCard
+            displayName={resolvedDisplayName}
+            netByCurrency={netByCurrency ?? new Map()}
+            unsettledPersonalBills={exportBillDetails ?? []}
+            sharedGroups={(sharedGroups ?? []).map((g) => ({
+              groupName: g.groupName,
+              currency: g.currency,
+              theirNet: g.theirNet,
+            }))}
+          />
+        </ExportImageDialog>
+      )}
     </div>
   )
 }

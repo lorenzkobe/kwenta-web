@@ -1,8 +1,9 @@
 import { useState, useEffect, useCallback } from 'react'
 import { useLiveQuery } from 'dexie-react-hooks'
-import { ArrowLeft, Check, Loader2, Pencil, ReceiptText, Trash2, Users } from 'lucide-react'
+import { ArrowLeft, Check, Loader2, Pencil, ReceiptText, Share2, Trash2, Users } from 'lucide-react'
 import { Link, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { getBillWithDetails, deleteBill } from '@/db/operations'
+import { db } from '@/db/db'
 import { BILL_BACK_QUERY, billDetailBackPath, withBillBackQuery } from '@/lib/bill-navigation'
 import {
   computePairwiseNetForBill,
@@ -16,6 +17,8 @@ import { formatCurrency } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { RecordSettlementDialog } from '@/components/common/RecordSettlementDialog'
 import { ConfirmDialog } from '@/components/common/ConfirmDialog'
+import { ExportImageDialog } from '@/components/export/ExportImageDialog'
+import { BillExportCard } from '@/components/export/BillExportCard'
 
 type BillDetails = Awaited<ReturnType<typeof getBillWithDetails>>
 
@@ -47,6 +50,7 @@ export function BillDetailPage() {
   } | null>(null)
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false)
   const [mySplitTotal, setMySplitTotal] = useState<number | null>(null)
+  const [exportOpen, setExportOpen] = useState(false)
 
   const reloadBill = useCallback(() => {
     if (!billId) return
@@ -84,6 +88,13 @@ export function BillDetailPage() {
 
   const bill = liveBill === undefined ? billState : liveBill
   const loading = liveBill === undefined ? loadingState : false
+  const groupId = bill?.group_id ?? null
+
+  const groupName = useLiveQuery(async () => {
+    if (!groupId) return null
+    const g = await db.groups.get(groupId)
+    return g?.name ?? null
+  }, [groupId])
 
   const reloadBillPairs = useCallback(async () => {
     if (!billId || !userId || !bill) {
@@ -179,27 +190,36 @@ export function BillDetailPage() {
             Back
           </Link>
         </Button>
-        {canEdit ? (
-          <div className="flex items-center gap-1">
-            <Button asChild variant="ghost" size="sm" className="rounded-full">
-              <Link to={withBillBackQuery(`/app/bills/new?edit=${billId}`, backPath)}>
-                <Pencil className="size-4" />
-                Edit
-              </Link>
-            </Button>
-            <Button
-              variant="ghost"
-              size="sm"
-              className="rounded-full text-red-600"
-              onClick={() => setDeleteConfirmOpen(true)}
-            >
-              <Trash2 className="size-4" />
-              Delete
-            </Button>
-          </div>
-        ) : (
-          <p className="text-xs text-stone-500">View only</p>
-        )}
+        <div className="flex items-center gap-1">
+          <Button
+            variant="outline"
+            size="icon-sm"
+            className="rounded-full"
+            aria-label="Share bill"
+            onClick={() => setExportOpen(true)}
+          >
+            <Share2 className="size-4" />
+          </Button>
+          {canEdit && (
+            <>
+              <Button asChild variant="ghost" size="sm" className="rounded-full">
+                <Link to={withBillBackQuery(`/app/bills/new?edit=${billId}`, backPath)}>
+                  <Pencil className="size-4" />
+                  Edit
+                </Link>
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="rounded-full text-red-600"
+                onClick={() => setDeleteConfirmOpen(true)}
+              >
+                <Trash2 className="size-4" />
+                Delete
+              </Button>
+            </>
+          )}
+        </div>
       </div>
 
       <div className="rounded-3xl border border-stone-200 bg-white p-5 shadow-sm">
@@ -287,50 +307,61 @@ export function BillDetailPage() {
       )}
 
       <div className="rounded-3xl border border-stone-200 bg-white p-5 shadow-sm">
-        <div className="flex items-center gap-2">
-          <ReceiptText className="size-4 text-teal-800" />
-          <h2 className="text-lg font-semibold">
-            Items ({bill.items.length})
-          </h2>
-        </div>
-
-        <div className="mt-4 space-y-3">
-          {bill.items.map((item) => (
-            <div
-              key={item.id}
-              className="rounded-2xl border border-stone-200 bg-stone-100/60 p-4"
-            >
-              <div className="flex items-center justify-between">
-                <p className="font-medium text-stone-800">{item.name}</p>
-                <p className="font-semibold text-stone-800">
-                  {formatCurrency(item.amount, bill.currency)}
-                </p>
-              </div>
-
-              {item.splits.length > 0 && (
-                <div className="mt-3 border-t border-stone-200 pt-3">
-                  <div className="flex items-center gap-1.5 text-xs font-medium text-stone-400">
-                    <Users className="size-3.5" />
-                    Split ({item.splits[0].split_type})
-                  </div>
-                  <div className="mt-3 space-y-1.5">
-                    {item.splits.map((split) => (
-                      <div
-                        key={split.id}
-                        className="flex items-center justify-between text-sm"
-                      >
-                        <span className="text-stone-600">{split.displayName}</span>
-                        <span className="font-medium text-stone-800">
-                          {formatCurrency(split.computed_amount, bill.currency)}
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
+        {bill.items.length > 1 ? (
+          <>
+            <div className="flex items-center gap-2">
+              <ReceiptText className="size-4 text-teal-800" />
+              <h2 className="text-lg font-semibold">Items ({bill.items.length})</h2>
             </div>
-          ))}
-        </div>
+            <div className="mt-4 space-y-3">
+              {bill.items.map((item) => (
+                <div key={item.id} className="rounded-2xl border border-stone-200 bg-stone-100/60 p-4">
+                  <div className="flex items-center justify-between">
+                    <p className="font-medium text-stone-800">{item.name}</p>
+                    <p className="font-semibold text-stone-800">
+                      {formatCurrency(item.amount, bill.currency)}
+                    </p>
+                  </div>
+                  {item.splits.length > 0 && (
+                    <div className="mt-3 border-t border-stone-200 pt-3">
+                      <div className="flex items-center gap-1.5 text-xs font-medium text-stone-400">
+                        <Users className="size-3.5" />
+                        Split ({item.splits[0].split_type})
+                      </div>
+                      <div className="mt-3 space-y-1.5">
+                        {item.splits.map((split) => (
+                          <div key={split.id} className="flex items-center justify-between text-sm">
+                            <span className="text-stone-600">{split.displayName}</span>
+                            <span className="font-medium text-stone-800">
+                              {formatCurrency(split.computed_amount, bill.currency)}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          </>
+        ) : (
+          <>
+            <div className="flex items-center gap-2">
+              <Users className="size-4 text-teal-800" />
+              <h2 className="text-lg font-semibold">Split</h2>
+            </div>
+            <div className="mt-4 space-y-1.5">
+              {(bill.items[0]?.splits ?? []).map((split) => (
+                <div key={split.id} className="flex items-center justify-between rounded-xl border border-stone-200 bg-stone-100/60 px-4 py-3 text-sm">
+                  <span className="text-stone-600">{split.displayName}</span>
+                  <span className="font-medium text-stone-800">
+                    {formatCurrency(split.computed_amount, bill.currency)}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </>
+        )}
       </div>
 
       {recordSettlement && billId && userId && (
@@ -363,13 +394,22 @@ export function BillDetailPage() {
       title="Delete this bill?"
       description={
         bill
-          ? `“${bill.title}” will be removed. This cannot be undone on this device.`
+          ? `"${bill.title}" will be removed. This cannot be undone on this device.`
           : 'This bill will be removed. This cannot be undone on this device.'
       }
       confirmLabel="Delete bill"
       variant="danger"
       onConfirm={executeDeleteBill}
     />
+
+    {exportOpen && bill && (
+      <ExportImageDialog
+        filename={`${bill.title.toLowerCase().replace(/\s+/g, '-')}.png`}
+        onClose={() => setExportOpen(false)}
+      >
+        <BillExportCard bill={bill} groupName={groupName ?? null} />
+      </ExportImageDialog>
+    )}
     </>
   )
 }
