@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { ArrowDownAZ, ArrowUpAZ, Loader2, Search } from 'lucide-react'
+import { ArrowDownAZ, ArrowUpAZ, Loader2, Search, Trash2 } from 'lucide-react'
+import { toast } from 'sonner'
 import { supabase } from '@/lib/supabase'
 import type { ProfileAccountStatus, ProfileUserType } from '@/types'
 import { useAppStore } from '@/store/app-store'
 import { Button } from '@/components/ui/button'
+import { ConfirmDialog } from '@/components/common/ConfirmDialog'
 import { Input } from '@/components/ui/input'
 import {
   Select,
@@ -49,6 +51,8 @@ export function AdminUsersPage() {
   const [busyId, setBusyId] = useState<string | null>(null)
   const [searchQuery, setSearchQuery] = useState('')
   const [sortNewestFirst, setSortNewestFirst] = useState(true)
+  const [deleteTarget, setDeleteTarget] = useState<AdminProfileRow | null>(null)
+  const [deleteCountdown, setDeleteCountdown] = useState(5)
 
   const load = useCallback(async () => {
     setError(null)
@@ -69,6 +73,21 @@ export function AdminUsersPage() {
       setLoading(false)
     })()
   }, [load])
+
+  useEffect(() => {
+    if (!deleteTarget) return
+    setDeleteCountdown(5)
+    const timer = window.setInterval(() => {
+      setDeleteCountdown((current) => {
+        if (current <= 1) {
+          window.clearInterval(timer)
+          return 0
+        }
+        return current - 1
+      })
+    }, 1000)
+    return () => window.clearInterval(timer)
+  }, [deleteTarget])
 
   const filteredSortedRows = useMemo(() => {
     const q = searchQuery.trim().toLowerCase()
@@ -110,6 +129,27 @@ export function AdminUsersPage() {
         setError(rpcError.message)
         return
       }
+      await load()
+    } finally {
+      setBusyId(null)
+    }
+  }
+
+  async function deleteUser() {
+    if (!deleteTarget) return
+    setBusyId(deleteTarget.id)
+    setError(null)
+    try {
+      const { error: rpcError } = await supabase.rpc('admin_delete_user', {
+        p_user_id: deleteTarget.id,
+      })
+      if (rpcError) {
+        setError(rpcError.message)
+        return
+      }
+      toast.success('User deleted', {
+        description: deleteTarget.email || deleteTarget.display_name || 'The user was permanently removed.',
+      })
       await load()
     } finally {
       setBusyId(null)
@@ -175,7 +215,7 @@ export function AdminUsersPage() {
       </div>
 
       <div className="overflow-x-auto rounded-2xl border border-stone-200 bg-white shadow-sm">
-        <table className="w-full min-w-[720px] text-left text-sm">
+        <table className="w-full min-w-[820px] text-left text-sm">
           <thead>
             <tr className="border-b border-stone-200 bg-stone-50/80 text-xs font-semibold uppercase tracking-wide text-stone-500">
               <th className="px-4 py-3">Email</th>
@@ -184,12 +224,13 @@ export function AdminUsersPage() {
               <th className="px-4 py-3">Status</th>
               <th className="px-4 py-3">Created</th>
               <th className="px-4 py-3">Access</th>
+              <th className="px-4 py-3 text-right">Delete</th>
             </tr>
           </thead>
           <tbody>
             {filteredSortedRows.length === 0 ? (
               <tr>
-                <td colSpan={6} className="px-4 py-8 text-center text-stone-500">
+                <td colSpan={7} className="px-4 py-8 text-center text-stone-500">
                   {rows.length === 0 ? 'No users found.' : 'No users match your search.'}
                 </td>
               </tr>
@@ -258,6 +299,20 @@ export function AdminUsersPage() {
                         }
                       />
                     </td>
+                    <td className="px-4 py-3 text-right">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="icon"
+                        className="size-9 rounded-xl border-red-200 text-red-700 hover:bg-red-50 hover:text-red-800"
+                        disabled={isBusy || isSelf}
+                        onClick={() => setDeleteTarget(row)}
+                        aria-label={isSelf ? 'You cannot delete your own account' : `Delete ${row.email || row.display_name}`}
+                        title={isSelf ? 'You cannot delete your own account' : 'Delete user'}
+                      >
+                        <Trash2 className="size-4" aria-hidden />
+                      </Button>
+                    </td>
                   </tr>
                 )
               })
@@ -269,6 +324,24 @@ export function AdminUsersPage() {
       <p className="text-xs text-stone-500">
         Unconfirmed = email not verified yet. Inactive = confirmed but cannot use the app until activated.
       </p>
+
+      <ConfirmDialog
+        open={deleteTarget !== null}
+        onOpenChange={(open) => {
+          if (!open) setDeleteTarget(null)
+        }}
+        title="Permanently delete user?"
+        description={
+          deleteTarget
+            ? `${deleteTarget.email || deleteTarget.display_name} and all related app data will be hard deleted. This cannot be undone.`
+            : ''
+        }
+        confirmLabel={deleteCountdown > 0 ? `Delete in ${deleteCountdown}s` : 'Delete user'}
+        confirmDisabled={deleteCountdown > 0}
+        cancelLabel="Keep user"
+        variant="danger"
+        onConfirm={deleteUser}
+      />
     </div>
   )
 }

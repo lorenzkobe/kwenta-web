@@ -11,6 +11,7 @@ export function ConfirmDialog({
   confirmLabel = 'Confirm',
   cancelLabel = 'Cancel',
   variant = 'default',
+  confirmDisabled = false,
   onConfirm,
 }: {
   open: boolean
@@ -20,6 +21,7 @@ export function ConfirmDialog({
   confirmLabel?: string
   cancelLabel?: string
   variant?: 'default' | 'danger'
+  confirmDisabled?: boolean
   onConfirm: () => void | Promise<void>
 }) {
   const [pending, setPending] = useState(false)
@@ -82,7 +84,7 @@ export function ConfirmDialog({
               'rounded-xl sm:min-w-24',
               variant === 'danger' && 'bg-red-600 text-white shadow-sm hover:bg-red-700',
             )}
-            disabled={pending}
+            disabled={pending || confirmDisabled}
             onClick={handleConfirm}
           >
             {pending ? '…' : confirmLabel}
