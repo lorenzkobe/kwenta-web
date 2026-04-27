@@ -1,4 +1,4 @@
-import { type ReactNode } from 'react'
+import { type ReactNode, useEffect } from 'react'
 import { Copy, Download, Loader2, Share2, X } from 'lucide-react'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
@@ -12,6 +12,12 @@ interface Props {
 
 export function ExportImageDialog({ children, filename = 'kwenta-export.png', onClose }: Props) {
   const { ref: cardRef, busy, capture } = useExportImage()
+
+  useEffect(() => {
+    const prev = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    return () => { document.body.style.overflow = prev }
+  }, [])
 
   async function handleSave() {
     const result = await capture()
@@ -71,7 +77,7 @@ export function ExportImageDialog({ children, filename = 'kwenta-export.png', on
         </div>
 
         {/* Card preview — rendered live, captured on button tap */}
-        <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden bg-stone-100/80 p-4">
+        <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden overscroll-contain bg-stone-100/80 p-4">
           <div ref={cardRef} className="w-full">
             {children}
           </div>
