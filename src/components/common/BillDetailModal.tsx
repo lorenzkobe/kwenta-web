@@ -100,7 +100,7 @@ export function BillDetailModal({
                   <div className="min-w-0">
                     <h3 className="text-lg font-semibold tracking-tight text-stone-800">{bill.title}</h3>
                     <p className="mt-1 text-xs text-stone-500">
-                      {bill.creatorName} · {new Date(bill.created_at).toLocaleDateString()}
+                      Paid by {bill.payorName} · {new Date(bill.created_at).toLocaleDateString()}
                     </p>
                   </div>
                   <div className="shrink-0 text-right">

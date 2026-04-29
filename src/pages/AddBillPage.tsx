@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import {
   ArrowLeft,
+  Check,
   ChevronDown,
   ChevronRight,
   LayoutList,
@@ -111,6 +112,9 @@ export function AddBillPage() {
   const [title, setTitle] = useState('')
   const [currency, setCurrency] = useState('PHP')
   const [groupId, setGroupId] = useState<string | null>(groupIdParam)
+  const [paidBy, setPaidBy] = useState<string>('')
+  const [payorOpen, setPayorOpen] = useState(false)
+  const [payorSearch, setPayorSearch] = useState('')
   const [note, setNote] = useState('')
   const [category, setCategory] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
@@ -225,6 +229,25 @@ export function AddBillPage() {
       ? simpleAmountNum > 0
       : items.some((i) => i.name.trim() && parseFloat(i.amount) > 0))
 
+  useEffect(() => {
+    if (userId && !paidBy && !editBillId) setPaidBy(userId)
+  }, [userId, paidBy, editBillId])
+
+  const payorOptions = members
+  const filteredPayorOptions = payorSearch.trim()
+    ? payorOptions.filter((m) =>
+        (m.isCurrentUser ? 'You' : m.displayName)
+          .toLowerCase()
+          .includes(payorSearch.toLowerCase()),
+      )
+    : payorOptions
+  const selectedPayor = payorOptions.find((m) => m.userId === paidBy)
+  const payorDisplayName = selectedPayor
+    ? selectedPayor.isCurrentUser
+      ? 'You'
+      : selectedPayor.displayName
+    : 'You'
+
   const selectedIdsRef = useRef(simpleSelectedUserIds)
   selectedIdsRef.current = simpleSelectedUserIds
   const simpleSplitTypeRef = useRef(simpleSplitType)
@@ -257,6 +280,7 @@ export function AddBillPage() {
       setCurrency(d.currency)
       setCategory(d.category ?? null)
       setGroupId(d.group_id)
+      setPaidBy(d.paid_by)
       if (d.items.length === 1) {
         setMode('simple')
         const line = d.items[0]
@@ -593,6 +617,7 @@ export function AddBillPage() {
           currency,
           groupId,
           createdBy: userId,
+          paidBy: paidBy || userId,
           note: note.trim(),
           category: category || null,
           items: [
@@ -614,6 +639,7 @@ export function AddBillPage() {
           currency,
           groupId,
           createdBy: userId,
+          paidBy: paidBy || userId,
           note: note.trim(),
           category: category || null,
           items: validItems.map((item) => ({
@@ -632,6 +658,7 @@ export function AddBillPage() {
           title: input.title,
           note: input.note,
           currency: input.currency,
+          paidBy: input.paidBy,
           category: input.category,
           items: input.items,
         })
@@ -746,6 +773,69 @@ export function AddBillPage() {
                 />
               </div>
 
+              {!membersLoading && payorOptions.length > 0 && (
+                <div className="flex flex-col gap-2">
+                  <label className="text-sm font-medium">Paid by</label>
+                  <div className="relative">
+                    <button
+                      type="button"
+                      onClick={() => { setPayorOpen((o) => !o); setPayorSearch('') }}
+                      className="flex w-full items-center justify-between rounded-lg border border-stone-200 bg-white px-3 py-2 text-sm text-stone-800 transition-colors hover:bg-stone-50"
+                    >
+                      <span className="flex items-center gap-1.5">
+                        <Users className="size-3.5 text-stone-400" />
+                        {payorDisplayName}
+                      </span>
+                      <ChevronDown className="size-4 text-stone-400" />
+                    </button>
+                    {payorOpen && (
+                      <>
+                        <div
+                          className="fixed inset-0 z-40"
+                          onClick={() => setPayorOpen(false)}
+                        />
+                        <div className="absolute z-50 mt-1 w-full rounded-xl border border-stone-200 bg-white shadow-lg">
+                          <div className="p-2">
+                            <Input
+                              placeholder="Search..."
+                              value={payorSearch}
+                              onChange={(e) => setPayorSearch(e.target.value)}
+                              autoFocus
+                              className="h-8 rounded-lg text-sm"
+                            />
+                          </div>
+                          <div className="max-h-48 overflow-y-auto pb-1">
+                            {filteredPayorOptions.map((member) => (
+                              <button
+                                key={member.userId}
+                                type="button"
+                                onClick={() => {
+                                  setPaidBy(member.userId)
+                                  setPayorOpen(false)
+                                  setPayorSearch('')
+                                }}
+                                className="flex w-full items-center gap-2 px-3 py-2 text-sm text-stone-800 transition-colors hover:bg-stone-50"
+                              >
+                                <Check
+                                  className={cn(
+                                    'size-3.5 shrink-0',
+                                    paidBy === member.userId ? 'text-teal-800' : 'text-transparent',
+                                  )}
+                                />
+                                {member.isCurrentUser ? 'You' : member.displayName}
+                              </button>
+                            ))}
+                            {filteredPayorOptions.length === 0 && (
+                              <p className="px-3 py-2 text-xs text-stone-400">No match</p>
+                            )}
+                          </div>
+                        </div>
+                      </>
+                    )}
+                  </div>
+                </div>
+              )}
+
               <div className="grid gap-4 sm:grid-cols-2">
                 <div className="flex flex-col gap-2">
                   <label className="text-sm font-medium">Currency</label>
@@ -771,7 +861,10 @@ export function AddBillPage() {
                   <label className="text-sm font-medium">Group (optional)</label>
                   <Select
                     value={groupId ?? '_none'}
-                    onValueChange={(val) => setGroupId(val === '_none' ? null : val)}
+                    onValueChange={(val) => {
+                      setGroupId(val === '_none' ? null : val)
+                      if (!editBillId && userId) setPaidBy(userId)
+                    }}
                     disabled={isEdit || groupsLoading}
                   >
                     <SelectTrigger>

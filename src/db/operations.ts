@@ -82,6 +82,7 @@ export interface CreateBillInput {
   currency: string
   groupId: string | null
   createdBy: string
+  paidBy?: string
   note: string
   category?: string | null
   items: {
@@ -106,6 +107,7 @@ export async function createBill(input: CreateBillInput): Promise<string> {
       group_id: input.groupId,
       currency: input.currency,
       created_by: input.createdBy,
+      paid_by: input.paidBy ?? input.createdBy,
       total_amount: totalAmount,
       note: input.note,
       category: input.category ?? null,
@@ -194,6 +196,7 @@ export async function updateBill(
     title: string
     note: string
     currency: string
+    paidBy?: string
     category?: string | null
     items: UpdateBillItemsInput
   },
@@ -223,6 +226,7 @@ export async function updateBill(
       title: patch.title,
       note: patch.note,
       currency: patch.currency,
+      ...(patch.paidBy !== undefined && { paid_by: patch.paidBy }),
       category: patch.category ?? null,
       total_amount: totalAmount,
       updated_at: timestamp,
@@ -1082,7 +1086,7 @@ export async function createSettlement(
     if (!bill || bill.is_deleted) throw new Error('Bill not found')
     if (bill.group_id !== groupId) throw new Error('Bill does not match this payment context')
     const union = await participantUnionForBill(billId)
-    union.add(bill.created_by)
+    union.add(bill.paid_by)
     if (!union.has(fromUserId) || !union.has(toUserId)) {
       throw new Error('Both people must be on this bill')
     }
@@ -1584,7 +1588,7 @@ export async function applyGeneralCreditToSelection(params: {
         if (!bill || bill.is_deleted) throw new Error('A selected personal bill no longer exists.')
         if (bill.group_id !== null) throw new Error('A selected bill no longer matches the personal payment context.')
         const union = await participantUnionForBill(slice.billId)
-        union.add(bill.created_by)
+        union.add(bill.paid_by)
         if (
           ![...sourceFromIds].some((id) => union.has(id)) ||
           ![...sourceToIds].some((id) => union.has(id))
@@ -1982,9 +1986,25 @@ export async function getBillWithDetails(billId: string) {
     creatorName = member?.display_name
   }
 
+  let payorName: string | undefined
+  if (bill.paid_by === bill.created_by) {
+    payorName = creatorName
+  } else {
+    const payor = await db.profiles.get(bill.paid_by)
+    payorName = payor?.display_name
+    if (!payorName && bill.group_id) {
+      const member = await db.group_members
+        .where('[group_id+user_id]')
+        .equals([bill.group_id, bill.paid_by])
+        .first()
+      payorName = member?.display_name
+    }
+  }
+
   return {
     ...bill,
     creatorName: creatorName ?? 'Unknown',
+    payorName: payorName ?? 'Unknown',
     items: itemsWithSplits,
   }
 }

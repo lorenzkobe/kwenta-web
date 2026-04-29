@@ -39,7 +39,7 @@ type EnrichedBill = {
   total_amount: number
   created_at: string
   created_by: string
-  creatorName?: string
+  payorName?: string
   itemCount: number
   settled: boolean
   category: string | null
@@ -94,7 +94,7 @@ export function BillsPage() {
         if (b.label === 'You') return 1
         return a.label.localeCompare(b.label)
       })
-      const creator = await db.profiles.get(bill.created_by)
+      const payor = await db.profiles.get(bill.paid_by)
       const settled = await isPersonalBillFullySettled(bill.id, currentUserId)
       return {
         id: bill.id,
@@ -103,7 +103,7 @@ export function BillsPage() {
         total_amount: bill.total_amount,
         created_at: bill.created_at,
         created_by: bill.created_by,
-        creatorName: creator?.display_name ?? 'Someone',
+        payorName: payor?.display_name ?? 'Someone',
         itemCount: activeItems.length,
         settled,
         category: bill.category ?? null,
@@ -422,7 +422,7 @@ export function BillsPage() {
                         <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-stone-500">
                           <span>{timeAgo(bill.created_at)}</span>
                           <span>·</span>
-                          <span>Created by {bill.creatorName ?? 'Someone'}</span>
+                          <span>Paid by {bill.payorName ?? 'Someone'}</span>
                         </div>
                       </div>
                       <span className="text-sm font-semibold text-stone-800">

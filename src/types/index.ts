@@ -45,6 +45,7 @@ export interface Bill extends SyncFields {
   group_id: string | null
   currency: string
   created_by: string
+  paid_by: string
   total_amount: number
   note: string
   category: string | null

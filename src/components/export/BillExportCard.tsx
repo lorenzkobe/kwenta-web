@@ -100,7 +100,7 @@ export function BillExportCard({ bill, groupName }: Props) {
                 day: 'numeric',
                 year: 'numeric',
               })}{' '}
-              · by {bill.creatorName}
+              · paid by {bill.payorName}
             </div>
           </div>
           <div style={{ textAlign: 'right', flexShrink: 0 }}>

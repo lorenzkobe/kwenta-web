@@ -230,7 +230,7 @@ export async function computePairwiseNet(
   }
 
   for (const bill of personalBills) {
-    const participantUnion = new Set<string>([bill.created_by])
+    const participantUnion = new Set<string>([bill.paid_by])
     for (const item of personalItemsByBillId.get(bill.id) ?? []) {
       for (const split of personalSplitsByItemId.get(item.id) ?? []) {
         participantUnion.add(split.user_id)
@@ -247,10 +247,10 @@ export async function computePairwiseNet(
       const cur = bill.currency
       const prev = byCurrency.get(cur) ?? 0
 
-      if (meIds.has(bill.created_by)) {
+      if (meIds.has(bill.paid_by)) {
         if (!otherSplit) continue
         byCurrency.set(cur, prev + otherSplit.computed_amount)
-      } else if (otherIds.has(bill.created_by)) {
+      } else if (otherIds.has(bill.paid_by)) {
         if (!mySplit) continue
         byCurrency.set(cur, prev - mySplit.computed_amount)
       }
@@ -334,8 +334,8 @@ export async function computePairwiseNet(
         if (active.length === 0) continue
         const totalSplit = active.reduce((sum, s) => sum + s.computed_amount, 0)
 
-        if (meIds.has(bill.created_by)) meGroupNet += totalSplit
-        if (otherIds.has(bill.created_by)) otherGroupNet += totalSplit
+        if (meIds.has(bill.paid_by)) meGroupNet += totalSplit
+        if (otherIds.has(bill.paid_by)) otherGroupNet += totalSplit
         for (const split of active) {
           if (meIds.has(split.user_id)) meGroupNet -= split.computed_amount
           if (otherIds.has(split.user_id)) otherGroupNet -= split.computed_amount
@@ -394,10 +394,10 @@ export async function computePairwiseNetForBill(
     const mySplit = active.find((s) => meIds.has(s.user_id))
     const otherSplit = active.find((s) => otherIds.has(s.user_id))
 
-    if (meIds.has(bill.created_by)) {
+    if (meIds.has(bill.paid_by)) {
       if (!otherSplit) continue
       net += otherSplit.computed_amount
-    } else if (otherIds.has(bill.created_by)) {
+    } else if (otherIds.has(bill.paid_by)) {
       if (!mySplit) continue
       net -= mySplit.computed_amount
     }
@@ -804,10 +804,10 @@ export async function computePairwiseNetPersonalOnly(
       const cur = bill.currency
       const prev = byCurrency.get(cur) ?? 0
 
-      if (meIds.has(bill.created_by)) {
+      if (meIds.has(bill.paid_by)) {
         if (!otherSplit) continue
         byCurrency.set(cur, prev + otherSplit.computed_amount)
-      } else if (otherIds.has(bill.created_by)) {
+      } else if (otherIds.has(bill.paid_by)) {
         if (!mySplit) continue
         byCurrency.set(cur, prev - mySplit.computed_amount)
       }
@@ -973,7 +973,7 @@ export async function collectRelatedProfileIds(meId: string): Promise<Set<string
     if (bill.group_id && !myGroupIds.has(bill.group_id)) continue
 
     const items = await db.bill_items.where('bill_id').equals(bill.id).toArray()
-    let iParticipate = meIds.has(bill.created_by)
+    let iParticipate = meIds.has(bill.paid_by)
     for (const item of items) {
       if (item.is_deleted) continue
       const splits = await db.item_splits.where('item_id').equals(item.id).toArray()
@@ -1078,7 +1078,7 @@ export async function participantUnionForBill(billId: string): Promise<Set<strin
   const bill = await db.bills.get(billId)
   const union = new Set<string>()
   if (bill && !bill.is_deleted) {
-    union.add(bill.created_by)
+    union.add(bill.paid_by)
   }
   const items = await db.bill_items.where('bill_id').equals(billId).toArray()
   for (const item of items) {
@@ -1097,15 +1097,15 @@ function profileSetTouchesBill(
   participantUnion: Set<string>,
 ): boolean {
   if ([...profileIds].some((id) => participantUnion.has(id))) return true
-  return profileIds.has(bill.created_by)
+  return profileIds.has(bill.paid_by)
 }
 
 export interface BillWithContext extends Bill {
   groupName: string | null
-  creatorName: string
+  payorName: string
 }
 
-/** Bills where you and this person both belong: selected on any line and/or recorded as payer (`created_by`). They do not need to share the same line item. */
+/** Bills where you and this person both belong: selected on any line and/or recorded as payer (`paid_by`). They do not need to share the same line item. */
 export async function listBillsInvolvingPair(meId: string, otherId: string): Promise<BillWithContext[]> {
   const meIds = await expandProfileIdsForSplitMatching(meId, meId)
   const otherIds = await expandProfileIdsForSplitMatching(otherId, meId)
@@ -1119,7 +1119,15 @@ export async function listBillsInvolvingPair(meId: string, otherId: string): Pro
     const otherOnBill = profileSetTouchesBill(otherIds, bill, participantUnion)
     if (!meOnBill || !otherOnBill) continue
 
-    const creator = await db.profiles.get(bill.created_by)
+    const payor = await db.profiles.get(bill.paid_by)
+    let payorName = payor?.display_name
+    if (!payorName && bill.group_id) {
+      const member = await db.group_members
+        .where('[group_id+user_id]')
+        .equals([bill.group_id, bill.paid_by])
+        .first()
+      payorName = member?.display_name
+    }
     let groupName: string | null = null
     if (bill.group_id) {
       const g = await db.groups.get(bill.group_id)
@@ -1129,7 +1137,7 @@ export async function listBillsInvolvingPair(meId: string, otherId: string): Pro
     out.push({
       ...bill,
       groupName,
-      creatorName: creator?.display_name ?? 'Unknown',
+      payorName: payorName ?? 'Unknown',
     })
   }
 

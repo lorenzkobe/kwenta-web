@@ -100,7 +100,7 @@ export async function computeGroupBalances(
 
       if (activeSplits.length === 0) continue
 
-      const payer = bill.created_by
+      const payer = bill.paid_by
       const totalSplitAmount = activeSplits.reduce((sum, s) => sum + s.computed_amount, 0)
 
       netBalance.set(payer, (netBalance.get(payer) ?? 0) + totalSplitAmount)

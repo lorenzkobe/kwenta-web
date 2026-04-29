@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { LayoutList, Plus, Save, SplitSquareHorizontal, Tag, Trash2, UserPlus, Users, X } from 'lucide-react'
+import { Check, ChevronDown, LayoutList, Plus, Save, SplitSquareHorizontal, Tag, Trash2, UserPlus, Users, X } from 'lucide-react'
 import { BILL_CATEGORIES, CATEGORY_ICONS, CATEGORY_LABELS } from '@/lib/bill-categories'
 import { toast } from 'sonner'
 import {
@@ -78,6 +78,9 @@ export function AddBillDialog({
 }: AddBillDialogProps) {
   const [mode, setMode] = useState<BillMode>('simple')
   const [title, setTitle] = useState('')
+  const [paidBy, setPaidBy] = useState<string>(currentUserId)
+  const [payorOpen, setPayorOpen] = useState(false)
+  const [payorSearch, setPayorSearch] = useState('')
   const [note, setNote] = useState('')
   const [category, setCategory] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
@@ -151,6 +154,7 @@ export function AddBillDialog({
       setTitle(d.title)
       setNote(d.note)
       setCategory(d.category ?? null)
+      setPaidBy(d.paid_by)
       if (d.items.length === 1) {
         setMode('simple')
         const line = d.items[0]
@@ -451,6 +455,7 @@ export function AddBillDialog({
           currency: groupCurrency,
           groupId,
           createdBy: currentUserId,
+          paidBy,
           note: note.trim(),
           category: category || null,
           items: [
@@ -472,6 +477,7 @@ export function AddBillDialog({
           currency: groupCurrency,
           groupId,
           createdBy: currentUserId,
+          paidBy,
           note: note.trim(),
           category: category || null,
           items: validItems.map((item) => ({
@@ -490,6 +496,7 @@ export function AddBillDialog({
           title: input.title,
           note: input.note,
           currency: input.currency,
+          paidBy: input.paidBy,
           category: input.category,
           items: input.items,
         })
@@ -505,6 +512,18 @@ export function AddBillDialog({
       setSaving(false)
     }
   }
+
+  const filteredPayorOptions = payorSearch.trim()
+    ? groupMembers.filter((m) =>
+        (m.isCurrentUser ? 'You' : m.displayName)
+          .toLowerCase()
+          .includes(payorSearch.toLowerCase()),
+      )
+    : groupMembers
+  const selectedPayor = groupMembers.find((m) => m.userId === paidBy)
+  const payorDisplayName = selectedPayor
+    ? selectedPayor.isCurrentUser ? 'You' : selectedPayor.displayName
+    : 'You'
 
   const isEdit = Boolean(editBillId)
 
@@ -571,6 +590,62 @@ export function AddBillDialog({
                   onChange={(e) => setTitle(e.target.value)}
                 />
               </div>
+
+              {groupMembers.length > 0 && (
+                <div className="flex flex-col gap-2">
+                  <label className="text-sm font-medium">Paid by</label>
+                  <div className="relative">
+                    <button
+                      type="button"
+                      onClick={() => { setPayorOpen((o) => !o); setPayorSearch('') }}
+                      className="flex w-full items-center justify-between rounded-lg border border-stone-200 bg-white px-3 py-2 text-sm text-stone-800 transition-colors hover:bg-stone-50"
+                    >
+                      <span className="flex items-center gap-1.5">
+                        <Users className="size-3.5 text-stone-400" />
+                        {payorDisplayName}
+                      </span>
+                      <ChevronDown className="size-4 text-stone-400" />
+                    </button>
+                    {payorOpen && (
+                      <>
+                        <div className="fixed inset-0 z-40" onClick={() => setPayorOpen(false)} />
+                        <div className="absolute z-50 mt-1 w-full rounded-xl border border-stone-200 bg-white shadow-lg">
+                          <div className="p-2">
+                            <Input
+                              placeholder="Search..."
+                              value={payorSearch}
+                              onChange={(e) => setPayorSearch(e.target.value)}
+                              autoFocus
+                              className="h-8 rounded-lg text-sm"
+                            />
+                          </div>
+                          <div className="max-h-48 overflow-y-auto pb-1">
+                            {filteredPayorOptions.map((m) => (
+                              <button
+                                key={m.userId}
+                                type="button"
+                                onClick={() => { setPaidBy(m.userId); setPayorOpen(false); setPayorSearch('') }}
+                                className="flex w-full items-center gap-2 px-3 py-2 text-sm text-stone-800 transition-colors hover:bg-stone-50"
+                              >
+                                <Check
+                                  className={cn(
+                                    'size-3.5 shrink-0',
+                                    paidBy === m.userId ? 'text-teal-800' : 'text-transparent',
+                                  )}
+                                />
+                                {m.isCurrentUser ? 'You' : m.displayName}
+                              </button>
+                            ))}
+                            {filteredPayorOptions.length === 0 && (
+                              <p className="px-3 py-2 text-xs text-stone-400">No match</p>
+                            )}
+                          </div>
+                        </div>
+                      </>
+                    )}
+                  </div>
+                </div>
+              )}
 
               <div className="flex flex-col gap-2">
                 <label className="text-sm font-medium">Note (optional)</label>

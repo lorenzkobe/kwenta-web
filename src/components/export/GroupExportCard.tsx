@@ -8,7 +8,7 @@ interface BillEntry {
   total_amount: number
   currency: string
   created_at: string
-  creatorName: string
+  payorName: string
 }
 
 interface MemberEntry {
@@ -272,7 +272,7 @@ export function GroupExportCard({ groupName, currency, members, balanceSummary, 
                     <div style={{ color: '#6b7280', fontSize: 10, marginTop: 1 }}>{bill.note}</div>
                   )}
                   <div style={{ color: '#6b7280', fontSize: 10, marginTop: 1 }}>
-                    by {bill.creatorName} ·{' '}
+                    Paid by {bill.payorName} ·{' '}
                     {new Date(bill.created_at).toLocaleDateString('en-US', {
                       month: 'short',
                       day: 'numeric',

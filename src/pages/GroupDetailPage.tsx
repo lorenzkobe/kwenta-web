@@ -589,16 +589,16 @@ export function GroupDetailPage() {
     active.sort((a, b) => b.created_at.localeCompare(a.created_at))
     return Promise.all(
       active.map(async (bill) => {
-        const creator = await db.profiles.get(bill.created_by)
-        let creatorName = creator?.display_name
-        if (!creatorName) {
+        const payor = await db.profiles.get(bill.paid_by)
+        let payorName = payor?.display_name
+        if (!payorName) {
           const member = await db.group_members
             .where('[group_id+user_id]')
-            .equals([groupId, bill.created_by])
+            .equals([groupId, bill.paid_by])
             .first()
-          creatorName = member?.display_name
+          payorName = member?.display_name
         }
-        return { ...bill, creatorName: creatorName ?? 'Unknown' }
+        return { ...bill, payorName: payorName ?? 'Unknown' }
       }),
     )
   }, [groupId])
@@ -893,7 +893,7 @@ export function GroupDetailPage() {
                       )}
                     </div>
                     <p className="text-xs text-stone-400">
-                      by {bill.creatorName} · {new Date(bill.created_at).toLocaleDateString()}
+                      Paid by {bill.payorName} · {new Date(bill.created_at).toLocaleDateString()}
                     </p>
                   </div>
                   <span className="text-sm font-semibold text-stone-800">
@@ -1052,7 +1052,7 @@ export function GroupDetailPage() {
               total_amount: b.total_amount,
               currency: b.currency,
               created_at: b.created_at,
-              creatorName: b.creatorName,
+              payorName: b.payorName,
             }))}
           />
         </ExportImageDialog>

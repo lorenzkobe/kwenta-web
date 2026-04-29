@@ -92,17 +92,31 @@ export function HomePage() {
 
   const stats = useLiveQuery(async () => {
     if (!userId) return { billCount: 0, totalSpent: 0, groupCount: 0 }
-    const bills = await db.bills.where('created_by').equals(userId).toArray()
-    const activeBills = bills.filter((b) => !b.is_deleted)
-    const totalSpent = activeBills.reduce((sum, b) => sum + b.total_amount, 0)
+    const mySplits = await db.item_splits.where('user_id').equals(userId).toArray()
+    const activeSplits = mySplits.filter((s) => !s.is_deleted)
+    const myItemIds = [...new Set(activeSplits.map((s) => s.item_id))]
+    const myItems = myItemIds.length > 0
+      ? await db.bill_items.where('id').anyOf(myItemIds).toArray()
+      : []
+    const activeItemBillIds = new Set(myItems.filter((i) => !i.is_deleted).map((i) => i.bill_id))
+    const myBills = activeItemBillIds.size > 0
+      ? await db.bills.where('id').anyOf([...activeItemBillIds]).toArray()
+      : []
+    const activeBillIds = new Set(myBills.filter((b) => !b.is_deleted).map((b) => b.id))
+    const totalSpent = activeSplits
+      .filter((s) => {
+        const item = myItems.find((i) => i.id === s.item_id)
+        return item && !item.is_deleted && activeBillIds.has(item.bill_id)
+      })
+      .reduce((sum, s) => sum + s.computed_amount, 0)
     const memberships = await db.group_members.where('user_id').equals(userId).toArray()
     const activeGroups = memberships.filter((m) => !m.is_deleted)
-    return { billCount: activeBills.length, totalSpent, groupCount: activeGroups.length }
+    return { billCount: activeBillIds.size, totalSpent, groupCount: activeGroups.length }
   }, [userId])
 
   const recentBills = useLiveQuery(async () => {
     if (!userId) return []
-    const bills = await db.bills.where('created_by').equals(userId).toArray()
+    const bills = await db.bills.where('paid_by').equals(userId).toArray()
     const active = bills.filter((b) => !b.is_deleted)
     active.sort((a, b) => b.created_at.localeCompare(a.created_at))
     const slice = active.slice(0, 5)

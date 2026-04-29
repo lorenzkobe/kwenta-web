@@ -1144,7 +1144,7 @@ export function PersonDetailPage() {
                       <div className="min-w-0">
                         <p className="font-medium text-stone-800">{bill.title}</p>
                         <p className="mt-0.5 flex items-center gap-2 text-xs text-stone-500">
-                          <span>Personal · {bill.creatorName}</span>
+                          <span>Personal · Paid by {bill.payorName}</span>
                           <span
                             className={cn(
                               'rounded-full px-2 py-0.5 text-[0.65rem] font-semibold uppercase tracking-wide',

@@ -111,7 +111,7 @@ export function BillDetailPage() {
       return
     }
     const union = await participantUnionForBill(billId)
-    union.add(bill.created_by)
+    union.add(bill.paid_by)
     const others = [...union].filter((id) => id !== userId)
     const rows: { otherId: string; displayName: string; net: number }[] = []
     for (const oid of others) {
@@ -236,7 +236,11 @@ export function BillDetailPage() {
           <div>
             <h1 className="text-2xl font-semibold tracking-tight">{bill.title}</h1>
             <p className="mt-1 text-sm text-stone-500">
-              Created by {bill.creatorName} · {new Date(bill.created_at).toLocaleDateString()}
+              Paid by {bill.payorName}
+              {bill.paid_by !== bill.created_by && (
+                <span> · recorded by {bill.creatorName}</span>
+              )}
+              {' · '}{new Date(bill.created_at).toLocaleDateString()}
             </p>
             {bill.category && CATEGORY_LABELS[bill.category as BillCategory] && (
               <span

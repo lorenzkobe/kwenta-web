@@ -292,7 +292,7 @@ export async function generateBillDetailPDF(billId: string): Promise<void> {
   const dateStr = new Date(bill.created_at).toLocaleDateString('en-US', {
     month: 'long', day: 'numeric', year: 'numeric',
   })
-  const sub = `Created by ${bill.creatorName} · ${bill.currency} · ${dateStr}${bill.note ? ` · ${bill.note}` : ''}`
+  const sub = `Paid by ${bill.payorName} · ${bill.currency} · ${dateStr}${bill.note ? ` · ${bill.note}` : ''}`
   let y = drawPageHeader(doc, bill.title, sub)
 
   // Collect participants
