@@ -1,6 +1,12 @@
 import { useState, useEffect, useCallback } from 'react'
 import { useLiveQuery } from 'dexie-react-hooks'
 import { ArrowLeft, Check, Loader2, Pencil, ReceiptText, Share2, Trash2, Users } from 'lucide-react'
+import {
+  CATEGORY_COLORS,
+  CATEGORY_ICONS,
+  CATEGORY_LABELS,
+  type BillCategory,
+} from '@/lib/bill-categories'
 import { Link, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { getBillWithDetails, deleteBill } from '@/db/operations'
 import { db } from '@/db/db'
@@ -13,7 +19,10 @@ import {
 } from '@/lib/people'
 import { useCurrentUser } from '@/hooks/useCurrentUser'
 import { fullSync } from '@/sync/sync-service'
-import { formatCurrency } from '@/lib/utils'
+import { cn, formatCurrency } from '@/lib/utils'
+import { makeExportFilename } from '@/lib/export-utils'
+import { generateBillDetailPDF } from '@/lib/export-pdf'
+import { exportBillsToCSV } from '@/lib/export-csv'
 import { Button } from '@/components/ui/button'
 import { RecordSettlementDialog } from '@/components/common/RecordSettlementDialog'
 import { ConfirmDialog } from '@/components/common/ConfirmDialog'
@@ -229,6 +238,17 @@ export function BillDetailPage() {
             <p className="mt-1 text-sm text-stone-500">
               Created by {bill.creatorName} · {new Date(bill.created_at).toLocaleDateString()}
             </p>
+            {bill.category && CATEGORY_LABELS[bill.category as BillCategory] && (
+              <span
+                className={cn(
+                  'mt-2 inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-xs font-medium',
+                  CATEGORY_COLORS[bill.category as BillCategory],
+                )}
+              >
+                {(() => { const Icon = CATEGORY_ICONS[bill.category as BillCategory]; return <Icon className="size-3" /> })()}
+                {CATEGORY_LABELS[bill.category as BillCategory]}
+              </span>
+            )}
           </div>
           <div className="text-right">
             <p className="text-2xl font-semibold text-teal-800">
@@ -404,7 +424,9 @@ export function BillDetailPage() {
 
     {exportOpen && bill && (
       <ExportImageDialog
-        filename={`${bill.title.toLowerCase().replace(/\s+/g, '-')}.png`}
+        filename={makeExportFilename('Bills', 'png').replace('.png', '')}
+        onExportPDF={() => generateBillDetailPDF(bill.id)}
+        onExportCSV={userId ? () => exportBillsToCSV(userId) : undefined}
         onClose={() => setExportOpen(false)}
       >
         <BillExportCard bill={bill} groupName={groupName ?? null} />

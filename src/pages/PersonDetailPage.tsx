@@ -52,6 +52,9 @@ import { RecordSettlementDialog } from '@/components/common/RecordSettlementDial
 import { ApplyGeneralCreditDialog } from '@/components/common/ApplyGeneralCreditDialog'
 import { ExportImageDialog } from '@/components/export/ExportImageDialog'
 import { PersonExportCard, type PersonBillEntry } from '@/components/export/PersonExportCard'
+import { exportPersonToCSV } from '@/lib/export-csv'
+import { generatePersonPDF } from '@/lib/export-pdf'
+import { makeExportFilename } from '@/lib/export-utils'
 import type { SettlementHistoryItem } from '@/lib/settlement'
 import type { Profile, ProfilePeerLink } from '@/types'
 import {
@@ -1390,9 +1393,11 @@ export function PersonDetailPage() {
       />
       {flowConfirmDialog}
 
-      {exportOpen && (
+      {exportOpen && userId && personId && (
         <ExportImageDialog
-          filename={`${resolvedDisplayName.toLowerCase().replace(/\s+/g, '-')}-balance.png`}
+          filename={makeExportFilename('Person', 'png').replace('.png', '')}
+          onExportPDF={() => generatePersonPDF(personId, userId)}
+          onExportCSV={() => exportPersonToCSV(personId, userId)}
           onClose={() => setExportOpen(false)}
         >
           <PersonExportCard

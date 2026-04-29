@@ -47,6 +47,7 @@ export interface Bill extends SyncFields {
   created_by: string
   total_amount: number
   note: string
+  category: string | null
 }
 
 export interface BillItem extends SyncFields {

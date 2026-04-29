@@ -36,6 +36,15 @@ import {
 } from '@/lib/settlement'
 import { useCurrentUser } from '@/hooks/useCurrentUser'
 import { cn, formatCurrency } from '@/lib/utils'
+import {
+  CATEGORY_COLORS,
+  CATEGORY_ICONS,
+  CATEGORY_LABELS,
+  type BillCategory,
+} from '@/lib/bill-categories'
+import { exportGroupToCSV } from '@/lib/export-csv'
+import { generateGroupPDF } from '@/lib/export-pdf'
+import { makeExportFilename } from '@/lib/export-utils'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Input } from '@/components/ui/input'
@@ -869,7 +878,20 @@ export function GroupDetailPage() {
                   className="flex w-full items-center justify-between rounded-xl border border-stone-200 bg-stone-100/60 px-4 py-3 text-left transition-colors hover:bg-stone-100/80"
                 >
                   <div>
-                    <p className="text-sm font-medium text-stone-800">{bill.title}</p>
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <p className="text-sm font-medium text-stone-800">{bill.title}</p>
+                      {bill.category && CATEGORY_LABELS[bill.category as BillCategory] && (
+                        <span
+                          className={cn(
+                            'inline-flex items-center gap-0.5 rounded-full px-1.5 py-0.5 text-[0.6rem] font-medium',
+                            CATEGORY_COLORS[bill.category as BillCategory],
+                          )}
+                        >
+                          {(() => { const Icon = CATEGORY_ICONS[bill.category as BillCategory]; return <Icon className="size-2.5" /> })()}
+                          {CATEGORY_LABELS[bill.category as BillCategory]}
+                        </span>
+                      )}
+                    </div>
                     <p className="text-xs text-stone-400">
                       by {bill.creatorName} · {new Date(bill.created_at).toLocaleDateString()}
                     </p>
@@ -1010,7 +1032,9 @@ export function GroupDetailPage() {
 
       {exportOpen && balanceSummary && (
         <ExportImageDialog
-          filename={`${group.name.toLowerCase().replace(/\s+/g, '-')}-group.png`}
+          filename={makeExportFilename(group.name, 'png').replace('.png', '')}
+          onExportPDF={userId ? () => generateGroupPDF(group.id, userId) : undefined}
+          onExportCSV={userId ? () => exportGroupToCSV(group.id, userId) : undefined}
           onClose={() => setExportOpen(false)}
         >
           <GroupExportCard
@@ -1036,7 +1060,7 @@ export function GroupDetailPage() {
 
       {exportMember && group && (
         <ExportImageDialog
-          filename={`${exportMember.profileName.toLowerCase().replace(/\s+/g, '-')}-${group.name.toLowerCase().replace(/\s+/g, '-')}.png`}
+          filename={makeExportFilename(`${group.name} ${exportMember.profileName}`, 'png').replace('.png', '')}
           onClose={() => setExportMember(null)}
         >
           <GroupMemberExportCard

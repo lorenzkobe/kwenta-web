@@ -35,13 +35,6 @@ interface Props {
 export function PersonExportCard({ displayName, netByCurrency, unsettledPersonalBills, sharedGroups }: Props) {
   const netEntries = Array.from(netByCurrency.entries()).filter(([, v]) => Math.abs(v) > 0.005)
 
-  function netLabel(currency: string, net: number) {
-    if (Math.abs(net) < 0.005) return `Even (${currency})`
-    return net > 0
-      ? `Receives ${formatCurrency(net, currency)}`
-      : `Pays ${formatCurrency(Math.abs(net), currency)}`
-  }
-
   function netColor(net: number) {
     if (Math.abs(net) < 0.005) return '#9ca3af'
     return net > 0 ? '#34d399' : '#fbbf24'
@@ -105,8 +98,8 @@ export function PersonExportCard({ displayName, netByCurrency, unsettledPersonal
         ) : (
           <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 4 }}>
             {netEntries.map(([currency, net]) => (
-              <span key={currency} style={{ color: netColor(net), fontSize: 15, fontWeight: 700 }}>
-                {netLabel(currency, net)}
+              <span key={currency} style={{ color: netColor(net), fontSize: 18, fontWeight: 700 }}>
+                {formatCurrency(Math.abs(net), currency)}
               </span>
             ))}
           </div>

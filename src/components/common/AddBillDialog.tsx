@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
-import { LayoutList, Plus, Save, SplitSquareHorizontal, Trash2, UserPlus, Users, X } from 'lucide-react'
+import { LayoutList, Plus, Save, SplitSquareHorizontal, Tag, Trash2, UserPlus, Users, X } from 'lucide-react'
+import { BILL_CATEGORIES, CATEGORY_ICONS, CATEGORY_LABELS } from '@/lib/bill-categories'
 import { toast } from 'sonner'
 import {
   createBill,
@@ -78,6 +79,7 @@ export function AddBillDialog({
   const [mode, setMode] = useState<BillMode>('simple')
   const [title, setTitle] = useState('')
   const [note, setNote] = useState('')
+  const [category, setCategory] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
   const [loadingEdit, setLoadingEdit] = useState(false)
 
@@ -148,6 +150,7 @@ export function AddBillDialog({
       }
       setTitle(d.title)
       setNote(d.note)
+      setCategory(d.category ?? null)
       if (d.items.length === 1) {
         setMode('simple')
         const line = d.items[0]
@@ -449,6 +452,7 @@ export function AddBillDialog({
           groupId,
           createdBy: currentUserId,
           note: note.trim(),
+          category: category || null,
           items: [
             {
               name: title.trim(),
@@ -469,6 +473,7 @@ export function AddBillDialog({
           groupId,
           createdBy: currentUserId,
           note: note.trim(),
+          category: category || null,
           items: validItems.map((item) => ({
             name: item.name.trim(),
             amount: parseFloat(item.amount),
@@ -485,6 +490,7 @@ export function AddBillDialog({
           title: input.title,
           note: input.note,
           currency: input.currency,
+          category: input.category,
           items: input.items,
         })
       } else {
@@ -574,6 +580,37 @@ export function AddBillDialog({
                   value={note}
                   onChange={(e) => setNote(e.target.value)}
                 />
+              </div>
+
+              <div className="flex flex-col gap-2">
+                <label className="text-sm font-medium">Category (optional)</label>
+                <Select
+                  value={category ?? '_none'}
+                  onValueChange={(v) => setCategory(v === '_none' ? null : v)}
+                >
+                  <SelectTrigger>
+                    <SelectValue placeholder="No category" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="_none">
+                      <span className="flex items-center gap-1.5">
+                        <Tag className="size-3.5 text-stone-400" />
+                        No category
+                      </span>
+                    </SelectItem>
+                    {BILL_CATEGORIES.map((cat) => {
+                      const Icon = CATEGORY_ICONS[cat]
+                      return (
+                        <SelectItem key={cat} value={cat}>
+                          <span className="flex items-center gap-1.5">
+                            <Icon className="size-3.5" />
+                            {CATEGORY_LABELS[cat]}
+                          </span>
+                        </SelectItem>
+                      )
+                    })}
+                  </SelectContent>
+                </Select>
               </div>
 
               {mode === 'simple' && (

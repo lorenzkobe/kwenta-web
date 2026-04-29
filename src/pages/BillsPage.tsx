@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react'
-import { Plus, ReceiptText, Trash2, Users } from 'lucide-react'
+import { Plus, ReceiptText, Share2, Trash2, Users } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { useLiveQuery } from 'dexie-react-hooks'
 import { db } from '@/db/db'
@@ -8,9 +8,19 @@ import { isPersonalBillFullySettled } from '@/lib/personal-bill-status'
 import { participantUnionForBill } from '@/lib/people'
 import { useCurrentUser } from '@/hooks/useCurrentUser'
 import { formatCurrency, timeAgo, cn } from '@/lib/utils'
+import {
+  BILL_CATEGORIES,
+  CATEGORY_COLORS,
+  CATEGORY_ICONS,
+  CATEGORY_LABELS,
+  type BillCategory,
+} from '@/lib/bill-categories'
+import { exportBillsToCSV } from '@/lib/export-csv'
+import { generateBillsPDF } from '@/lib/export-pdf'
 import type { Bill } from '@/types'
 import { Button } from '@/components/ui/button'
 import { ConfirmDialog } from '@/components/common/ConfirmDialog'
+import { ExportDataDialog } from '@/components/export/ExportDataDialog'
 import {
   Select,
   SelectContent,
@@ -32,6 +42,7 @@ type EnrichedBill = {
   creatorName?: string
   itemCount: number
   settled: boolean
+  category: string | null
   participantPills: { id: string; label: string }[]
 }
 
@@ -39,7 +50,9 @@ export function BillsPage() {
   const { userId } = useCurrentUser()
   const [filter, setFilter] = useState<BillFilter>('all')
   const [sort, setSort] = useState<BillSort>('date_desc')
+  const [filterCategory, setFilterCategory] = useState<string | null>(null)
   const [deleteTarget, setDeleteTarget] = useState<{ id: string; title: string } | null>(null)
+  const [exportOpen, setExportOpen] = useState(false)
 
   const billBuckets = useLiveQuery(async () => {
     if (!userId) return { myBills: [] as EnrichedBill[], sharedBills: [] as EnrichedBill[] }
@@ -93,6 +106,7 @@ export function BillsPage() {
         creatorName: creator?.display_name ?? 'Someone',
         itemCount: activeItems.length,
         settled,
+        category: bill.category ?? null,
         participantPills,
       }
     }
@@ -110,6 +124,7 @@ export function BillsPage() {
     let out = list
     if (filter === 'settled') out = out.filter((b) => b.settled)
     if (filter === 'unsettled') out = out.filter((b) => !b.settled)
+    if (filterCategory) out = out.filter((b) => b.category === filterCategory)
     const copy = [...out]
     copy.sort((a, b) => {
       switch (sort) {
@@ -126,13 +141,19 @@ export function BillsPage() {
       }
     })
     return copy
-  }, [billBuckets?.myBills, filter, sort])
+  }, [billBuckets?.myBills, filter, sort, filterCategory])
 
   const sharedBills = useMemo(() => {
     const list = [...(billBuckets?.sharedBills ?? [])]
     list.sort((a, b) => b.created_at.localeCompare(a.created_at))
     return list
   }, [billBuckets?.sharedBills])
+
+  const presentCategories = useMemo(() => {
+    const cats = new Set((billBuckets?.myBills ?? []).map((b) => b.category).filter(Boolean) as string[])
+    return BILL_CATEGORIES.filter((c) => cats.has(c))
+  }, [billBuckets?.myBills])
+
   const loadingBills = billBuckets === undefined
 
   async function executeDeleteBill() {
@@ -151,43 +172,82 @@ export function BillsPage() {
             group
           </p>
         </div>
-        <Button asChild className="h-10 shrink-0 rounded-full self-start sm:self-auto">
-          <Link to="/app/bills/new">
-            <Plus className="size-4" />
-            Add bill
-          </Link>
-        </Button>
+        <div className="flex items-center gap-2 self-start sm:self-auto">
+          {(billBuckets?.myBills.length ?? 0) > 0 && (
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-10 rounded-full"
+              onClick={() => setExportOpen(true)}
+            >
+              <Share2 className="size-4" />
+              Export
+            </Button>
+          )}
+          <Button asChild className="h-10 shrink-0 rounded-full">
+            <Link to="/app/bills/new">
+              <Plus className="size-4" />
+              Add bill
+            </Link>
+          </Button>
+        </div>
       </div>
 
       {billBuckets && billBuckets.myBills.length > 0 && (
-        <div className="flex flex-col gap-2 rounded-2xl border border-stone-200 bg-white p-3 shadow-sm sm:flex-row sm:flex-wrap sm:items-center">
-          <div className="flex min-w-0 flex-1 flex-col gap-1 sm:max-w-48">
-            <span className="text-xs font-medium text-stone-500">Filter</span>
-            <Select value={filter} onValueChange={(v) => setFilter(v as BillFilter)}>
-              <SelectTrigger className="h-10 rounded-xl">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">All</SelectItem>
-                <SelectItem value="unsettled">Not settled</SelectItem>
-                <SelectItem value="settled">Settled</SelectItem>
-              </SelectContent>
-            </Select>
+        <div className="flex flex-col gap-3 rounded-2xl border border-stone-200 bg-white p-3 shadow-sm">
+          <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center">
+            <div className="flex min-w-0 flex-1 flex-col gap-1 sm:max-w-48">
+              <span className="text-xs font-medium text-stone-500">Filter</span>
+              <Select value={filter} onValueChange={(v) => setFilter(v as BillFilter)}>
+                <SelectTrigger className="h-10 rounded-xl">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">All</SelectItem>
+                  <SelectItem value="unsettled">Not settled</SelectItem>
+                  <SelectItem value="settled">Settled</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="flex min-w-0 flex-1 flex-col gap-1 sm:max-w-56">
+              <span className="text-xs font-medium text-stone-500">Sort</span>
+              <Select value={sort} onValueChange={(v) => setSort(v as BillSort)}>
+                <SelectTrigger className="h-10 rounded-xl">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="date_desc">Date · Newest first</SelectItem>
+                  <SelectItem value="date_asc">Date · Oldest first</SelectItem>
+                  <SelectItem value="title_asc">Name · A → Z</SelectItem>
+                  <SelectItem value="title_desc">Name · Z → A</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
           </div>
-          <div className="flex min-w-0 flex-1 flex-col gap-1 sm:max-w-56">
-            <span className="text-xs font-medium text-stone-500">Sort</span>
-            <Select value={sort} onValueChange={(v) => setSort(v as BillSort)}>
-              <SelectTrigger className="h-10 rounded-xl">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="date_desc">Date · Newest first</SelectItem>
-                <SelectItem value="date_asc">Date · Oldest first</SelectItem>
-                <SelectItem value="title_asc">Name · A → Z</SelectItem>
-                <SelectItem value="title_desc">Name · Z → A</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
+          {presentCategories.length > 0 && (
+            <div className="flex flex-wrap gap-1.5">
+              {presentCategories.map((cat) => {
+                const Icon = CATEGORY_ICONS[cat as BillCategory]
+                const active = filterCategory === cat
+                return (
+                  <button
+                    key={cat}
+                    type="button"
+                    onClick={() => setFilterCategory(active ? null : cat)}
+                    className={cn(
+                      'inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-xs font-medium transition-colors',
+                      active
+                        ? CATEGORY_COLORS[cat as BillCategory]
+                        : 'bg-stone-100 text-stone-600 hover:bg-stone-200',
+                    )}
+                  >
+                    <Icon className="size-3" />
+                    {CATEGORY_LABELS[cat as BillCategory]}
+                  </button>
+                )
+              })}
+            </div>
+          )}
         </div>
       )}
 
@@ -280,6 +340,17 @@ export function BillsPage() {
                           >
                             {bill.settled ? 'Settled' : 'Open'}
                           </span>
+                          {bill.category && CATEGORY_LABELS[bill.category as BillCategory] && (
+                            <span
+                              className={cn(
+                                'inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[0.65rem] font-medium',
+                                CATEGORY_COLORS[bill.category as BillCategory],
+                              )}
+                            >
+                              {(() => { const Icon = CATEGORY_ICONS[bill.category as BillCategory]; return <Icon className="size-2.5" /> })()}
+                              {CATEGORY_LABELS[bill.category as BillCategory]}
+                            </span>
+                          )}
                         </div>
                         <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-stone-500">
                           <span>{timeAgo(bill.created_at)}</span>
@@ -373,13 +444,23 @@ export function BillsPage() {
       title="Delete this bill?"
       description={
         deleteTarget
-          ? `“${deleteTarget.title}” will be removed. This cannot be undone on this device.`
+          ? `"${deleteTarget.title}" will be removed. This cannot be undone on this device.`
           : 'This bill will be removed. This cannot be undone on this device.'
       }
       confirmLabel="Delete bill"
       variant="danger"
       onConfirm={executeDeleteBill}
     />
+
+    {exportOpen && userId && (
+      <ExportDataDialog
+        title="Export personal bills"
+        description="Download all your personal bills as a PDF report or CSV spreadsheet."
+        onExportPDF={() => generateBillsPDF(userId)}
+        onExportCSV={() => exportBillsToCSV(userId)}
+        onClose={() => setExportOpen(false)}
+      />
+    )}
     </>
   )
 }

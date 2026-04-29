@@ -83,6 +83,7 @@ export interface CreateBillInput {
   groupId: string | null
   createdBy: string
   note: string
+  category?: string | null
   items: {
     name: string
     amount: number
@@ -107,6 +108,7 @@ export async function createBill(input: CreateBillInput): Promise<string> {
       created_by: input.createdBy,
       total_amount: totalAmount,
       note: input.note,
+      category: input.category ?? null,
     }
     await db.bills.add(bill)
 
@@ -192,6 +194,7 @@ export async function updateBill(
     title: string
     note: string
     currency: string
+    category?: string | null
     items: UpdateBillItemsInput
   },
 ): Promise<void> {
@@ -220,6 +223,7 @@ export async function updateBill(
       title: patch.title,
       note: patch.note,
       currency: patch.currency,
+      category: patch.category ?? null,
       total_amount: totalAmount,
       updated_at: timestamp,
       synced_at: null,
