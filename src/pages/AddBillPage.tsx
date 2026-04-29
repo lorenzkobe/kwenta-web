@@ -137,15 +137,6 @@ export function AddBillPage() {
   const [addPersonTarget, setAddPersonTarget] = useState<'simple' | string>('simple')
   const [removeItemKey, setRemoveItemKey] = useState<string | null>(null)
 
-  const groups = useLiveQuery(async () => {
-    if (!userId) return []
-    const memberships = await db.group_members.where('user_id').equals(userId).toArray()
-    const gIds = memberships.filter((m) => !m.is_deleted).map((m) => m.group_id)
-    if (gIds.length === 0) return []
-    const g = await db.groups.where('id').anyOf(gIds).toArray()
-    return g.filter((g) => !g.is_deleted)
-  }, [userId])
-
   const groupMembers = useLiveQuery(async () => {
     if (!groupId) return []
     const members = await db.group_members.where('group_id').equals(groupId).toArray()
@@ -194,7 +185,6 @@ export function AddBillPage() {
   }, 0)
 
   const simpleAmountNum = parseFloat(simpleAmount) || 0
-  const groupsLoading = groups === undefined
   const groupMembersLoading = groupMembers === undefined
   const personalMembersLoading = personalSplitMembers === undefined
   const membersLoading = groupId ? groupMembersLoading : personalMembersLoading
@@ -232,6 +222,23 @@ export function AddBillPage() {
   useEffect(() => {
     if (userId && !paidBy && !editBillId) setPaidBy(userId)
   }, [userId, paidBy, editBillId])
+
+  const lockUserInSplits = !groupId && !!userId && paidBy !== userId
+
+  useEffect(() => {
+    if (!lockUserInSplits || !userId) return
+    if (mode === 'simple') {
+      setSimpleSelectedUserIds((prev) => (prev.includes(userId) ? prev : [...prev, userId]))
+    } else {
+      setItems((prev) =>
+        prev.map((item) =>
+          item.selectedUserIds.length > 0 && !item.selectedUserIds.includes(userId)
+            ? { ...item, selectedUserIds: [...item.selectedUserIds, userId] }
+            : item,
+        ),
+      )
+    }
+  }, [lockUserInSplits, userId, mode])
 
   const payorOptions = members
   const filteredPayorOptions = payorSearch.trim()
@@ -836,53 +843,24 @@ export function AddBillPage() {
                 </div>
               )}
 
-              <div className="grid gap-4 sm:grid-cols-2">
-                <div className="flex flex-col gap-2">
-                  <label className="text-sm font-medium">Currency</label>
-                  <Select
-                    value={currency}
-                    onValueChange={setCurrency}
-                    disabled={isEdit}
-                  >
-                    <SelectTrigger>
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {CURRENCIES.map((c) => (
-                        <SelectItem key={c.value} value={c.value}>
-                          {c.label}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
-
-                <div className="flex flex-col gap-2">
-                  <label className="text-sm font-medium">Group (optional)</label>
-                  <Select
-                    value={groupId ?? '_none'}
-                    onValueChange={(val) => {
-                      setGroupId(val === '_none' ? null : val)
-                      if (!editBillId && userId) setPaidBy(userId)
-                    }}
-                    disabled={isEdit || groupsLoading}
-                  >
-                    <SelectTrigger>
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="_none">Personal (no group)</SelectItem>
-                      {(groups ?? []).map((g) => (
-                        <SelectItem key={g.id} value={g.id}>
-                          {g.name}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                  {groupsLoading && !isEdit && (
-                    <p className="text-xs text-stone-400">Loading your groups…</p>
-                  )}
-                </div>
+              <div className="flex flex-col gap-2">
+                <label className="text-sm font-medium">Currency</label>
+                <Select
+                  value={currency}
+                  onValueChange={setCurrency}
+                  disabled={isEdit}
+                >
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {CURRENCIES.map((c) => (
+                      <SelectItem key={c.value} value={c.value}>
+                        {c.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
               </div>
 
               <div className="flex flex-col gap-2">
@@ -1000,16 +978,19 @@ export function AddBillPage() {
                       <div className="flex flex-wrap gap-1.5">
                         {members.map((member) => {
                           const isSelected = simpleSelectedUserIds.includes(member.userId)
+                          const isLocked = lockUserInSplits && member.isCurrentUser
                           return (
                             <button
                               key={member.userId}
                               type="button"
-                              onClick={() => toggleSimpleUser(member.userId)}
+                              disabled={isLocked}
+                              onClick={() => !isLocked && toggleSimpleUser(member.userId)}
                               className={cn(
                                 'inline-flex cursor-pointer items-center gap-1.5 rounded-full border px-3 py-2 text-sm font-medium transition-colors',
                                 isSelected
                                   ? 'border-transparent bg-teal-800 text-white'
                                   : 'border-stone-200 bg-white text-stone-600 hover:bg-stone-100',
+                                isLocked && 'cursor-default opacity-70',
                               )}
                             >
                               <Users className="size-3.5" />
@@ -1018,6 +999,12 @@ export function AddBillPage() {
                           )
                         })}
                       </div>
+
+                      {lockUserInSplits && (
+                        <p className="text-xs text-stone-400">
+                          You're included in the split because someone else paid for this bill.
+                        </p>
+                      )}
 
                       {!groupId && userId && (
                         <>
@@ -1272,16 +1259,19 @@ export function AddBillPage() {
                         <div className="mt-3 flex flex-wrap gap-1.5">
                           {members.map((member) => {
                             const isSelected = item.selectedUserIds.includes(member.userId)
+                            const isLocked = lockUserInSplits && member.isCurrentUser
                             return (
                               <button
                                 key={member.userId}
                                 type="button"
-                                onClick={() => toggleUserForItem(item.key, member.userId)}
+                                disabled={isLocked}
+                                onClick={() => !isLocked && toggleUserForItem(item.key, member.userId)}
                                 className={cn(
                                   'inline-flex cursor-pointer items-center gap-1 rounded-full border px-3 py-1.5 text-xs font-medium transition-colors',
                                   isSelected
                                     ? 'border-transparent bg-teal-800 text-white'
                                     : 'border-stone-200 bg-white text-stone-600 hover:bg-stone-100',
+                                  isLocked && 'cursor-default opacity-70',
                                 )}
                               >
                                 <Users className="size-3" />
@@ -1393,7 +1383,7 @@ export function AddBillPage() {
               )}
             </div>
           )}
-        </>
+</>
       )}
     </div>
 
