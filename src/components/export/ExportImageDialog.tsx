@@ -1,4 +1,4 @@
-import { type ReactNode, useEffect, useState } from 'react'
+import { type ReactNode, useEffect, useMemo, useState } from 'react'
 import { Copy, Download, FileText, Loader2, Share2, TableProperties, X } from 'lucide-react'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
@@ -43,9 +43,9 @@ export function ExportImageDialog({
     if (!result) { toast.error('Could not generate image.'); return }
     try {
       await navigator.clipboard.write([new ClipboardItem({ 'image/png': result.blob })])
-      toast.success('Image copied to clipboard.')
+      toast.success('Copied to clipboard.')
     } catch {
-      toast.info('Copy not supported on this browser — use Save instead.')
+      toast.info('Copy not supported — use Save instead.')
     }
   }
 
@@ -84,10 +84,19 @@ export function ExportImageDialog({
     }
   }
 
-  const canShare =
-    typeof navigator !== 'undefined' &&
-    typeof navigator.share === 'function' &&
-    typeof navigator.canShare === 'function'
+  // True only on real mobile browsers (iOS Safari, Android Chrome) that support
+  // file sharing via the native share sheet. Desktop browsers — including Chrome
+  // in responsive/mobile-emulation mode — return false from canShare({ files }).
+  const canShareFiles = useMemo(() => {
+    if (typeof navigator === 'undefined') return false
+    if (typeof navigator.share !== 'function') return false
+    if (typeof navigator.canShare !== 'function') return false
+    try {
+      return navigator.canShare({ files: [new File([''], 'test.png', { type: 'image/png' })] })
+    } catch {
+      return false
+    }
+  }, [])
 
   const anyBusy = busy || pdfBusy || csvBusy
   const hasDataExports = onExportPDF || onExportCSV
@@ -114,30 +123,27 @@ export function ExportImageDialog({
         </div>
 
         <div className="shrink-0 border-t border-stone-100 p-4 space-y-2">
-          {/* Image actions */}
-          <div className="flex gap-2">
-            {canShare && (
-              <Button className="flex-1 rounded-xl gap-1.5" onClick={() => void handleShare()} disabled={anyBusy}>
-                {busy ? <Loader2 className="size-3.5 animate-spin" /> : <Share2 className="size-3.5" />}
-                Share
+          {canShareFiles ? (
+            /* Real mobile: native share sheet handles save & copy */
+            <Button className="w-full rounded-xl gap-1.5" onClick={() => void handleShare()} disabled={anyBusy}>
+              {busy ? <Loader2 className="size-3.5 animate-spin" /> : <Share2 className="size-3.5" />}
+              Share
+            </Button>
+          ) : (
+            /* Desktop: explicit Save + Copy */
+            <div className="flex gap-2">
+              <Button className="flex-1 rounded-xl gap-1.5" onClick={() => void handleSave()} disabled={anyBusy}>
+                {busy ? <Loader2 className="size-3.5 animate-spin" /> : <Download className="size-3.5" />}
+                Save PNG
               </Button>
-            )}
-            <Button
-              variant={canShare ? 'outline' : 'default'}
-              className="flex-1 rounded-xl gap-1.5"
-              onClick={() => void handleSave()}
-              disabled={anyBusy}
-            >
-              {busy ? <Loader2 className="size-3.5 animate-spin" /> : <Download className="size-3.5" />}
-              PNG
-            </Button>
-            <Button variant="outline" className="flex-1 rounded-xl gap-1.5" onClick={() => void handleCopy()} disabled={anyBusy}>
-              {busy ? <Loader2 className="size-3.5 animate-spin" /> : <Copy className="size-3.5" />}
-              Copy
-            </Button>
-          </div>
+              <Button variant="outline" className="flex-1 rounded-xl gap-1.5" onClick={() => void handleCopy()} disabled={anyBusy}>
+                {busy ? <Loader2 className="size-3.5 animate-spin" /> : <Copy className="size-3.5" />}
+                Copy
+              </Button>
+            </div>
+          )}
 
-          {/* Data exports */}
+          {/* Data exports — same on both */}
           {hasDataExports && (
             <div className="flex gap-2 pt-1 border-t border-stone-100">
               {onExportPDF && (
