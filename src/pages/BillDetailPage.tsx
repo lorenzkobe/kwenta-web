@@ -12,6 +12,7 @@ import { getBillWithDetails, deleteBill } from '@/db/operations'
 import { db } from '@/db/db'
 import { BILL_BACK_QUERY, billDetailBackPath, withBillBackQuery } from '@/lib/bill-navigation'
 import {
+  computePairwiseNet,
   computePairwiseNetForBill,
   expandProfileIdsForSplitMatching,
   participantUnionForBill,
@@ -48,7 +49,7 @@ export function BillDetailPage() {
     return getBillWithDetails(billId)
   }, [billId])
   const [billPairRows, setBillPairRows] = useState<
-    { otherId: string; displayName: string; net: number }[]
+    { otherId: string; displayName: string; net: number; autoOffset?: boolean; globalNet?: number }[]
   >([])
   const [recordSettlement, setRecordSettlement] = useState<{
     fromUserId: string
@@ -113,12 +114,22 @@ export function BillDetailPage() {
     const union = await participantUnionForBill(billId)
     union.add(bill.paid_by)
     const others = [...union].filter((id) => id !== userId)
-    const rows: { otherId: string; displayName: string; net: number }[] = []
+    const rows: { otherId: string; displayName: string; net: number; autoOffset?: boolean; globalNet?: number }[] = []
     for (const oid of others) {
       const net = await computePairwiseNetForBill(billId, userId, oid)
       if (Math.abs(net) < 0.005) continue
       const disp = await resolveProfileDisplay(oid, userId)
-      rows.push({ otherId: oid, displayName: disp.displayName, net })
+      let autoOffset: boolean | undefined
+      let globalNet: number | undefined
+      if (net < 0) {
+        const globalByCurrency = await computePairwiseNet(userId, oid)
+        const gNet = globalByCurrency.get(bill.currency) ?? 0
+        if (gNet >= 0) {
+          autoOffset = true
+          globalNet = gNet
+        }
+      }
+      rows.push({ otherId: oid, displayName: disp.displayName, net, autoOffset, globalNet })
     }
     rows.sort((a, b) => a.displayName.localeCompare(b.displayName))
     setBillPairRows(rows)
@@ -274,58 +285,74 @@ export function BillDetailPage() {
         )}
       </div>
 
-      {userId && billPairRows.length > 0 && (
+      {userId && billPairRows.some((r) => !r.autoOffset) && (
         <div className="rounded-3xl border border-stone-200 bg-white p-5 shadow-sm">
           <h2 className="text-lg font-semibold">Settle on this bill</h2>
           <p className="mt-1 text-xs text-stone-500">
             Amounts use this bill&apos;s splits and payments tagged to this bill.
           </p>
           <ul className="mt-4 space-y-2">
-            {billPairRows.map((row) => (
-              <li
-                key={row.otherId}
-                className="flex flex-col gap-2 rounded-xl border border-stone-200 bg-stone-50/80 px-4 py-3 sm:flex-row sm:items-center sm:justify-between"
-              >
-                <div>
-                  <p className="text-sm font-medium text-stone-800">
-                    {row.net < 0
-                      ? `You owe ${row.displayName}`
-                      : `${row.displayName} owes you`}
-                  </p>
-                  <p className="text-xs text-stone-500">
-                    {formatCurrency(Math.abs(row.net), bill.currency)}
-                  </p>
-                </div>
-                <Button
-                  type="button"
-                  variant="success"
-                  size="sm"
-                  className="h-10 shrink-0 rounded-lg"
-                  onClick={() => {
-                    if (row.net < 0) {
-                      setRecordSettlement({
-                        fromUserId: userId,
-                        toUserId: row.otherId,
-                        amount: Math.abs(row.net),
-                        fromName: 'You',
-                        toName: row.displayName,
-                      })
-                    } else {
-                      setRecordSettlement({
-                        fromUserId: row.otherId,
-                        toUserId: userId,
-                        amount: row.net,
-                        fromName: row.displayName,
-                        toName: 'You',
-                      })
-                    }
-                  }}
+            {billPairRows.map((row) =>
+              row.autoOffset ? (
+                <li
+                  key={row.otherId}
+                  className="flex flex-col gap-1 rounded-xl border border-stone-200 bg-stone-50/80 px-4 py-3"
                 >
-                  <Check className="size-3.5" />
-                  Record payment
-                </Button>
-              </li>
-            ))}
+                  <p className="text-sm font-medium text-stone-500">
+                    Covered — {row.displayName} owes you{' '}
+                    {formatCurrency(row.globalNet ?? 0, bill.currency)} overall
+                  </p>
+                  <p className="text-xs text-stone-400">
+                    Your {formatCurrency(Math.abs(row.net), bill.currency)} share is offset by
+                    their balance
+                  </p>
+                </li>
+              ) : (
+                <li
+                  key={row.otherId}
+                  className="flex flex-col gap-2 rounded-xl border border-stone-200 bg-stone-50/80 px-4 py-3 sm:flex-row sm:items-center sm:justify-between"
+                >
+                  <div>
+                    <p className="text-sm font-medium text-stone-800">
+                      {row.net < 0
+                        ? `You owe ${row.displayName}`
+                        : `${row.displayName} owes you`}
+                    </p>
+                    <p className="text-xs text-stone-500">
+                      {formatCurrency(Math.abs(row.net), bill.currency)}
+                    </p>
+                  </div>
+                  <Button
+                    type="button"
+                    variant="success"
+                    size="sm"
+                    className="h-10 shrink-0 rounded-lg"
+                    onClick={() => {
+                      if (row.net < 0) {
+                        setRecordSettlement({
+                          fromUserId: userId,
+                          toUserId: row.otherId,
+                          amount: Math.abs(row.net),
+                          fromName: 'You',
+                          toName: row.displayName,
+                        })
+                      } else {
+                        setRecordSettlement({
+                          fromUserId: row.otherId,
+                          toUserId: userId,
+                          amount: row.net,
+                          fromName: row.displayName,
+                          toName: 'You',
+                        })
+                      }
+                    }}
+                  >
+                    <Check className="size-3.5" />
+                    Record payment
+                  </Button>
+                </li>
+              ),
+            )}
           </ul>
         </div>
       )}

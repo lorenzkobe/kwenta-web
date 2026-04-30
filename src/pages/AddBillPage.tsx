@@ -41,7 +41,7 @@ import {
   type PinnedSplits,
 } from '@/lib/bill-split-form'
 import { BILL_BACK_QUERY, parseSafeAppPath, withBillBackQuery } from '@/lib/bill-navigation'
-import { listCanonicalRelatedProfileIds } from '@/lib/people'
+import { computePairwiseNet, listCanonicalRelatedProfileIds } from '@/lib/people'
 import { normalizeAmountInput, stripLeadingZerosAmount } from '@/lib/amount-input'
 import { cn, formatCurrency } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
@@ -678,6 +678,22 @@ export function AddBillPage() {
         )
       } else {
         await createBill(input)
+        const payerId = input.paidBy
+        if (payerId && payerId !== userId) {
+          try {
+            const globalByCurrency = await computePairwiseNet(userId, payerId)
+            const gNet = globalByCurrency.get(input.currency) ?? 0
+            if (gNet > 0.005) {
+              toast.info(
+                `This bill is offset — ${payorDisplayName} still owes you ${formatCurrency(gNet, input.currency)} overall`,
+              )
+            } else if (Math.abs(gNet) <= 0.005) {
+              toast.info(`This bill cancels out — you and ${payorDisplayName} are now even`)
+            }
+          } catch {
+            // non-critical
+          }
+        }
         navigate('/app/bills')
       }
     } catch (error) {

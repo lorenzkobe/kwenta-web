@@ -1129,13 +1129,17 @@ export function PersonDetailPage() {
                     {(() => {
                       const net = personalBillDirection?.get(bill.id) ?? 0
                       const settled = Math.abs(net) < 0.005
-                      const direction = net > 0 ? 'Receive' : 'Pay'
+                      const globalNet = netByCurrency?.get(bill.currency) ?? 0
+                      const autoOffset = net < 0 && globalNet >= 0
+                      const direction = net > 0 ? 'Receive' : autoOffset ? 'Covered' : 'Pay'
                       const amountForDisplay = settled ? 0 : Math.abs(net)
                       const badgeClass = settled
                         ? 'bg-stone-200 text-stone-600'
                         : net > 0
                           ? 'bg-emerald-100 text-emerald-800'
-                          : 'bg-amber-100 text-amber-800'
+                          : autoOffset
+                            ? 'bg-stone-200 text-stone-600'
+                            : 'bg-amber-100 text-amber-800'
                       return (
                     <Link
                       to={withBillBackQuery(`/app/bills/${bill.id}`, `/app/people/${personId}`)}
