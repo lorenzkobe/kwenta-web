@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import {
   ArrowLeft,
@@ -191,21 +191,41 @@ export function AddBillPage() {
   const members = groupId ? (groupMembers ?? []) : (personalSplitMembers ?? [])
   const isEdit = Boolean(editBillId)
 
+  const lockUserInSplits = !groupId && !!userId && paidBy !== userId
+
+  // Synchronously derive effective split IDs so the current user is always included
+  // when someone else paid — no async effect needed, no race with the save button.
+  const effectiveSimpleSelectedUserIds = useMemo(() => {
+    if (!lockUserInSplits || !userId || simpleSelectedUserIds.includes(userId)) {
+      return simpleSelectedUserIds
+    }
+    return [...simpleSelectedUserIds, userId]
+  }, [lockUserInSplits, userId, simpleSelectedUserIds])
+
+  // Same guarantee for each itemized line.
+  function getEffectiveItemIds(item: ItemDraft): string[] {
+    if (!lockUserInSplits || !userId || item.selectedUserIds.includes(userId)) {
+      return item.selectedUserIds
+    }
+    return [...item.selectedUserIds, userId]
+  }
+
   const simpleSplitsOk =
     members.length === 0 ||
-    simpleSelectedUserIds.length === 0 ||
-    lineSplitsValid(simpleSplitType, simpleAmountNum, simpleSelectedUserIds, simpleSplitValues)
+    effectiveSimpleSelectedUserIds.length === 0 ||
+    lineSplitsValid(simpleSplitType, simpleAmountNum, effectiveSimpleSelectedUserIds, simpleSplitValues)
 
   const itemizedLinesOk =
     members.length === 0 ||
     items
       .filter((i) => i.name.trim() && parseFloat(i.amount) > 0)
       .every((item) => {
-        if (item.selectedUserIds.length === 0) return true
+        const effectiveIds = getEffectiveItemIds(item)
+        if (effectiveIds.length === 0) return true
         return lineSplitsValid(
           item.splitType,
           parseFloat(item.amount) || 0,
-          item.selectedUserIds,
+          effectiveIds,
           item.splitValues,
         )
       })
@@ -223,22 +243,8 @@ export function AddBillPage() {
     if (userId && !paidBy && !editBillId) setPaidBy(userId)
   }, [userId, paidBy, editBillId])
 
-  const lockUserInSplits = !groupId && !!userId && paidBy !== userId
-
-  useEffect(() => {
-    if (!lockUserInSplits || !userId) return
-    if (mode === 'simple') {
-      setSimpleSelectedUserIds((prev) => (prev.includes(userId) ? prev : [...prev, userId]))
-    } else {
-      setItems((prev) =>
-        prev.map((item) =>
-          item.selectedUserIds.length > 0 && !item.selectedUserIds.includes(userId)
-            ? { ...item, selectedUserIds: [...item.selectedUserIds, userId] }
-            : item,
-        ),
-      )
-    }
-  }, [lockUserInSplits, userId, mode])
+  // Both simple and itemized modes now derive effective IDs synchronously
+  // (effectiveSimpleSelectedUserIds / getEffectiveItemIds), so no async lock effect needed.
 
   const payorOptions = members
   const filteredPayorOptions = payorSearch.trim()
@@ -255,8 +261,8 @@ export function AddBillPage() {
       : selectedPayor.displayName
     : 'You'
 
-  const selectedIdsRef = useRef(simpleSelectedUserIds)
-  selectedIdsRef.current = simpleSelectedUserIds
+  const selectedIdsRef = useRef(effectiveSimpleSelectedUserIds)
+  selectedIdsRef.current = effectiveSimpleSelectedUserIds
   const simpleSplitTypeRef = useRef(simpleSplitType)
   simpleSplitTypeRef.current = simpleSplitType
   const simpleAmountStrRef = useRef(simpleAmount)
@@ -632,7 +638,7 @@ export function AddBillPage() {
               name: title.trim(),
               amount: simpleAmountNum,
               splits: buildSplitPayload(
-                simpleSelectedUserIds,
+                effectiveSimpleSelectedUserIds,
                 simpleSplitType,
                 simpleSplitValues,
               ),
@@ -652,11 +658,7 @@ export function AddBillPage() {
           items: validItems.map((item) => ({
             name: item.name.trim(),
             amount: parseFloat(item.amount),
-            splits: buildSplitPayload(
-              item.selectedUserIds,
-              item.splitType,
-              item.splitValues,
-            ),
+            splits: buildSplitPayload(getEffectiveItemIds(item), item.splitType, item.splitValues),
           })),
         }
       }
@@ -977,7 +979,7 @@ export function AddBillPage() {
                       </div>
                       <div className="flex flex-wrap gap-1.5">
                         {members.map((member) => {
-                          const isSelected = simpleSelectedUserIds.includes(member.userId)
+                          const isSelected = effectiveSimpleSelectedUserIds.includes(member.userId)
                           const isLocked = lockUserInSplits && member.isCurrentUser
                           return (
                             <button
@@ -1060,7 +1062,7 @@ export function AddBillPage() {
                       <SplitValueRows
                         splitType={simpleSplitType}
                         currency={currency}
-                        selectedUserIds={simpleSelectedUserIds}
+                        selectedUserIds={effectiveSimpleSelectedUserIds}
                         members={members}
                         values={simpleSplitValues}
                         pinnedUserIds={simpleSplitMeta.pinned}
@@ -1068,18 +1070,18 @@ export function AddBillPage() {
                         onChange={onSimpleSplitInputChange}
                       />
 
-                      {simpleSelectedUserIds.length > 0 && simpleAmountNum > 0 && (
+                      {effectiveSimpleSelectedUserIds.length > 0 && simpleAmountNum > 0 && (
                         <div className="rounded-2xl border border-teal-800/20 bg-teal-800/5 px-4 py-3">
                           {simpleSplitType === 'equal' ? (
                             <p className="text-sm text-stone-700">
                               <span className="font-semibold text-teal-800">
                                 {formatCurrency(
-                                  simpleAmountNum / simpleSelectedUserIds.length,
+                                  simpleAmountNum / effectiveSimpleSelectedUserIds.length,
                                   currency,
                                 )}
                               </span>{' '}
-                              each across {simpleSelectedUserIds.length}{' '}
-                              {simpleSelectedUserIds.length === 1 ? 'person' : 'people'}
+                              each across {effectiveSimpleSelectedUserIds.length}{' '}
+                              {effectiveSimpleSelectedUserIds.length === 1 ? 'person' : 'people'}
                             </p>
                           ) : (
                             <p className="text-sm text-stone-500">
@@ -1087,8 +1089,8 @@ export function AddBillPage() {
                               <span className="font-semibold text-stone-800">
                                 {formatCurrency(simpleAmountNum, currency)}
                               </span>{' '}
-                              among {simpleSelectedUserIds.length}{' '}
-                              {simpleSelectedUserIds.length === 1 ? 'person' : 'people'}
+                              among {effectiveSimpleSelectedUserIds.length}{' '}
+                              {effectiveSimpleSelectedUserIds.length === 1 ? 'person' : 'people'}
                             </p>
                           )}
                         </div>
@@ -1119,7 +1121,8 @@ export function AddBillPage() {
               <div className="mt-4 space-y-3">
                 {items.map((item, index) => {
                   const memberPicker = members.length > 0
-                  const lineComplete = isItemizedLineComplete(item, memberPicker)
+                  const effectiveItemIds = getEffectiveItemIds(item)
+                  const lineComplete = isItemizedLineComplete({ ...item, selectedUserIds: effectiveItemIds }, memberPicker)
                   const collapsed = collapsedItemKeys.includes(item.key) && lineComplete
                   if (collapsed) {
                     return (
@@ -1258,7 +1261,7 @@ export function AddBillPage() {
 
                         <div className="mt-3 flex flex-wrap gap-1.5">
                           {members.map((member) => {
-                            const isSelected = item.selectedUserIds.includes(member.userId)
+                            const isSelected = effectiveItemIds.includes(member.userId)
                             const isLocked = lockUserInSplits && member.isCurrentUser
                             return (
                               <button
@@ -1335,7 +1338,7 @@ export function AddBillPage() {
                         <SplitValueRows
                           splitType={item.splitType}
                           currency={currency}
-                          selectedUserIds={item.selectedUserIds}
+                          selectedUserIds={effectiveItemIds}
                           members={members}
                           values={item.splitValues}
                           pinnedUserIds={item.pinnedSplit}
@@ -1343,12 +1346,12 @@ export function AddBillPage() {
                           onChange={(uid, raw) => onItemSplitValueChange(item.key, uid, raw)}
                         />
 
-                        {item.selectedUserIds.length > 0 &&
+                        {effectiveItemIds.length > 0 &&
                           item.splitType === 'equal' &&
                           parseFloat(item.amount) > 0 && (
                             <p className="mt-1.5 text-xs text-stone-400">
                               {formatCurrency(
-                                parseFloat(item.amount) / item.selectedUserIds.length,
+                                parseFloat(item.amount) / effectiveItemIds.length,
                                 currency,
                               )}{' '}
                               each

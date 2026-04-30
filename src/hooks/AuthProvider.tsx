@@ -128,7 +128,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
       if (error) {
         console.warn('[auth] account gate failed', error)
-        sessionStorage.setItem(INACTIVE_ACCOUNT_MESSAGE_KEY, '1')
+        sessionStorage.setItem(SESSION_EXPIRED_MESSAGE_KEY, '1')
         await supabase.auth.signOut()
         setUser(null)
         setUserType(null)
