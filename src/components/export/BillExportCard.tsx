@@ -3,9 +3,19 @@ import type { getBillWithDetails } from '@/db/operations'
 
 type BillDetails = NonNullable<Awaited<ReturnType<typeof getBillWithDetails>>>
 
+interface PaymentEntry {
+  fromName: string
+  toName: string
+  amount: number
+  currency: string
+  createdAt: string
+  label: string
+}
+
 interface Props {
   bill: BillDetails
   groupName: string | null
+  payments?: PaymentEntry[]
 }
 
 function computePersonTotals(items: BillDetails['items']): { name: string; amount: number }[] {
@@ -20,7 +30,7 @@ function computePersonTotals(items: BillDetails['items']): { name: string; amoun
     .sort((a, b) => b.amount - a.amount)
 }
 
-export function BillExportCard({ bill, groupName }: Props) {
+export function BillExportCard({ bill, groupName, payments = [] }: Props) {
   const personTotals = computePersonTotals(bill.items)
 
   return (
@@ -199,6 +209,35 @@ export function BillExportCard({ bill, groupName }: Props) {
             </div>
           </div>
         )
+      )}
+
+      {/* Payments recorded */}
+      {payments.length > 0 && (
+        <div style={{ borderTop: '1px solid #1f2937', padding: '14px 20px' }}>
+          <div style={{ color: '#6b7280', fontSize: 10, fontWeight: 600, letterSpacing: '0.08em', textTransform: 'uppercase', marginBottom: 10 }}>
+            Payments Recorded
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            {payments.map((p, i) => (
+              <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '6px 10px', backgroundColor: '#1f2937', borderRadius: 8 }}>
+                <div style={{ flex: 1 }}>
+                  <div style={{ color: '#d1d5db', fontSize: 12, fontWeight: 500 }}>
+                    {p.fromName} → {p.toName}
+                  </div>
+                  {p.label && (
+                    <div style={{ color: '#6b7280', fontSize: 10, marginTop: 1 }}>{p.label}</div>
+                  )}
+                  <div style={{ color: '#6b7280', fontSize: 10, marginTop: 1 }}>
+                    {new Date(p.createdAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
+                  </div>
+                </div>
+                <span style={{ color: '#34d399', fontSize: 12, fontWeight: 700, flexShrink: 0 }}>
+                  {formatCurrency(p.amount, p.currency)}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
       )}
 
       {/* Footer */}

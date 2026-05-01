@@ -1,5 +1,5 @@
 import { formatCurrency } from '@/lib/utils'
-import type { GroupBalanceSummary } from '@/lib/settlement'
+import type { GroupBalanceSummary, SettlementHistoryItem } from '@/lib/settlement'
 
 interface BillEntry {
   id: string
@@ -22,9 +22,10 @@ interface Props {
   members: MemberEntry[]
   balanceSummary: GroupBalanceSummary
   bills: BillEntry[]
+  payments?: SettlementHistoryItem[]
 }
 
-export function GroupExportCard({ groupName, currency, members, balanceSummary, bills }: Props) {
+export function GroupExportCard({ groupName, currency, members, balanceSummary, bills, payments = [] }: Props) {
   const balanceByUser = new Map<string, number>()
   for (const b of balanceSummary.balances) {
     balanceByUser.set(b.userId, b.amount)
@@ -223,6 +224,37 @@ export function GroupExportCard({ groupName, currency, members, balanceSummary, 
                 </div>
               )
             })}
+          </div>
+        </div>
+      )}
+
+      {/* Payment history */}
+      {payments.length > 0 && (
+        <div style={{ borderTop: '1px solid #1f2937', padding: '14px 20px' }}>
+          <div style={{ color: '#6b7280', fontSize: 10, fontWeight: 600, letterSpacing: '0.08em', textTransform: 'uppercase', marginBottom: 10 }}>
+            Payment History ({payments.length})
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            {payments.map((p) => (
+              <div key={p.id} style={{ padding: '7px 10px', backgroundColor: '#1f2937', borderRadius: 8 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ color: '#d1d5db', fontSize: 12, fontWeight: 500 }}>
+                      {p.fromName} → {p.toName}
+                    </div>
+                    {p.label && (
+                      <div style={{ color: '#6b7280', fontSize: 10, marginTop: 1 }}>{p.label}</div>
+                    )}
+                    <div style={{ color: '#6b7280', fontSize: 10, marginTop: 1 }}>
+                      {new Date(p.createdAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
+                    </div>
+                  </div>
+                  <span style={{ color: '#34d399', fontSize: 12, fontWeight: 700, flexShrink: 0 }}>
+                    {formatCurrency(p.amount, p.currency)}
+                  </span>
+                </div>
+              </div>
+            ))}
           </div>
         </div>
       )}

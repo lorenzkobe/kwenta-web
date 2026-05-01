@@ -161,6 +161,11 @@ export function NotificationsBell({ userId }: { userId: string }) {
     setOpen(false)
     if (row.kind === 'bill_participant' && row.entity_id) {
       navigate(`/app/bills/${row.entity_id}`)
+    } else if (row.kind === 'profile_linked') {
+      if (isOnline) {
+        await withMetric('notifications.syncBeforeProfileNav', () => fullSync(userId), {})
+      }
+      navigate('/app/people')
     } else if (row.kind === 'added_to_group' && row.group_id) {
       let syncErrors: string[] = []
       if (isOnline) {

@@ -1413,6 +1413,7 @@ export function PersonDetailPage() {
               currency: g.currency,
               theirNet: g.theirNet,
             }))}
+            payments={settlements ?? []}
           />
         </ExportImageDialog>
       )}

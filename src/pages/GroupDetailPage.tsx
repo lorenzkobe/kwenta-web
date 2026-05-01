@@ -1054,6 +1054,7 @@ export function GroupDetailPage() {
               created_at: b.created_at,
               payorName: b.payorName,
             }))}
+            payments={settlementHistory ?? []}
           />
         </ExportImageDialog>
       )}
