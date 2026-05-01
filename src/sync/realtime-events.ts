@@ -15,7 +15,7 @@ import type {
   ActivityLog,
   ProfilePeerLink,
 } from '@/types'
-import { pullChanges, syncRoundTrip } from '@/sync/sync-service'
+import { KWENTA_LAST_PULL_STORAGE_KEY, pullChanges, syncRoundTrip } from '@/sync/sync-service'
 
 type UserEventRow = {
   id: string
@@ -147,6 +147,22 @@ function rememberEventId(recentOrder: string[], recentSet: Set<string>, eventId:
 
 async function processEvent(userId: string, ev: UserEventRow): Promise<void> {
   const startedAt = performance.now()
+
+  // A profile link event means this user now has access to historical bills and
+  // groups that were previously owned by a local contact. Incremental pulls
+  // (p_since = last pull) won't return those rows since their updated_at hasn't
+  // changed. Clear the pull cursor so syncRoundTrip fetches everything from scratch.
+  if (ev.entity_type === 'profiles' && isRecord(ev.payload) && ev.payload.linked_profile_id) {
+    localStorage.removeItem(KWENTA_LAST_PULL_STORAGE_KEY)
+    await syncRoundTrip(userId)
+    captureMetric('realtime.event.process', true, performance.now() - startedAt, {
+      entity: ev.entity_type,
+      op: ev.op,
+      fullPull: true,
+    })
+    return
+  }
+
   if (isRuntimeFlagEnabled('targetedRealtimeReconcile')) {
     const { data, error } = await withMetric(
       'realtime.fetch.reconcileEvent',
