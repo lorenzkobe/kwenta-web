@@ -683,6 +683,19 @@ export async function linkProfileToRemote(
     })
   }
 
+  // Mark all item_splits referencing the local contact as unsynced so they are
+  // re-pushed in the immediately following syncRoundTrip. resolveSplitUserIdForPush
+  // will rewrite user_id → remoteProfileId, updating the server so the remote user
+  // can see personal bills and has the correct split attribution in group bills.
+  const splits = await db.item_splits.where('user_id').equals(localProfileId).toArray()
+  for (const split of splits) {
+    if (split.is_deleted) continue
+    await db.item_splits.update(split.id, {
+      updated_at: timestamp,
+      synced_at: null,
+    })
+  }
+
   const actor = await db.profiles.get(actorUserId)
   void notifyProfileLinked({
     actorId: actorUserId,
