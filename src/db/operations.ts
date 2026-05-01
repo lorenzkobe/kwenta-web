@@ -696,6 +696,37 @@ export async function linkProfileToRemote(
     })
   }
 
+  // Rewrite bills.paid_by from the local contact to the remote profile so the
+  // linked player is credited correctly as payer in computeGroupBalances. Without
+  // this the server keeps paid_by = localProfileId and the payer shows as "Unknown"
+  // on User B's device (their profile is not visible due to the privacy boundary).
+  const allBills = await db.bills.toArray()
+  for (const bill of allBills) {
+    if (bill.is_deleted || bill.paid_by !== localProfileId) continue
+    await db.bills.update(bill.id, {
+      paid_by: remoteProfileId,
+      updated_at: timestamp,
+      synced_at: null,
+    })
+  }
+
+  // Mark settlements where the local contact is a party as unsynced.
+  // resolveSettlementPartyIdForPush rewrites from/to_user_id at push time;
+  // we also update Dexie immediately so local display is correct before the push.
+  const fromSettlements = await db.settlements.where('from_user_id').equals(localProfileId).toArray()
+  const toSettlements = await db.settlements.where('to_user_id').equals(localProfileId).toArray()
+  const seenSettlementIds = new Set<string>()
+  for (const s of [...fromSettlements, ...toSettlements]) {
+    if (s.is_deleted || seenSettlementIds.has(s.id)) continue
+    seenSettlementIds.add(s.id)
+    await db.settlements.update(s.id, {
+      ...(s.from_user_id === localProfileId ? { from_user_id: remoteProfileId } : {}),
+      ...(s.to_user_id === localProfileId ? { to_user_id: remoteProfileId } : {}),
+      updated_at: timestamp,
+      synced_at: null,
+    })
+  }
+
   const actor = await db.profiles.get(actorUserId)
   void notifyProfileLinked({
     actorId: actorUserId,
