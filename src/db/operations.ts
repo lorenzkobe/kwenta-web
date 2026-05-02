@@ -1704,10 +1704,11 @@ export async function applyGeneralCreditToSelection(params: {
         remainingToConsume -= consume
       }
 
+      const originalAmountFormatted = currencyFormatter.format(roundedAppliedAmount)
       for (const slice of params.personalSlices) {
         if (slice.amount <= 0.005) continue
         const settlementId = generateId()
-        const label = 'Applied general credit to bills'
+        const label = `Applied general credit to bills (from ${originalAmountFormatted} credit)`
         const labelSuffix = ` · ${label}`
         await db.settlements.add({
           ...syncFields({ id: settlementId }),
@@ -1737,7 +1738,7 @@ export async function applyGeneralCreditToSelection(params: {
       for (const group of params.groupAllocations) {
         if (group.amount <= 0.005) continue
         const settlementId = generateId()
-        const label = 'Applied general credit to group balance'
+        const label = `Applied general credit to group balance (from ${originalAmountFormatted} credit)`
         const labelSuffix = ` · ${label}`
         await db.settlements.add({
           ...syncFields({ id: settlementId }),
