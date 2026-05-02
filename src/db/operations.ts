@@ -326,6 +326,8 @@ export async function createGroup(
   const groupId = generateId()
   const inviteCode = generateId().slice(0, 6).toUpperCase()
 
+  const creatorProfile = await db.profiles.get(createdBy)
+
   await db.transaction('rw', [db.groups, db.group_members, db.activity_log], async () => {
     const group: Group = {
       ...syncFields({ id: groupId }),
@@ -340,7 +342,7 @@ export async function createGroup(
       ...syncFields(),
       group_id: groupId,
       user_id: createdBy,
-      display_name: 'You',
+      display_name: creatorProfile?.display_name ?? createdBy,
       joined_at: now(),
     }
     await db.group_members.add(member)

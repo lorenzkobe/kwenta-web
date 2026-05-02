@@ -971,6 +971,7 @@ export async function collectRelatedProfileIds(meId: string): Promise<Set<string
   const bills = await db.bills.filter((b) => !b.is_deleted).toArray()
   for (const bill of bills) {
     if (bill.group_id && !myGroupIds.has(bill.group_id)) continue
+    if (!bill.group_id && !meIds.has(bill.created_by)) continue
 
     const items = await db.bill_items.where('bill_id').equals(bill.id).toArray()
     let iParticipate = meIds.has(bill.paid_by)
