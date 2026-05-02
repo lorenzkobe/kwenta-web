@@ -9,6 +9,7 @@ import {
   LogOut,
   Pencil,
   RefreshCcw,
+  RotateCcw,
   Shield,
   User,
   X,
@@ -59,6 +60,8 @@ export function SettingsPage() {
   const [signOutOpen, setSignOutOpen] = useState(false)
   const [signOutHasUnsynced, setSignOutHasUnsynced] = useState<boolean | null>(null)
   const [signOutBusy, setSignOutBusy] = useState(false)
+  const [resetOpen, setResetOpen] = useState(false)
+  const [resetBusy, setResetBusy] = useState(false)
   const [activityOpen, setActivityOpen] = useState(false)
   const recentActivityLoading = recentActivity === undefined
 
@@ -103,6 +106,18 @@ export function SettingsPage() {
     useAppStore.getState().setCurrentUserId(null)
     setSignOutOpen(false)
     navigate('/login', { replace: true })
+  }
+
+  async function handleReset() {
+    if (!userId) return
+    setResetBusy(true)
+    try {
+      await clearKwentaLocalData()
+      await fullSync(userId)
+    } finally {
+      setResetBusy(false)
+      setResetOpen(false)
+    }
   }
 
   async function handleSyncThenSignOut() {
@@ -343,6 +358,22 @@ export function SettingsPage() {
             {isAuthenticated && (
               <button
                 type="button"
+                onClick={() => setResetOpen(true)}
+                className="flex w-full items-center gap-3 px-5 py-4 text-left text-amber-700 transition-colors hover:bg-amber-500/5"
+              >
+                <RotateCcw className="size-4" />
+                <div className="flex-1">
+                  <p className="text-sm font-medium">Reset local data</p>
+                  <p className="text-xs text-amber-700/70">
+                    Clears local cache and re-downloads everything from the server
+                  </p>
+                </div>
+              </button>
+            )}
+
+            {isAuthenticated && (
+              <button
+                type="button"
                 onClick={() => void openSignOutDialog()}
                 className="flex w-full items-center gap-3 px-5 py-4 text-left text-red-600 transition-colors hover:bg-red-500/5"
               >
@@ -394,6 +425,50 @@ export function SettingsPage() {
                   </li>
                 ))}
               </ul>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {resetOpen && (
+        <div className="fixed inset-0 z-70 flex items-end justify-center p-4 sm:items-center">
+          <div
+            className="fixed inset-0 bg-black/40 backdrop-blur-sm"
+            onClick={() => !resetBusy && setResetOpen(false)}
+            aria-hidden
+          />
+          <div
+            role="alertdialog"
+            aria-modal="true"
+            aria-labelledby="reset-title"
+            className="relative w-full max-w-sm animate-[slideUp_0.25s_ease-out] rounded-3xl border border-stone-200 bg-white p-5 shadow-[0_20px_60px_rgba(28,25,23,0.18)]"
+          >
+            <h2 id="reset-title" className="text-base font-semibold text-stone-900">
+              Reset local data?
+            </h2>
+            <p className="mt-2 text-sm leading-relaxed text-stone-600">
+              Clears all data stored in this browser and re-downloads everything fresh from the server.
+              Your account and all data stay on the server — nothing is deleted. Use this if you're
+              seeing stale or incorrect data after a refresh.
+            </p>
+            <div className="mt-5 flex flex-col gap-2">
+              <Button
+                type="button"
+                className="w-full rounded-xl"
+                disabled={resetBusy}
+                onClick={() => void handleReset()}
+              >
+                {resetBusy ? 'Resetting…' : 'Reset & reload'}
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                className="w-full rounded-xl"
+                disabled={resetBusy}
+                onClick={() => setResetOpen(false)}
+              >
+                Cancel
+              </Button>
             </div>
           </div>
         </div>
