@@ -6,6 +6,7 @@ This repository should be handled by the agent like a strong senior software eng
 
 - **Auth bootstrap:** `AuthProvider` exposes `authReady` after the user’s `profiles` row is written to Dexie (`ensureProfile`). `AppShell` passes `user && authReady` into `useSync` and `useRealtime` so cloud sync does not start before local profile seeding (avoids races with `kwenta_sync` push ordering).
 - **Initial hydration:** When `KWENTA_LAST_PULL_STORAGE_KEY` is absent, `sync-manager` runs `syncRoundTrip` (`kwenta_sync` RPC) once instead of many per-table `pullChanges` requests; RPC fallback in `syncRoundTrip` remains for older databases.
+- **Profile linking side-effects:** `linkProfileToRemote` rewrites `group_members.user_id`, `item_splits.user_id`, `bills.paid_by`, and `settlements.from/to_user_id` from the local contact id to the remote profile id in a single Dexie transaction, then marks them unsynced for the next push. A server-side trigger (`kwenta_on_profile_linked`) also fires a `profile_changed` user event to the linked remote user so their realtime handler immediately triggers a `syncRoundTrip` to pull historical bills and groups.
 
 ## Primary operating principles
 

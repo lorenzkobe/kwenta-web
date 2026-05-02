@@ -41,7 +41,7 @@ with open('PATH', 'wb') as f: f.write(content)
 
 **Personal bills** (`group_id = null`): always "you paid." The app is the current user's ledger. Do not design flows that assume someone else paid on a personal bill.
 
-**Group bills**: collaborative — any member can add expenses attributed to whoever paid. If someone outside this user's Kwenta paid for something, they record it on their own account.
+**Group bills**: collaborative — any member can add expenses attributed to whoever paid. `bills.paid_by` records the actual payer (may differ from `bills.created_by`). If someone outside this user's Kwenta paid for something, they record it on their own account.
 
 When writing copy, defaults, or UX: personal = "you paid"; group = collaborative.
 
@@ -131,21 +131,21 @@ Three profile flavors in Dexie (`src/types/index.ts`):
 
 ## Dexie Schema (`src/db/db.ts`)
 
-Current version: **8**. All tables extend sync fields: `id` (UUID PK), `created_at`, `updated_at`, `synced_at` (null = unsynced), `is_deleted`, `device_id`.
+Current version: **12**. All tables extend sync fields: `id` (UUID PK), `created_at`, `updated_at`, `synced_at` (null = unsynced), `is_deleted`, `device_id`. Versions 9+ added compound indexes (e.g. `[group_id+is_deleted]`) for query performance.
 
-| Table | Indexes | Purpose |
+| Table | Key Indexes | Purpose |
 |-------|---------|---------|
-| `profiles` | `id, email, owner_id, linked_profile_id, synced_at, is_deleted` | User accounts + local contacts |
-| `groups` | `id, created_by, invite_code, synced_at, is_deleted` | Expense groups |
-| `group_members` | `id, group_id, user_id, [group_id+user_id], synced_at, is_deleted` | Memberships; composite index prevents duplicates; stores `display_name` |
-| `bills` | `id, group_id, created_by, created_at, synced_at, is_deleted` | Expense records |
-| `bill_items` | `id, bill_id, synced_at, is_deleted` | Line items within a bill |
-| `item_splits` | `id, item_id, user_id, synced_at, is_deleted` | Per-person allocations; `split_type`, `split_value`, `computed_amount` |
-| `settlements` | `id, group_id, bill_id, bundle_id, from_user_id, to_user_id, is_settled, synced_at, is_deleted` | Payments; `bundle_id` groups multiple recipients into one logical payment |
-| `activity_log` | `id, group_id, user_id, entity_type, entity_id, created_at, synced_at, is_deleted` | Audit trail |
-| `profile_peer_links` | `id, owner_user_id, anchor_profile_id, peer_profile_id, synced_at, is_deleted, [owner_user_id+anchor_profile_id]` | Manual “same person” edges (local anchor → peer); server-backed sync |
+| `profiles` | `id, email, owner_id, linked_profile_id, synced_at, is_deleted, [owner_id+is_deleted]` | User accounts + local contacts |
+| `groups` | `id, created_by, invite_code, synced_at, is_deleted, [created_by+is_deleted]` | Expense groups |
+| `group_members` | `id, group_id, user_id, [group_id+user_id], synced_at, is_deleted, [group_id+is_deleted], [user_id+is_deleted]` | Memberships; composite index prevents duplicates; stores `display_name` |
+| `bills` | `id, group_id, created_by, paid_by, created_at, synced_at, is_deleted, [created_by+group_id], [group_id+is_deleted]` | Expense records; `paid_by` tracks the actual payer (may differ from `created_by` in groups); `category` optional enum |
+| `bill_items` | `id, bill_id, synced_at, is_deleted, [bill_id+is_deleted]` | Line items within a bill |
+| `item_splits` | `id, item_id, user_id, synced_at, is_deleted, [item_id+is_deleted], [user_id+is_deleted]` | Per-person allocations; `split_type`, `split_value`, `computed_amount` |
+| `settlements` | `id, group_id, bill_id, bundle_id, from_user_id, to_user_id, is_settled, synced_at, is_deleted, [group_id+is_deleted], [bill_id+is_deleted], [from_user_id+to_user_id]` | Payments; `bundle_id` groups multiple recipients into one logical payment |
+| `activity_log` | `id, group_id, user_id, entity_type, entity_id, created_at, synced_at, is_deleted, [user_id+created_at]` | Audit trail |
+| `profile_peer_links` | `id, owner_user_id, anchor_profile_id, peer_profile_id, synced_at, is_deleted, [owner_user_id+anchor_profile_id], [owner_user_id+is_deleted]` | Manual “same person” edges (local anchor → peer); server-backed sync |
 | `pending_mutations` | `id, actor_user_id, status, entity_type, entity_id, created_at, updated_at` | Cloud-first conflict tracking |
-| `not_applied_changes` | `id, actor_user_id, resolution, entity_type, entity_id, [entity_type+entity_id], created_at, pending_mutation_id` | Failed mutations surfaced to user |
+| `not_applied_changes` | `id, actor_user_id, resolution, entity_type, entity_id, [entity_type+entity_id], created_at, resolved_at, pending_mutation_id` | Failed mutations surfaced to user |
 
 **Split types:** `'equal' | 'percentage' | 'custom'`
 **Mutation statuses:** `'pending' | 'applied' | 'conflict' | 'dismissed'`
@@ -274,10 +274,10 @@ Split types computed at write time and stored as `computed_amount`:
 All operations: write to Dexie in a transaction → create activity_log entry → call `notifySyncAfterMutation` (which calls `finalizeMutationSync`). IDs and timestamps are generated locally.
 
 Key operations:
-- `createBill / updateBill / deleteBill`
+- `createBill / updateBill / deleteBill` — `createBill` accepts `paidBy` (defaults to `createdBy`); `updateBill` accepts `paidBy` patch
 - `createGroup / addGroupMember / removeGroupMember / deleteGroup`
 - `createSettlement / recordSettlement` (supports bundled multi-recipient)
-- `linkProfileToRemote(localProfileId, remoteProfileId, actorUserId)` — sets `linked_profile_id`, rewrites group_member user_ids, notifies remote user
+- `linkProfileToRemote(localProfileId, remoteProfileId, actorUserId)` — sets `linked_profile_id`; rewrites `group_members.user_id`, `item_splits.user_id`, `bills.paid_by`, and `settlements.from/to_user_id` from local contact id to remote profile id; notifies remote user
 - `getBillWithDetails(billId)` — returns bill + items + splits with resolved display names; uses `group_members.display_name` fallback for local contacts
 
 ---
@@ -318,6 +318,11 @@ Migrations are numbered; there are two `021_` files. Core RPCs:
 | `024` | Fix group deletion propagation: pull groups/settlements using all membership rows (any `is_deleted`), not just active |
 | `028` | `profile_peer_links` table + RLS; `kwenta_push_profile_peer_links`; extend `kwenta_sync` / pull bundle / `kwenta_empty_reconcile_bundle` / `kwenta_reconcile_user_event` |
 | `029` | `kwenta_fetch_profile_for_linking`: also return profiles you share a group with (including `is_local`), not only non-local accounts |
+| `030` | Admin hard-delete RPC (`admin_delete_user`): explicit cascade cleanup before removing auth user |
+| `031` | `category` column on bills (optional text, constrained to fixed enum values) |
+| `032` | `paid_by` column on bills (uuid, non-null, defaults to `created_by`); update `kwenta_push_bills` to rewrite `paid_by` to linked profile id on push |
+| `033` | Fix bill deletion fanout: remove `is_deleted` filter in `kwenta_fanout_personal_bill_participants` so deletion events reach all historical split participants |
+| `034` | `kwenta_on_profile_linked` trigger: when `linked_profile_id` is set on a profile, emit a `profile_changed` user event to the remote user so they immediately pull historical data |
 
 The `kwenta_sync` RPC is the single entry point for all sync: accepts push payload, applies it server-side, returns pull bundle for `p_since`. Push validators enforce the same RLS rules the client filters apply.
 
