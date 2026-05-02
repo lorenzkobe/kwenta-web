@@ -296,6 +296,50 @@ export class KwentaDB extends Dexie {
         )
       }
     })
+
+    // Version 13: repair stale item_splits.user_id for contacts that were already
+    // linked before this fix. Version 12 only marked those splits as unsynced so
+    // resolveSplitUserIdForPush would rewrite on the next push, but the local
+    // user_id field was never updated in Dexie. Rewrite it now so direct Dexie
+    // queries by remoteProfileId find these rows immediately.
+    this.version(13).stores({
+      profiles: 'id, email, owner_id, linked_profile_id, synced_at, is_deleted, [owner_id+is_deleted]',
+      groups: 'id, created_by, invite_code, synced_at, is_deleted, [created_by+is_deleted]',
+      group_members:
+        'id, group_id, user_id, [group_id+user_id], synced_at, is_deleted, [group_id+is_deleted], [user_id+is_deleted]',
+      bills:
+        'id, group_id, created_by, paid_by, created_at, synced_at, is_deleted, [created_by+group_id], [group_id+is_deleted], [created_by+is_deleted]',
+      bill_items: 'id, bill_id, synced_at, is_deleted, [bill_id+is_deleted]',
+      item_splits: 'id, item_id, user_id, synced_at, is_deleted, [item_id+is_deleted], [user_id+is_deleted]',
+      settlements:
+        'id, group_id, bill_id, bundle_id, from_user_id, to_user_id, is_settled, synced_at, is_deleted, [group_id+is_deleted], [bill_id+is_deleted], [from_user_id+to_user_id]',
+      activity_log:
+        'id, group_id, user_id, entity_type, entity_id, created_at, synced_at, is_deleted, [user_id+created_at]',
+      profile_peer_links:
+        'id, owner_user_id, anchor_profile_id, peer_profile_id, synced_at, is_deleted, [owner_user_id+anchor_profile_id], [owner_user_id+is_deleted]',
+      pending_mutations: 'id, actor_user_id, status, entity_type, entity_id, created_at, updated_at',
+      not_applied_changes:
+        'id, actor_user_id, resolution, entity_type, entity_id, [entity_type+entity_id], created_at, resolved_at, pending_mutation_id',
+    }).upgrade(async (tx) => {
+      const profiles = await tx.table('profiles').toArray()
+      const linkedContacts = (profiles as Record<string, unknown>[]).filter(
+        (p) => p.is_local === true && p.linked_profile_id != null && !p.is_deleted,
+      )
+      const timestamp = new Date().toISOString()
+      for (const contact of linkedContacts) {
+        const localId = contact.id as string
+        const remoteId = contact.linked_profile_id as string
+        await tx.table('item_splits').where('user_id').equals(localId).modify(
+          (s: Record<string, unknown>) => {
+            if (!s.is_deleted) {
+              s.user_id = remoteId
+              s.updated_at = timestamp
+              s.synced_at = null
+            }
+          },
+        )
+      }
+    })
   }
 }
 

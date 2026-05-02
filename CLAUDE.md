@@ -124,6 +124,7 @@ Three profile flavors in Dexie (`src/types/index.ts`):
 **`kwenta_user_events`** — `realtime-events.ts` subscribes for entity change events.
 - On event: call targeted bundle fetch RPC (bill/group/settlement)
 - On reconnect: catch up via `catchUpSince` from last-seen event id (localStorage)
+- `catchUpSince` bulk path (>5 missed events): before bulk `syncRoundTrip`, checks fetched events and does a targeted query for profile link events — if any found, clears `KWENTA_LAST_PULL_STORAGE_KEY` so the bulk sync does a full pull from epoch (bill records with old `updated_at` would otherwise be skipped)
 - `realtimeCatchupSingleRun` flag deduplicates concurrent catch-ups
 - `targetedRealtimeReconcile` flag: use `kwenta_reconcile_user_event` RPC instead of full pull
 
@@ -131,7 +132,7 @@ Three profile flavors in Dexie (`src/types/index.ts`):
 
 ## Dexie Schema (`src/db/db.ts`)
 
-Current version: **12**. All tables extend sync fields: `id` (UUID PK), `created_at`, `updated_at`, `synced_at` (null = unsynced), `is_deleted`, `device_id`. Versions 9+ added compound indexes (e.g. `[group_id+is_deleted]`) for query performance.
+Current version: **13**. All tables extend sync fields: `id` (UUID PK), `created_at`, `updated_at`, `synced_at` (null = unsynced), `is_deleted`, `device_id`. Versions 9+ added compound indexes (e.g. `[group_id+is_deleted]`) for query performance.
 
 | Table | Key Indexes | Purpose |
 |-------|---------|---------|
@@ -187,7 +188,7 @@ Before pushing, `buildPushFilterContext` determines what the user is allowed to 
 - **groups**: created by user
 - **group_members**: creator of group OR the member row belongs to user
 - **bills**: created by user OR member of the bill's group
-- **item_splits**: `user_id` may be rewritten to `linked_profile_id` via `resolveSplitUserIdForPush`
+- **item_splits**: `user_id` is rewritten to `linked_profile_id` immediately in Dexie during `linkProfileToRemote`; `resolveSplitUserIdForPush` provides a server-side safety net for any remaining stale rows
 - **settlements**: `from/to_user_id` may be rewritten to linked account ids
 
 ### Pending Mutations (Conflict Tracking)

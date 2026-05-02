@@ -287,6 +287,19 @@ async function processEvent(userId: string, ev: UserEventRow): Promise<void> {
 // Above this threshold, per-event RPCs are more expensive than a single syncRoundTrip.
 const CATCH_UP_BULK_THRESHOLD = 5
 
+async function hasMissedProfileLinkEvent(userId: string, sinceIso: string): Promise<boolean> {
+  const { data } = await supabase
+    .from('kwenta_user_events')
+    .select('payload')
+    .eq('user_id', userId)
+    .eq('entity_type', 'profiles')
+    .gt('created_at', sinceIso)
+    .limit(10)
+  return (data ?? []).some(
+    (ev) => isRecord(ev.payload) && Boolean((ev.payload as Record<string, unknown>).linked_profile_id),
+  )
+}
+
 async function catchUpSince(userId: string, sinceIso: string, onEvent: (ev: UserEventRow) => Promise<void>): Promise<void> {
   const { data, error } = await supabase
     .from('kwenta_user_events')
@@ -306,6 +319,16 @@ async function catchUpSince(userId: string, sinceIso: string, onEvent: (ev: User
 
   if (events.length > CATCH_UP_BULK_THRESHOLD) {
     // Many missed events — one syncRoundTrip is far cheaper than N individual RPCs.
+    // But first check if a profile link event was missed: those require a full pull
+    // (cursor reset) because the newly accessible bill records have old updated_at
+    // values that a delta pull would skip.
+    const batchHasLink = events.some(
+      (ev) => ev.entity_type === 'profiles' && isRecord(ev.payload) && ev.payload.linked_profile_id,
+    )
+    const needsFullPull = batchHasLink || await hasMissedProfileLinkEvent(userId, sinceIso)
+    if (needsFullPull) {
+      localStorage.removeItem(KWENTA_LAST_PULL_STORAGE_KEY)
+    }
     await syncRoundTrip(userId)
     localStorage.setItem(LAST_SEEN_EVENT_KEY(userId), now())
     return

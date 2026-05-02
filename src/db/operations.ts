@@ -683,14 +683,28 @@ export async function linkProfileToRemote(
     })
   }
 
-  // Mark all item_splits referencing the local contact as unsynced so they are
-  // re-pushed in the immediately following syncRoundTrip. resolveSplitUserIdForPush
-  // will rewrite user_id → remoteProfileId, updating the server so the remote user
-  // can see personal bills and has the correct split attribution in group bills.
+  // PROFILE ID REWRITE — all Dexie fields that store a profile ID must be rewritten
+  // here from localProfileId → remoteProfileId. If you add a new table/field that
+  // stores a user/profile ID, add it to this list.
+  //
+  // Covered:
+  //   group_members.user_id     — immediate rewrite (membership must match server auth.uid)
+  //   item_splits.user_id       — immediate rewrite (pull filter checks ish.user_id = auth.uid)
+  //   bills.paid_by             — immediate rewrite (payer credit in computeGroupBalances)
+  //   settlements.from_user_id  — immediate rewrite (personal settlement RLS check)
+  //   settlements.to_user_id    — immediate rewrite (personal settlement RLS check)
+  //
+  // NOT covered (by design):
+  //   bills.created_by          — always the logged-in actor; local contacts can't create bills
+  //   groups.created_by         — always the logged-in actor; local contacts can't create groups
+  //   activity_log.user_id      — always the logged-in actor; local contacts can't perform actions
+  //   profile_peer_links        — peer links become redundant after hard-link; expandProfileIds handles both
+
   const splits = await db.item_splits.where('user_id').equals(localProfileId).toArray()
   for (const split of splits) {
     if (split.is_deleted) continue
     await db.item_splits.update(split.id, {
+      user_id: remoteProfileId,
       updated_at: timestamp,
       synced_at: null,
     })
