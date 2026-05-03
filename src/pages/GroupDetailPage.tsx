@@ -519,6 +519,7 @@ export function GroupDetailPage() {
   } | null>(null)
   const [deleteGroupConfirmOpen, setDeleteGroupConfirmOpen] = useState(false)
   const [exportOpen, setExportOpen] = useState(false)
+  const [billPayorFilter, setBillPayorFilter] = useState<string | null>(null)
   const [exportMember, setExportMember] = useState<{
     userId: string
     profileName: string
@@ -665,6 +666,13 @@ export function GroupDetailPage() {
       balanceByUser.set(b.userId, b.amount)
     }
   }
+
+  const filteredBills = billPayorFilter && bills
+    ? bills.filter((b) => b.paid_by === billPayorFilter)
+    : (bills ?? [])
+  const billFilterName = billPayorFilter
+    ? (members?.find((m) => m.userId === billPayorFilter)?.profileName ?? 'this person')
+    : null
 
   return (
     <>
@@ -852,6 +860,38 @@ export function GroupDetailPage() {
             </Button>
           </div>
 
+          {!billsLoading && bills && bills.length > 0 && members && members.length > 1 && (
+            <div className="mt-4 flex flex-wrap gap-1.5">
+              <button
+                type="button"
+                onClick={() => setBillPayorFilter(null)}
+                className={cn(
+                  'rounded-full px-3 py-1 text-xs font-medium transition-colors',
+                  billPayorFilter === null
+                    ? 'bg-teal-800 text-white'
+                    : 'bg-stone-100 text-stone-600 hover:bg-stone-200',
+                )}
+              >
+                All
+              </button>
+              {members.map((m) => (
+                <button
+                  key={m.userId}
+                  type="button"
+                  onClick={() => setBillPayorFilter(billPayorFilter === m.userId ? null : m.userId)}
+                  className={cn(
+                    'rounded-full px-3 py-1 text-xs font-medium transition-colors',
+                    billPayorFilter === m.userId
+                      ? 'bg-teal-800 text-white'
+                      : 'bg-stone-100 text-stone-600 hover:bg-stone-200',
+                  )}
+                >
+                  {m.isCurrentUser ? 'You' : m.profileName}
+                </button>
+              ))}
+            </div>
+          )}
+
           {billsLoading ? (
             <div className="mt-4 space-y-2">
               {Array.from({ length: 3 }).map((_, i) => (
@@ -868,9 +908,13 @@ export function GroupDetailPage() {
             <div className="mt-4 flex flex-col items-center py-8 text-center">
               <p className="text-sm text-stone-400">No bills in this group yet</p>
             </div>
+          ) : filteredBills.length === 0 ? (
+            <div className="mt-4 flex flex-col items-center py-8 text-center">
+              <p className="text-sm text-stone-400">No bills paid by {billFilterName}</p>
+            </div>
           ) : (
             <div className="mt-4 space-y-2">
-              {bills.map((bill) => (
+              {filteredBills.map((bill) => (
                 <button
                   key={bill.id}
                   type="button"

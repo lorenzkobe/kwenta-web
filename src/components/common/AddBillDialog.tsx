@@ -104,15 +104,15 @@ export function AddBillDialog({
 
   const simpleSplitsOk =
     groupMembers.length === 0 ||
-    simpleSelectedUserIds.length === 0 ||
-    lineSplitsValid(simpleSplitType, simpleAmountNum, simpleSelectedUserIds, simpleSplitValues)
+    (simpleSelectedUserIds.length > 0 &&
+      lineSplitsValid(simpleSplitType, simpleAmountNum, simpleSelectedUserIds, simpleSplitValues))
 
   const itemizedLinesOk =
     groupMembers.length === 0 ||
     items
       .filter((i) => i.name.trim() && parseFloat(i.amount) > 0)
       .every((item) => {
-        if (item.selectedUserIds.length === 0) return true
+        if (item.selectedUserIds.length === 0) return false
         return lineSplitsValid(
           item.splitType,
           parseFloat(item.amount) || 0,
@@ -811,19 +811,7 @@ export function AddBillDialog({
 
               {mode === 'itemized' && (
                 <div className="space-y-3">
-                  <div className="flex items-center justify-between">
-                    <p className="text-sm font-medium text-stone-600">Items</p>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className="rounded-full"
-                      type="button"
-                      onClick={() => setItems((prev) => [...prev, newItem()])}
-                    >
-                      <Plus className="size-3.5" />
-                      Add item
-                    </Button>
-                  </div>
+                  <p className="text-sm font-medium text-stone-600">Items</p>
 
                   {items.map((item, index) => (
                     <div key={item.key} className="rounded-2xl border border-stone-200 bg-stone-50 p-3">
@@ -966,6 +954,16 @@ export function AddBillDialog({
                       )}
                     </div>
                   ))}
+
+                  <Button
+                    variant="outline"
+                    type="button"
+                    className="h-10 w-full rounded-xl border-dashed border-stone-300"
+                    onClick={() => setItems((prev) => [...prev, newItem()])}
+                  >
+                    <Plus className="size-4" />
+                    Add item
+                  </Button>
 
                   {itemizedTotal > 0 && (
                     <div className="flex items-center justify-between rounded-2xl border border-stone-200 bg-white px-4 py-3">

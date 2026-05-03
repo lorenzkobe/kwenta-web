@@ -212,8 +212,8 @@ export function AddBillPage() {
 
   const simpleSplitsOk =
     members.length === 0 ||
-    effectiveSimpleSelectedUserIds.length === 0 ||
-    lineSplitsValid(simpleSplitType, simpleAmountNum, effectiveSimpleSelectedUserIds, simpleSplitValues)
+    (effectiveSimpleSelectedUserIds.length > 0 &&
+      lineSplitsValid(simpleSplitType, simpleAmountNum, effectiveSimpleSelectedUserIds, simpleSplitValues))
 
   const itemizedLinesOk =
     members.length === 0 ||
@@ -221,7 +221,7 @@ export function AddBillPage() {
       .filter((i) => i.name.trim() && parseFloat(i.amount) > 0)
       .every((item) => {
         const effectiveIds = getEffectiveItemIds(item)
-        if (effectiveIds.length === 0) return true
+        if (effectiveIds.length === 0) return false
         return lineSplitsValid(
           item.splitType,
           parseFloat(item.amount) || 0,

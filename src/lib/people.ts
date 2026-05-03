@@ -109,12 +109,12 @@ async function resolveSharedGroupMemberFallbackIdentity(
   profileId: string,
 ): Promise<SharedGroupFallbackIdentity | null> {
   const memberships = await db.group_members.where('user_id').equals(viewerUserId).toArray()
-  const myGroupIds = new Set(memberships.filter((m) => !m.is_deleted).map((m) => m.group_id))
+  const myGroupIds = new Set(memberships.map((m) => m.group_id))
   if (myGroupIds.size === 0) return null
 
   const candidateMemberships = await db.group_members.where('user_id').equals(profileId).toArray()
-  const shared = candidateMemberships.find((m) => !m.is_deleted && myGroupIds.has(m.group_id))
-  if (!shared || !shared.display_name.trim()) return null
+  const shared = candidateMemberships.find((m) => myGroupIds.has(m.group_id) && m.display_name.trim())
+  if (!shared) return null
 
   const group = await db.groups.get(shared.group_id)
   return {

@@ -118,6 +118,20 @@ export async function computeGroupBalances(
     netBalance.set(s.to_user_id, (netBalance.get(s.to_user_id) ?? 0) - s.amount)
   }
 
+  // Resolve display names for any userId that appeared in splits/settlements
+  // but isn't an active member (e.g. deleted member, stale local contact ID)
+  for (const userId of netBalance.keys()) {
+    if (!profileMap.has(userId)) {
+      const profile = await db.profiles.get(userId)
+      if (profile?.display_name) {
+        profileMap.set(userId, profile.display_name)
+      } else {
+        const member = members.find((m) => m.user_id === userId)
+        if (member?.display_name) profileMap.set(userId, member.display_name)
+      }
+    }
+  }
+
   const balances: BalanceEntry[] = []
   let totalToReceive = 0
   let totalToPay = 0
