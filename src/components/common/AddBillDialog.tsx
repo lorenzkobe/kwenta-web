@@ -137,6 +137,12 @@ export function AddBillDialog({
   simpleAmountStrRef.current = simpleAmount
 
   useEffect(() => {
+    const prev = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    return () => { document.body.style.overflow = prev }
+  }, [])
+
+  useEffect(() => {
     if (!editBillId) return
     let cancelled = false
     setLoadingEdit(true)
@@ -322,6 +328,59 @@ export function AddBillDialog({
       const next = prev.filter((i) => i.key !== key)
       return next.length === 0 ? [newItem()] : next
     })
+  }
+
+  function selectAllSimpleUsers() {
+    const allIds = groupMembers.map((m) => m.userId)
+    setSimpleSelectedUserIds(allIds)
+    const st = simpleSplitTypeRef.current
+    const amt = parseFloat(simpleAmountStrRef.current) || 0
+    if (st === 'equal') {
+      setSimpleSplitMeta({ values: {}, pinned: {} })
+    } else if (st === 'percentage') {
+      setSimpleSplitMeta({ values: equalPercentMap(allIds), pinned: {} })
+    } else if (st === 'custom' && amt > 0) {
+      setSimpleSplitMeta({ values: equalCustomMap(allIds, amt), pinned: {} })
+    } else {
+      setSimpleSplitMeta({ values: {}, pinned: {} })
+    }
+  }
+
+  function deselectAllSimpleUsers() {
+    setSimpleSelectedUserIds([])
+    setSimpleSplitMeta({ values: {}, pinned: {} })
+  }
+
+  function selectAllForItem(itemKey: string) {
+    const allIds = groupMembers.map((m) => m.userId)
+    setItems((prev) =>
+      prev.map((item) => {
+        if (item.key !== itemKey) return item
+        if (item.splitType === 'equal') {
+          return { ...item, selectedUserIds: allIds, splitValues: {}, pinnedSplit: {} }
+        }
+        if (item.splitType === 'percentage') {
+          return { ...item, selectedUserIds: allIds, splitValues: equalPercentMap(allIds), pinnedSplit: {} }
+        }
+        const amt = parseFloat(item.amount) || 0
+        return {
+          ...item,
+          selectedUserIds: allIds,
+          splitValues: amt > 0 ? equalCustomMap(allIds, amt) : {},
+          pinnedSplit: {},
+        }
+      }),
+    )
+  }
+
+  function deselectAllForItem(itemKey: string) {
+    setItems((prev) =>
+      prev.map((item) =>
+        item.key === itemKey
+          ? { ...item, selectedUserIds: [], splitValues: {}, pinnedSplit: {} }
+          : item,
+      ),
+    )
   }
 
   function toggleUserForItem(itemKey: string, uid: string) {
@@ -532,7 +591,7 @@ export function AddBillDialog({
     <div className="fixed inset-0 z-50 flex items-end justify-center sm:items-center">
       <div className="fixed inset-0 bg-black/30 backdrop-blur-sm" onClick={onClose} />
 
-      <div className="relative flex w-full max-w-lg animate-[slideUp_0.25s_ease-out] flex-col rounded-t-3xl border border-stone-200 bg-white shadow-[0_-20px_60px_rgba(28,25,23,0.15)] sm:max-h-[90vh] sm:rounded-3xl">
+      <div className="relative flex w-full max-w-lg animate-[slideUp_0.25s_ease-out] flex-col rounded-t-3xl border border-stone-200 bg-white shadow-[0_-20px_60px_rgba(28,25,23,0.15)] max-h-[85vh] sm:max-h-[90vh] sm:rounded-3xl">
         <div className="flex shrink-0 items-center justify-between border-b border-stone-100 px-5 py-4">
           <div>
             <h2 className="text-base font-semibold">{isEdit ? 'Edit bill' : 'Add bill'}</h2>
@@ -744,9 +803,28 @@ export function AddBillDialog({
                       </div>
 
                       <div className="flex flex-col gap-2">
-                        <div className="flex items-center gap-1.5 text-sm font-medium text-stone-600">
-                          <UserPlus className="size-3.5" />
-                          Split with
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-1.5 text-sm font-medium text-stone-600">
+                            <UserPlus className="size-3.5" />
+                            Split with
+                          </div>
+                          {groupMembers.length > 1 && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const allSelected = groupMembers.every((m) =>
+                                  simpleSelectedUserIds.includes(m.userId),
+                                )
+                                if (allSelected) deselectAllSimpleUsers()
+                                else selectAllSimpleUsers()
+                              }}
+                              className="text-xs font-medium text-teal-700 hover:text-teal-900"
+                            >
+                              {groupMembers.every((m) => simpleSelectedUserIds.includes(m.userId))
+                                ? 'Deselect all'
+                                : 'Select all'}
+                            </button>
+                          )}
                         </div>
                         <div className="flex flex-wrap gap-1.5">
                           {groupMembers.map((m) => {
@@ -887,9 +965,30 @@ export function AddBillDialog({
                       {groupMembers.length > 0 && (
                         <div className="mt-3 border-t border-stone-200 pt-3">
                           <div className="flex items-center justify-between">
-                            <div className="flex items-center gap-1.5 text-xs font-medium text-stone-500">
-                              <UserPlus className="size-3.5" />
-                              Split with
+                            <div className="flex items-center gap-2">
+                              <div className="flex items-center gap-1.5 text-xs font-medium text-stone-500">
+                                <UserPlus className="size-3.5" />
+                                Split with
+                              </div>
+                              {groupMembers.length > 1 && (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    const allSelected = groupMembers.every((m) =>
+                                      item.selectedUserIds.includes(m.userId),
+                                    )
+                                    if (allSelected) deselectAllForItem(item.key)
+                                    else selectAllForItem(item.key)
+                                  }}
+                                  className="text-xs font-medium text-teal-700 hover:text-teal-900"
+                                >
+                                  {groupMembers.every((m) =>
+                                    item.selectedUserIds.includes(m.userId),
+                                  )
+                                    ? 'None'
+                                    : 'All'}
+                                </button>
+                              )}
                             </div>
                             <Select
                               value={item.splitType}

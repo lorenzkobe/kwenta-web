@@ -1261,6 +1261,8 @@ export async function listPairwiseSettlementsBetween(
           amount: s.amount,
         },
       ],
+      recordedByUserId: null,
+      recordedByName: null,
     })
   }
   items.sort((a, b) => b.createdAt.localeCompare(a.createdAt))

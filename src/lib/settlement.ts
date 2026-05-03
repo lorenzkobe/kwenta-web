@@ -278,6 +278,9 @@ export interface SettlementHistoryItem {
   label: string
   createdAt: string
   recipients: BundledSuggestionRecipient[]
+  /** The user who pressed "Pay" — may differ from fromUserId when someone records on behalf of another */
+  recordedByUserId: string | null
+  recordedByName: string | null
 }
 
 type ActiveSettlementRow = Settlement
@@ -314,6 +317,14 @@ async function buildSettlementHistoryItem(
   const billRow = billId ? await db.bills.get(billId) : null
   const label = sortedRows.find((row) => row.label.trim() !== '')?.label ?? primary.label ?? ''
   const isBundled = Boolean(primary.bundle_id) && recipients.length > 1
+  const activityEntityId = primary.bundle_id ?? primary.id
+  const activityEntry = await db.activity_log
+    .where('entity_id').equals(activityEntityId)
+    .filter((a) => !a.is_deleted && a.entity_type === 'settlement' && a.action === 'settled')
+    .first()
+  const recordedByUserId = activityEntry?.user_id ?? null
+  const recordedByProfile = recordedByUserId ? await db.profiles.get(recordedByUserId) : null
+  const recordedByName = recordedByProfile?.display_name ?? null
 
   return {
     id: isBundled ? (primary.bundle_id ?? primary.id) : primary.id,
@@ -333,6 +344,8 @@ async function buildSettlementHistoryItem(
     label,
     createdAt: primary.created_at,
     recipients,
+    recordedByUserId,
+    recordedByName,
   }
 }
 

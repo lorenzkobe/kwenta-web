@@ -83,6 +83,9 @@ export function SettlementHistoryList({
                     dateStyle: 'medium',
                     timeStyle: 'short',
                   })}
+                  {h.recordedByUserId && h.recordedByUserId !== h.fromUserId && h.recordedByName && (
+                    <> · Added by {h.recordedByUserId === currentUserId ? 'you' : h.recordedByName}</>
+                  )}
                 </p>
               </div>
             </div>

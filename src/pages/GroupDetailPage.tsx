@@ -7,6 +7,7 @@ import {
   Loader2,
   MoreVertical,
   Pencil,
+  PieChart,
   Plus,
   ReceiptText,
   Share2,
@@ -440,10 +441,139 @@ function PaymentHistoryDialog({
   )
 }
 
+const SPENDING_COLORS = [
+  '#0d9488', '#f59e0b', '#3b82f6', '#8b5cf6', '#ef4444',
+  '#10b981', '#f97316', '#ec4899', '#06b6d4', '#84cc16',
+]
+
+function SpendingPie({ slices }: { slices: { value: number; color: string }[] }) {
+  const total = slices.reduce((s, x) => s + x.value, 0)
+  if (total === 0) return null
+  const cx = 100, cy = 100, r = 88
+  let angle = -Math.PI / 2
+  return (
+    <svg viewBox="0 0 200 200" className="w-44 h-44">
+      {slices.map((slice, i) => {
+        const sweep = (slice.value / total) * 2 * Math.PI
+        const x1 = cx + r * Math.cos(angle)
+        const y1 = cy + r * Math.sin(angle)
+        angle += sweep
+        const x2 = cx + r * Math.cos(angle)
+        const y2 = cy + r * Math.sin(angle)
+        return (
+          <path
+            key={i}
+            d={`M ${cx} ${cy} L ${x1} ${y1} A ${r} ${r} 0 ${sweep > Math.PI ? 1 : 0} 1 ${x2} ${y2} Z`}
+            fill={slice.color}
+            stroke="white"
+            strokeWidth="1.5"
+          />
+        )
+      })}
+    </svg>
+  )
+}
+
+function TotalSpendingDialog({
+  groupId,
+  currency,
+  members,
+  onClose,
+}: {
+  groupId: string
+  currency: string
+  members: MemberRow[]
+  onClose: () => void
+}) {
+  const [rows, setRows] = useState<{ userId: string; name: string; amount: number; color: string }[]>([])
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    async function compute() {
+      const allBills = await db.bills.where('group_id').equals(groupId).toArray()
+      const activeBills = allBills.filter((b) => !b.is_deleted)
+      const spendingByUser = new Map<string, number>()
+      for (const bill of activeBills) {
+        const allItems = await db.bill_items.where('bill_id').equals(bill.id).toArray()
+        for (const item of allItems.filter((i) => !i.is_deleted)) {
+          const allSplits = await db.item_splits.where('item_id').equals(item.id).toArray()
+          for (const split of allSplits.filter((s) => !s.is_deleted)) {
+            spendingByUser.set(split.user_id, (spendingByUser.get(split.user_id) ?? 0) + split.computed_amount)
+          }
+        }
+      }
+      const nameMap = new Map(members.map((m) => [m.userId, m.profileName]))
+      const sorted = [...spendingByUser.entries()]
+        .map(([userId, amount]) => ({ userId, amount: Math.round(amount * 100) / 100 }))
+        .filter((r) => r.amount > 0)
+        .sort((a, b) => b.amount - a.amount)
+      setRows(sorted.map((r, i) => ({
+        userId: r.userId,
+        name: nameMap.get(r.userId) ?? 'Unknown',
+        amount: r.amount,
+        color: SPENDING_COLORS[i % SPENDING_COLORS.length],
+      })))
+      setLoading(false)
+    }
+    void compute()
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [groupId])
+
+  const total = rows.reduce((s, r) => s + r.amount, 0)
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-end justify-center p-4 sm:items-center">
+      {sheetBackdrop(onClose)}
+      <div className="relative w-full max-w-sm animate-[slideUp_0.25s_ease-out] rounded-3xl border border-stone-200 bg-white p-5 shadow-[0_20px_60px_rgba(28,25,23,0.18)]">
+        <p className="pb-4 text-center text-xs font-medium uppercase tracking-wide text-stone-400">
+          Total Spending
+        </p>
+        {loading ? (
+          <div className="flex justify-center py-8">
+            <Loader2 className="size-5 animate-spin text-teal-800" />
+          </div>
+        ) : rows.length === 0 ? (
+          <p className="py-8 text-center text-sm text-stone-400">No bills yet</p>
+        ) : (
+          <>
+            <div className="flex justify-center pb-4">
+              <SpendingPie slices={rows.map((r) => ({ value: r.amount, color: r.color }))} />
+            </div>
+            <div className="space-y-2">
+              {rows.map((r) => (
+                <div key={r.userId} className="flex items-center gap-3">
+                  <span className="size-3 shrink-0 rounded-full" style={{ backgroundColor: r.color }} />
+                  <span className="flex-1 truncate text-sm font-medium text-stone-800">{r.name}</span>
+                  <span className="text-xs text-stone-500">
+                    {total > 0 ? Math.round((r.amount / total) * 100) : 0}%
+                  </span>
+                  <span className="text-sm font-semibold text-stone-800 tabular-nums">
+                    {formatCurrency(r.amount, currency)}
+                  </span>
+                </div>
+              ))}
+              <div className="mt-3 flex items-center justify-between border-t border-stone-100 pt-3">
+                <span className="text-sm font-semibold text-stone-500">Total</span>
+                <span className="text-sm font-bold text-stone-800 tabular-nums">
+                  {formatCurrency(total, currency)}
+                </span>
+              </div>
+            </div>
+          </>
+        )}
+        <Button variant="ghost" className="mt-4 w-full rounded-xl text-stone-500" onClick={onClose}>
+          Close
+        </Button>
+      </div>
+    </div>
+  )
+}
+
 function GroupOptionsMenu({
   onEdit,
   onMembers,
   onPaymentHistory,
+  onTotalSpending,
   onDelete,
   canManageGroup,
   onClose,
@@ -451,6 +581,7 @@ function GroupOptionsMenu({
   onEdit: () => void
   onMembers: () => void
   onPaymentHistory: () => void
+  onTotalSpending: () => void
   onDelete: () => void
   canManageGroup: boolean
   onClose: () => void
@@ -468,6 +599,10 @@ function GroupOptionsMenu({
         <button type="button" className={itemClass} onClick={onPaymentHistory}>
           <History className="size-4 text-teal-800" />
           Payment history
+        </button>
+        <button type="button" className={itemClass} onClick={onTotalSpending}>
+          <PieChart className="size-4 text-teal-800" />
+          Total spending
         </button>
         <button type="button" className={itemClass} onClick={onMembers}>
           <Users className="size-4 text-teal-800" />
@@ -518,6 +653,7 @@ export function GroupDetailPage() {
     recipients: { toUserId: string; toName: string; amount: number }[]
   } | null>(null)
   const [deleteGroupConfirmOpen, setDeleteGroupConfirmOpen] = useState(false)
+  const [showTotalSpending, setShowTotalSpending] = useState(false)
   const [exportOpen, setExportOpen] = useState(false)
   const [billPayorFilter, setBillPayorFilter] = useState<string | null>(null)
   const [exportMember, setExportMember] = useState<{
@@ -965,6 +1101,10 @@ export function GroupDetailPage() {
             setShowOptionsMenu(false)
             setShowPaymentHistory(true)
           }}
+          onTotalSpending={() => {
+            setShowOptionsMenu(false)
+            setShowTotalSpending(true)
+          }}
           onDelete={openDeleteFromMenu}
           canManageGroup={isGroupCreator}
         />
@@ -1000,6 +1140,15 @@ export function GroupDetailPage() {
           currentUserId={userId}
           onClose={() => setShowPaymentHistory(false)}
           onEdit={(item) => setEditingSettlement(item)}
+        />
+      )}
+
+      {showTotalSpending && groupId && group && (
+        <TotalSpendingDialog
+          groupId={groupId}
+          currency={group.currency}
+          members={members ?? []}
+          onClose={() => setShowTotalSpending(false)}
         />
       )}
 
