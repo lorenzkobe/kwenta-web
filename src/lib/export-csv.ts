@@ -146,7 +146,7 @@ export async function exportGroupToCSV(groupId: string, currentUserId: string): 
   for (const bill of bills) {
     const date = new Date(bill.created_at).toLocaleDateString()
     const catLabel = bill.category ? (CATEGORY_LABELS[bill.category as BillCategory] ?? bill.category) : ''
-    const paidBy = await resolveDisplayName(bill.created_by, groupId)
+    const paidBy = await resolveDisplayName(bill.paid_by, groupId)
     const items = (await db.bill_items.where('bill_id').equals(bill.id).toArray()).filter((i) => !i.is_deleted)
     const shareByUser: Record<string, number> = {}
     for (const item of items) {

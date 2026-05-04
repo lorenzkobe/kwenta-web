@@ -445,7 +445,7 @@ export async function generateGroupPDF(groupId: string, currentUserId: string): 
 
   const billRows: (string | number | null | undefined)[][] = []
   for (const bill of bills) {
-    const paidBy = memberNames[bill.created_by] ?? 'Unknown'
+    const paidBy = memberNames[bill.paid_by] ?? 'Unknown'
     const shareByUser: Record<string, number> = {}
     if (showMemberSplits) {
       const items = (await db.bill_items.where('bill_id').equals(bill.id).toArray()).filter((i) => !i.is_deleted)
