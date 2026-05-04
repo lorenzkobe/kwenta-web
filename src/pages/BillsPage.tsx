@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Plus, ReceiptText, Share2, Trash2, Users } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { useLiveQuery } from 'dexie-react-hooks'
@@ -51,8 +51,13 @@ export function BillsPage() {
   const [filter, setFilter] = useState<BillFilter>('all')
   const [sort, setSort] = useState<BillSort>('date_desc')
   const [filterCategory, setFilterCategory] = useState<string | null>(null)
+  const [tab, setTab] = useState<'mine' | 'shared'>('mine')
   const [deleteTarget, setDeleteTarget] = useState<{ id: string; title: string } | null>(null)
   const [exportOpen, setExportOpen] = useState(false)
+  const [myBillsShown, setMyBillsShown] = useState(10)
+  const [sharedBillsShown, setSharedBillsShown] = useState(10)
+
+  useEffect(() => { setMyBillsShown(10) }, [filter, sort, filterCategory])
 
   const billBuckets = useLiveQuery(async () => {
     if (!userId) return { myBills: [] as EnrichedBill[], sharedBills: [] as EnrichedBill[] }
@@ -168,12 +173,11 @@ export function BillsPage() {
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Personal bills</h1>
           <p className="mt-1 text-sm text-stone-600">
-            {(billBuckets?.myBills.length ?? 0) + sharedBills.length} bill{((billBuckets?.myBills.length ?? 0) + sharedBills.length) !== 1 ? 's' : ''} · Group bills stay in each
-            group
+            {(billBuckets?.myBills.length ?? 0) + sharedBills.length} bill{((billBuckets?.myBills.length ?? 0) + sharedBills.length) !== 1 ? 's' : ''} · Group bills stay in each group
           </p>
         </div>
         <div className="flex items-center gap-2 self-start sm:self-auto">
-          {(billBuckets?.myBills.length ?? 0) > 0 && (
+          {tab === 'mine' && (billBuckets?.myBills.length ?? 0) > 0 && (
             <Button
               variant="outline"
               size="sm"
@@ -193,61 +197,88 @@ export function BillsPage() {
         </div>
       </div>
 
-      {billBuckets && billBuckets.myBills.length > 0 && (
-        <div className="flex flex-col gap-3 rounded-2xl border border-stone-200 bg-white p-3 shadow-sm">
-          <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center">
-            <div className="flex min-w-0 flex-1 flex-col gap-1 sm:max-w-48">
-              <span className="text-xs font-medium text-stone-500">Filter</span>
-              <Select value={filter} onValueChange={(v) => setFilter(v as BillFilter)}>
-                <SelectTrigger className="h-10 rounded-xl">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="all">All</SelectItem>
-                  <SelectItem value="unsettled">Not settled</SelectItem>
-                  <SelectItem value="settled">Settled</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-            <div className="flex min-w-0 flex-1 flex-col gap-1 sm:max-w-56">
-              <span className="text-xs font-medium text-stone-500">Sort</span>
-              <Select value={sort} onValueChange={(v) => setSort(v as BillSort)}>
-                <SelectTrigger className="h-10 rounded-xl">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="date_desc">Date · Newest first</SelectItem>
-                  <SelectItem value="date_asc">Date · Oldest first</SelectItem>
-                  <SelectItem value="title_asc">Name · A → Z</SelectItem>
-                  <SelectItem value="title_desc">Name · Z → A</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-          </div>
-          {presentCategories.length > 0 && (
-            <div className="flex flex-wrap gap-1.5">
-              {presentCategories.map((cat) => {
-                const Icon = CATEGORY_ICONS[cat as BillCategory]
-                const active = filterCategory === cat
-                return (
-                  <button
-                    key={cat}
-                    type="button"
-                    onClick={() => setFilterCategory(active ? null : cat)}
-                    className={cn(
-                      'inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-xs font-medium transition-colors',
-                      active
-                        ? CATEGORY_COLORS[cat as BillCategory]
-                        : 'bg-stone-100 text-stone-600 hover:bg-stone-200',
-                    )}
-                  >
-                    <Icon className="size-3" />
-                    {CATEGORY_LABELS[cat as BillCategory]}
-                  </button>
-                )
-              })}
-            </div>
+      <div className="flex gap-1 rounded-xl bg-stone-100 p-1">
+        <button
+          type="button"
+          onClick={() => { setTab('mine'); setMyBillsShown(10) }}
+          className={cn(
+            'flex flex-1 items-center justify-center gap-1.5 rounded-lg py-2 text-sm font-medium transition-colors',
+            tab === 'mine' ? 'bg-white text-stone-900 shadow-sm' : 'text-stone-500 hover:text-stone-700',
           )}
+        >
+          My bills
+          {(billBuckets?.myBills.length ?? 0) > 0 && (
+            <span className={cn('rounded-full px-1.5 py-0.5 text-xs font-semibold tabular-nums', tab === 'mine' ? 'bg-stone-100 text-stone-600' : 'bg-stone-200 text-stone-500')}>
+              {billBuckets!.myBills.length}
+            </span>
+          )}
+        </button>
+        <button
+          type="button"
+          onClick={() => { setTab('shared'); setSharedBillsShown(10) }}
+          className={cn(
+            'flex flex-1 items-center justify-center gap-1.5 rounded-lg py-2 text-sm font-medium transition-colors',
+            tab === 'shared' ? 'bg-white text-stone-900 shadow-sm' : 'text-stone-500 hover:text-stone-700',
+          )}
+        >
+          Shared with me
+          {sharedBills.length > 0 && (
+            <span className={cn('rounded-full px-1.5 py-0.5 text-xs font-semibold tabular-nums', tab === 'shared' ? 'bg-stone-100 text-stone-600' : 'bg-stone-200 text-stone-500')}>
+              {sharedBills.length}
+            </span>
+          )}
+        </button>
+      </div>
+
+      {tab === 'mine' && billBuckets && billBuckets.myBills.length > 0 && (
+        <div className="flex flex-wrap items-center justify-end gap-2">
+          <div className="flex items-center gap-1.5">
+            <span className="text-xs text-stone-500">Filter</span>
+            <Select value={filter} onValueChange={(v) => setFilter(v as BillFilter)}>
+              <SelectTrigger className="h-8 rounded-full px-3 text-xs">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All</SelectItem>
+                <SelectItem value="unsettled">Not settled</SelectItem>
+                <SelectItem value="settled">Settled</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <span className="text-xs text-stone-500">Sort</span>
+            <Select value={sort} onValueChange={(v) => setSort(v as BillSort)}>
+              <SelectTrigger className="h-8 rounded-full px-3 text-xs">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="date_desc">Date · Newest first</SelectItem>
+                <SelectItem value="date_asc">Date · Oldest first</SelectItem>
+                <SelectItem value="title_asc">Name · A → Z</SelectItem>
+                <SelectItem value="title_desc">Name · Z → A</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+          {presentCategories.map((cat) => {
+            const Icon = CATEGORY_ICONS[cat as BillCategory]
+            const active = filterCategory === cat
+            return (
+              <button
+                key={cat}
+                type="button"
+                onClick={() => setFilterCategory(active ? null : cat)}
+                className={cn(
+                  'inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-xs font-medium transition-colors',
+                  active
+                    ? CATEGORY_COLORS[cat as BillCategory]
+                    : 'bg-stone-100 text-stone-600 hover:bg-stone-200',
+                )}
+              >
+                <Icon className="size-3" />
+                {CATEGORY_LABELS[cat as BillCategory]}
+              </button>
+            )
+          })}
         </div>
       )}
 
@@ -287,152 +318,170 @@ export function BillsPage() {
             </div>
           ))}
         </div>
-      ) : (!billBuckets || (billBuckets.myBills.length === 0 && sharedBills.length === 0)) ? (
-        <div className="rounded-3xl border border-stone-200 bg-white p-5 shadow-sm">
-          <div className="flex flex-col items-center py-12 text-center">
-            <div className="rounded-2xl bg-stone-100 p-4">
-              <ReceiptText className="size-6 text-stone-400" />
+      ) : tab === 'mine' ? (
+        <div className="space-y-3">
+          {(billBuckets?.myBills.length ?? 0) > 0 && bills.length === 0 ? (
+            <div className="rounded-3xl border border-stone-200 bg-white p-5 text-center text-sm text-stone-500 shadow-sm">
+              No bills match this filter.
             </div>
-            <p className="mt-3 text-sm font-medium text-stone-500">No personal bills yet</p>
-            <p className="mt-1 text-xs text-stone-400">
-              Bills you add without a group show up here. Open a group for shared group expenses.
-            </p>
-            <Button asChild size="sm" className="mt-4 h-10 rounded-full">
-              <Link to="/app/bills/new">
-                <Plus className="size-3.5" />
-                Add bill
-              </Link>
-            </Button>
-          </div>
-        </div>
-      ) : (
-        <div className="space-y-5">
-          <div>
-            <div className="mb-2 flex items-center justify-between">
-              <p className="text-sm font-semibold text-stone-700">Bills you created</p>
+          ) : !billBuckets || billBuckets.myBills.length === 0 ? (
+            <div className="rounded-3xl border border-stone-200 bg-white p-5 shadow-sm">
+              <div className="flex flex-col items-center py-12 text-center">
+                <div className="rounded-2xl bg-stone-100 p-4">
+                  <ReceiptText className="size-6 text-stone-400" />
+                </div>
+                <p className="mt-3 text-sm font-medium text-stone-500">No personal bills yet</p>
+                <p className="mt-1 text-xs text-stone-400">
+                  Bills you add without a group show up here.
+                </p>
+                <Button asChild size="sm" className="mt-4 h-10 rounded-full">
+                  <Link to="/app/bills/new">
+                    <Plus className="size-3.5" />
+                    Add bill
+                  </Link>
+                </Button>
+              </div>
             </div>
-            {(billBuckets?.myBills.length ?? 0) > 0 && bills.length === 0 ? (
-              <div className="rounded-3xl border border-stone-200 bg-white p-5 text-center text-sm text-stone-500 shadow-sm">
-                No bills match this filter.
-              </div>
-            ) : billBuckets && billBuckets.myBills.length === 0 ? (
-              <div className="rounded-3xl border border-stone-200 bg-white p-5 text-center text-sm text-stone-500 shadow-sm">
-                You have not created a personal bill yet.
-              </div>
-            ) : (
-              <div className="space-y-3">
-                {bills.map((bill) => (
-                  <div
-                    key={bill.id}
-                    className="rounded-2xl border border-stone-200 bg-white p-4 shadow-sm transition-colors hover:bg-stone-50"
-                  >
-                    <div className="flex items-start justify-between gap-3">
-                      <Link to={`/app/bills/${bill.id}`} className="min-w-0 flex-1">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <p className="font-semibold text-stone-800">{bill.title}</p>
-                          <span
-                            className={cn(
-                              'rounded-full px-2 py-0.5 text-[0.65rem] font-semibold uppercase tracking-wide',
-                              bill.settled
-                                ? 'bg-emerald-500/15 text-emerald-800'
-                                : 'bg-amber-500/15 text-amber-900',
-                            )}
-                          >
-                            {bill.settled ? 'Settled' : 'Open'}
-                          </span>
-                          {bill.category && CATEGORY_LABELS[bill.category as BillCategory] && (
-                            <span
-                              className={cn(
-                                'inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[0.65rem] font-medium',
-                                CATEGORY_COLORS[bill.category as BillCategory],
-                              )}
-                            >
-                              {(() => { const Icon = CATEGORY_ICONS[bill.category as BillCategory]; return <Icon className="size-2.5" /> })()}
-                              {CATEGORY_LABELS[bill.category as BillCategory]}
-                            </span>
+          ) : (
+            <>
+              {bills.slice(0, myBillsShown).map((bill) => (
+                <div
+                  key={bill.id}
+                  className="rounded-2xl border border-stone-200 bg-white p-4 shadow-sm transition-colors hover:bg-stone-50"
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <Link to={`/app/bills/${bill.id}`} className="min-w-0 flex-1">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <p className="font-semibold text-stone-800">{bill.title}</p>
+                        <span
+                          className={cn(
+                            'rounded-full px-2 py-0.5 text-[0.65rem] font-semibold uppercase tracking-wide',
+                            bill.settled
+                              ? 'bg-emerald-500/15 text-emerald-800'
+                              : 'bg-amber-500/15 text-amber-900',
                           )}
-                        </div>
-                        <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-stone-500">
-                          <span>{timeAgo(bill.created_at)}</span>
-                          <span>·</span>
-                          <span>
-                            {bill.itemCount} item{bill.itemCount !== 1 ? 's' : ''}
-                          </span>
-                        </div>
-                        {bill.participantPills.length > 0 && (
-                          <div className="mt-2 flex flex-wrap gap-1.5">
-                            {bill.participantPills.map((p) => (
-                              <span
-                                key={p.id}
-                                className="inline-flex max-w-40 truncate rounded-full border border-teal-800/20 bg-teal-800/8 px-2.5 py-0.5 text-[0.7rem] font-medium text-teal-900"
-                              >
-                                {p.label}
-                              </span>
-                            ))}
-                          </div>
-                        )}
-                      </Link>
-                      <div className="flex items-center gap-2">
-                        <span className="text-sm font-semibold text-stone-800">
-                          {formatCurrency(bill.total_amount, bill.currency)}
-                        </span>
-                        <Button
-                          variant="ghost"
-                          size="icon-xs"
-                          className="rounded-full text-stone-400 hover:text-red-600"
-                          onClick={() => setDeleteTarget({ id: bill.id, title: bill.title })}
                         >
-                          <Trash2 className="size-3.5" />
-                        </Button>
-                      </div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-
-          {sharedBills.length > 0 && (
-            <div>
-              <div className="mb-2 flex items-center justify-between">
-                <p className="text-sm font-semibold text-stone-700">Shared with you</p>
-              </div>
-              <div className="space-y-3">
-                {sharedBills.map((bill) => (
-                  <Link
-                    key={bill.id}
-                    to={`/app/bills/${bill.id}`}
-                    className="block rounded-2xl border border-stone-200 bg-white p-4 shadow-sm transition-colors hover:bg-stone-50"
-                  >
-                    <div className="flex items-start justify-between gap-3">
-                      <div className="min-w-0 flex-1">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <p className="font-semibold text-stone-800">{bill.title}</p>
+                          {bill.settled ? 'Settled' : 'Open'}
+                        </span>
+                        {bill.category && CATEGORY_LABELS[bill.category as BillCategory] && (
                           <span
                             className={cn(
-                              'rounded-full px-2 py-0.5 text-[0.65rem] font-semibold uppercase tracking-wide',
-                              bill.settled
-                                ? 'bg-emerald-500/15 text-emerald-800'
-                                : 'bg-amber-500/15 text-amber-900',
+                              'inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[0.65rem] font-medium',
+                              CATEGORY_COLORS[bill.category as BillCategory],
                             )}
                           >
-                            {bill.settled ? 'Settled' : 'Open'}
+                            {(() => { const Icon = CATEGORY_ICONS[bill.category as BillCategory]; return <Icon className="size-2.5" /> })()}
+                            {CATEGORY_LABELS[bill.category as BillCategory]}
                           </span>
-                        </div>
-                        <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-stone-500">
-                          <span>{timeAgo(bill.created_at)}</span>
-                          <span>·</span>
-                          <span>Paid by {bill.payorName ?? 'Someone'}</span>
-                        </div>
+                        )}
                       </div>
+                      <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-stone-500">
+                        <span>{timeAgo(bill.created_at)}</span>
+                        <span>·</span>
+                        <span>
+                          {bill.itemCount} item{bill.itemCount !== 1 ? 's' : ''}
+                        </span>
+                      </div>
+                      {bill.participantPills.length > 0 && (
+                        <div className="mt-2 flex flex-wrap gap-1.5">
+                          {bill.participantPills.map((p) => (
+                            <span
+                              key={p.id}
+                              className="inline-flex max-w-40 truncate rounded-full border border-teal-800/20 bg-teal-800/8 px-2.5 py-0.5 text-[0.7rem] font-medium text-teal-900"
+                            >
+                              {p.label}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                    </Link>
+                    <div className="flex items-center gap-2">
                       <span className="text-sm font-semibold text-stone-800">
                         {formatCurrency(bill.total_amount, bill.currency)}
                       </span>
+                      <Button
+                        variant="ghost"
+                        size="icon-xs"
+                        className="rounded-full text-stone-400 hover:text-red-600"
+                        onClick={() => setDeleteTarget({ id: bill.id, title: bill.title })}
+                      >
+                        <Trash2 className="size-3.5" />
+                      </Button>
                     </div>
-                  </Link>
-                ))}
+                  </div>
+                </div>
+              ))}
+              {bills.length > myBillsShown && (
+                <button
+                  type="button"
+                  onClick={() => setMyBillsShown((n) => n + 10)}
+                  className="w-full rounded-2xl border border-stone-200 py-3 text-sm font-medium text-stone-500 transition-colors hover:bg-stone-50"
+                >
+                  Show more ({bills.length - myBillsShown} remaining)
+                </button>
+              )}
+            </>
+          )}
+        </div>
+      ) : (
+        <div className="space-y-3">
+          {sharedBills.length === 0 ? (
+            <div className="rounded-3xl border border-stone-200 bg-white p-5 shadow-sm">
+              <div className="flex flex-col items-center py-12 text-center">
+                <div className="rounded-2xl bg-stone-100 p-4">
+                  <ReceiptText className="size-6 text-stone-400" />
+                </div>
+                <p className="mt-3 text-sm font-medium text-stone-500">No bills shared with you</p>
+                <p className="mt-1 text-xs text-stone-400">
+                  When someone splits a personal bill with you, it shows up here.
+                </p>
               </div>
             </div>
+          ) : (
+            <>
+              {sharedBills.slice(0, sharedBillsShown).map((bill) => (
+                <Link
+                  key={bill.id}
+                  to={`/app/bills/${bill.id}`}
+                  className="block rounded-2xl border border-stone-200 bg-white p-4 shadow-sm transition-colors hover:bg-stone-50"
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <p className="font-semibold text-stone-800">{bill.title}</p>
+                        <span
+                          className={cn(
+                            'rounded-full px-2 py-0.5 text-[0.65rem] font-semibold uppercase tracking-wide',
+                            bill.settled
+                              ? 'bg-emerald-500/15 text-emerald-800'
+                              : 'bg-amber-500/15 text-amber-900',
+                          )}
+                        >
+                          {bill.settled ? 'Settled' : 'Open'}
+                        </span>
+                      </div>
+                      <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-stone-500">
+                        <span>{timeAgo(bill.created_at)}</span>
+                        <span>·</span>
+                        <span>Paid by {bill.payorName ?? 'Someone'}</span>
+                      </div>
+                    </div>
+                    <span className="text-sm font-semibold text-stone-800">
+                      {formatCurrency(bill.total_amount, bill.currency)}
+                    </span>
+                  </div>
+                </Link>
+              ))}
+              {sharedBills.length > sharedBillsShown && (
+                <button
+                  type="button"
+                  onClick={() => setSharedBillsShown((n) => n + 10)}
+                  className="w-full rounded-2xl border border-stone-200 py-3 text-sm font-medium text-stone-500 transition-colors hover:bg-stone-50"
+                >
+                  Show more ({sharedBills.length - sharedBillsShown} remaining)
+                </button>
+              )}
+            </>
           )}
         </div>
       )}

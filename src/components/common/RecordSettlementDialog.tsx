@@ -200,16 +200,15 @@ export function RecordSettlementDialog({
             {pickerOn ? (
               <div className="mt-3">
                 <p className="text-xs text-stone-500">
-                  From → to · tap the arrow if payer and recipient should be reversed
+                  Tap the arrow if payer and recipient should be reversed
                 </p>
                 <div className="mt-2 flex items-center gap-2 sm:gap-3">
-                  <span
-                    className="min-w-0 flex-1 truncate text-end text-sm font-semibold text-stone-900"
-                    title={displayFromName}
-                  >
-                    <span className="text-[0.65rem] font-normal text-stone-400">From </span>
-                    {displayFromName}
-                  </span>
+                  <div className="min-w-0 flex-1 text-end">
+                    <p className="text-[0.65rem] font-medium uppercase tracking-wide text-stone-400">From</p>
+                    <p className="truncate text-sm font-semibold text-stone-900" title={displayFromName}>
+                      {displayFromName}
+                    </p>
+                  </div>
                   <Button
                     type="button"
                     variant="outline"
@@ -221,20 +220,25 @@ export function RecordSettlementDialog({
                   >
                     <ArrowRight className="size-4" aria-hidden />
                   </Button>
-                  <span
-                    className="min-w-0 flex-1 truncate text-start text-sm font-semibold text-stone-900"
-                    title={displayToName}
-                  >
-                    <span className="text-[0.65rem] font-normal text-stone-400">To </span>
-                    {displayToName}
-                  </span>
+                  <div className="min-w-0 flex-1">
+                    <p className="text-[0.65rem] font-medium uppercase tracking-wide text-stone-400">To</p>
+                    <p className="truncate text-sm font-semibold text-stone-900" title={displayToName}>
+                      {displayToName}
+                    </p>
+                  </div>
                 </div>
               </div>
             ) : (
-              <div className="mt-2 flex flex-wrap items-center gap-2 text-sm">
-                <span className="font-medium text-stone-800">{displayFromName}</span>
-                <ArrowRight className="size-3.5 text-stone-400" />
-                <span className="font-medium text-stone-800">{displayToName}</span>
+              <div className="mt-2 flex items-center gap-2">
+                <div className="min-w-0 flex-1 text-end">
+                  <p className="text-[0.65rem] font-medium uppercase tracking-wide text-stone-400">From</p>
+                  <p className="truncate text-sm font-semibold text-stone-900" title={displayFromName}>{displayFromName}</p>
+                </div>
+                <ArrowRight className="size-3.5 shrink-0 text-stone-400" />
+                <div className="min-w-0 flex-1">
+                  <p className="text-[0.65rem] font-medium uppercase tracking-wide text-stone-400">To</p>
+                  <p className="truncate text-sm font-semibold text-stone-900" title={displayToName}>{displayToName}</p>
+                </div>
               </div>
             )}
 

@@ -1288,12 +1288,12 @@ export function PersonDetailPage() {
           confirmLabel="Add payment"
           groupId={null}
           currency={record.currency}
-          fromUserId={userId}
-          toUserId={personId}
+          fromUserId={personId}
+          toUserId={userId}
           defaultAmount={0}
           amountEditable
-          fromName={meProfile?.display_name ?? 'You'}
-          toName={resolvedDisplayName}
+          fromName={resolvedDisplayName}
+          toName={meProfile?.display_name ?? 'You'}
           partyPicker={settlementParties}
           markedBy={userId}
           showPaymentModeToggle

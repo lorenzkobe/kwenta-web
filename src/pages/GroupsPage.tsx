@@ -132,11 +132,11 @@ export function GroupsPage() {
       </div>
 
       {groupsWithBalances && groupsWithBalances.length > 0 && (
-        <div className="flex flex-col gap-2 rounded-2xl border border-stone-200 bg-white p-3 shadow-sm sm:flex-row sm:flex-wrap sm:items-center">
-          <div className="flex min-w-0 flex-1 flex-col gap-1 sm:max-w-48">
-            <span className="text-xs font-medium text-stone-500">Filter</span>
+        <div className="flex flex-wrap items-center justify-end gap-2">
+          <div className="flex items-center gap-1.5">
+            <span className="text-xs text-stone-500">Filter</span>
             <Select value={filter} onValueChange={(v) => setFilter(v as GroupFilter)}>
-              <SelectTrigger className="h-10 rounded-xl">
+              <SelectTrigger className="h-8 rounded-full px-3 text-xs">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -146,10 +146,10 @@ export function GroupsPage() {
               </SelectContent>
             </Select>
           </div>
-          <div className="flex min-w-0 flex-1 flex-col gap-1 sm:max-w-56">
-            <span className="text-xs font-medium text-stone-500">Sort</span>
+          <div className="flex items-center gap-1.5">
+            <span className="text-xs text-stone-500">Sort</span>
             <Select value={sort} onValueChange={(v) => setSort(v as GroupSort)}>
-              <SelectTrigger className="h-10 rounded-xl">
+              <SelectTrigger className="h-8 rounded-full px-3 text-xs">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>

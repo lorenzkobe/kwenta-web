@@ -656,6 +656,7 @@ export function GroupDetailPage() {
   const [showTotalSpending, setShowTotalSpending] = useState(false)
   const [exportOpen, setExportOpen] = useState(false)
   const [billPayorFilter, setBillPayorFilter] = useState<string | null>(null)
+  const [billsShown, setBillsShown] = useState(10)
   const [exportMember, setExportMember] = useState<{
     userId: string
     profileName: string
@@ -857,9 +858,6 @@ export function GroupDetailPage() {
             <Users className="size-4 text-teal-800" />
             <h2 className="text-lg font-semibold">Members</h2>
           </div>
-          <p className="mt-1 text-xs text-stone-500">
-            Net in this group: positive = should receive, negative = should pay, 0 = even.
-          </p>
 
           <ul className="mt-4 space-y-2">
             {membersLoading &&
@@ -1000,7 +998,7 @@ export function GroupDetailPage() {
             <div className="mt-4 flex flex-wrap gap-1.5">
               <button
                 type="button"
-                onClick={() => setBillPayorFilter(null)}
+                onClick={() => { setBillPayorFilter(null); setBillsShown(10) }}
                 className={cn(
                   'rounded-full px-3 py-1 text-xs font-medium transition-colors',
                   billPayorFilter === null
@@ -1014,7 +1012,7 @@ export function GroupDetailPage() {
                 <button
                   key={m.userId}
                   type="button"
-                  onClick={() => setBillPayorFilter(billPayorFilter === m.userId ? null : m.userId)}
+                  onClick={() => { setBillPayorFilter(billPayorFilter === m.userId ? null : m.userId); setBillsShown(10) }}
                   className={cn(
                     'rounded-full px-3 py-1 text-xs font-medium transition-colors',
                     billPayorFilter === m.userId
@@ -1050,7 +1048,7 @@ export function GroupDetailPage() {
             </div>
           ) : (
             <div className="mt-4 space-y-2">
-              {filteredBills.map((bill) => (
+              {filteredBills.slice(0, billsShown).map((bill) => (
                 <button
                   key={bill.id}
                   type="button"
@@ -1081,6 +1079,15 @@ export function GroupDetailPage() {
                   </span>
                 </button>
               ))}
+              {filteredBills.length > billsShown && (
+                <button
+                  type="button"
+                  onClick={() => setBillsShown((n) => n + 10)}
+                  className="w-full rounded-xl border border-stone-200 py-2.5 text-sm font-medium text-stone-500 transition-colors hover:bg-stone-50"
+                >
+                  Show more ({filteredBills.length - billsShown} remaining)
+                </button>
+              )}
             </div>
           )}
         </div>
