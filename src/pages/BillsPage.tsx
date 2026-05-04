@@ -197,18 +197,18 @@ export function BillsPage() {
         </div>
       </div>
 
-      <div className="flex gap-1 rounded-xl bg-stone-100 p-1">
+      <div className="flex gap-1 rounded-xl bg-stone-200/70 p-1">
         <button
           type="button"
           onClick={() => { setTab('mine'); setMyBillsShown(10) }}
           className={cn(
-            'flex flex-1 items-center justify-center gap-1.5 rounded-lg py-2 text-sm font-medium transition-colors',
-            tab === 'mine' ? 'bg-white text-stone-900 shadow-sm' : 'text-stone-500 hover:text-stone-700',
+            'flex flex-1 items-center justify-center gap-1.5 rounded-lg py-2 text-sm font-medium transition-all',
+            tab === 'mine' ? 'bg-white text-stone-900 shadow-sm' : 'text-stone-500 hover:bg-white/50 hover:text-stone-700',
           )}
         >
           My bills
           {(billBuckets?.myBills.length ?? 0) > 0 && (
-            <span className={cn('rounded-full px-1.5 py-0.5 text-xs font-semibold tabular-nums', tab === 'mine' ? 'bg-stone-100 text-stone-600' : 'bg-stone-200 text-stone-500')}>
+            <span className={cn('rounded-full px-1.5 py-0.5 text-xs font-semibold tabular-nums', tab === 'mine' ? 'bg-stone-100 text-stone-600' : 'bg-stone-300/70 text-stone-600')}>
               {billBuckets!.myBills.length}
             </span>
           )}
@@ -217,13 +217,13 @@ export function BillsPage() {
           type="button"
           onClick={() => { setTab('shared'); setSharedBillsShown(10) }}
           className={cn(
-            'flex flex-1 items-center justify-center gap-1.5 rounded-lg py-2 text-sm font-medium transition-colors',
-            tab === 'shared' ? 'bg-white text-stone-900 shadow-sm' : 'text-stone-500 hover:text-stone-700',
+            'flex flex-1 items-center justify-center gap-1.5 rounded-lg py-2 text-sm font-medium transition-all',
+            tab === 'shared' ? 'bg-white text-stone-900 shadow-sm' : 'text-stone-500 hover:bg-white/50 hover:text-stone-700',
           )}
         >
           Shared with me
           {sharedBills.length > 0 && (
-            <span className={cn('rounded-full px-1.5 py-0.5 text-xs font-semibold tabular-nums', tab === 'shared' ? 'bg-stone-100 text-stone-600' : 'bg-stone-200 text-stone-500')}>
+            <span className={cn('rounded-full px-1.5 py-0.5 text-xs font-semibold tabular-nums', tab === 'shared' ? 'bg-stone-100 text-stone-600' : 'bg-stone-300/70 text-stone-600')}>
               {sharedBills.length}
             </span>
           )}
