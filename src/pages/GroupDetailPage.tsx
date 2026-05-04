@@ -997,37 +997,42 @@ export function GroupDetailPage() {
             </Button>
           </div>
 
-          {!billsLoading && bills && bills.length > 0 && members && members.length > 1 && (
-            <div className="mt-4 flex flex-wrap gap-1.5">
-              <button
-                type="button"
-                onClick={() => { setBillPayorFilter(null); setBillsShown(10) }}
-                className={cn(
-                  'rounded-full px-3 py-1 text-xs font-medium transition-colors',
-                  billPayorFilter === null
-                    ? 'bg-teal-800 text-white'
-                    : 'bg-stone-100 text-stone-600 hover:bg-stone-200',
-                )}
-              >
-                All
-              </button>
-              {members.map((m) => (
+          {!billsLoading && bills && bills.length > 0 && members && members.length > 1 && (() => {
+            const payorIds = new Set(bills.map((b) => b.paid_by))
+            const payorMembers = members.filter((m) => payorIds.has(m.userId))
+            if (payorMembers.length <= 1) return null
+            return (
+              <div className="mt-4 flex flex-wrap gap-1.5">
                 <button
-                  key={m.userId}
                   type="button"
-                  onClick={() => { setBillPayorFilter(billPayorFilter === m.userId ? null : m.userId); setBillsShown(10) }}
+                  onClick={() => { setBillPayorFilter(null); setBillsShown(10) }}
                   className={cn(
                     'rounded-full px-3 py-1 text-xs font-medium transition-colors',
-                    billPayorFilter === m.userId
+                    billPayorFilter === null
                       ? 'bg-teal-800 text-white'
                       : 'bg-stone-100 text-stone-600 hover:bg-stone-200',
                   )}
                 >
-                  {m.isCurrentUser ? 'You' : m.profileName}
+                  All
                 </button>
-              ))}
-            </div>
-          )}
+                {payorMembers.map((m) => (
+                  <button
+                    key={m.userId}
+                    type="button"
+                    onClick={() => { setBillPayorFilter(billPayorFilter === m.userId ? null : m.userId); setBillsShown(10) }}
+                    className={cn(
+                      'rounded-full px-3 py-1 text-xs font-medium transition-colors',
+                      billPayorFilter === m.userId
+                        ? 'bg-teal-800 text-white'
+                        : 'bg-stone-100 text-stone-600 hover:bg-stone-200',
+                    )}
+                  >
+                    {m.isCurrentUser ? 'You' : m.profileName}
+                  </button>
+                ))}
+              </div>
+            )
+          })()}
 
           {billsLoading ? (
             <div className="mt-4 space-y-2">
