@@ -20,6 +20,7 @@ export type AuthContextValue = {
   signUp: (
     email: string,
     password: string,
+    nickname: string,
   ) => Promise<{ error: Error | null; requiresEmailConfirmation: boolean }>
   resetPassword: (email: string) => Promise<{ error: Error | null }>
   updateDisplayName: (displayName: string) => Promise<void>

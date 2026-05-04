@@ -6,6 +6,7 @@ import {
   CircleAlert,
   Check,
   Copy,
+  Loader2,
   LogOut,
   Pencil,
   RefreshCcw,
@@ -56,6 +57,7 @@ export function SettingsPage() {
 
   const [editing, setEditing] = useState(false)
   const [displayName, setDisplayName] = useState('')
+  const [savingName, setSavingName] = useState(false)
 
   const [signOutOpen, setSignOutOpen] = useState(false)
   const [signOutHasUnsynced, setSignOutHasUnsynced] = useState<boolean | null>(null)
@@ -71,9 +73,14 @@ export function SettingsPage() {
   }
 
   async function saveName() {
-    if (!displayName.trim()) return
-    await updateDisplayName(displayName.trim())
-    setEditing(false)
+    if (!displayName.trim() || savingName) return
+    setSavingName(true)
+    try {
+      await updateDisplayName(displayName.trim())
+      setEditing(false)
+    } finally {
+      setSavingName(false)
+    }
   }
 
   async function openSignOutDialog() {
@@ -175,32 +182,52 @@ export function SettingsPage() {
             </div>
             <div className="min-w-0 flex-1">
               {editing ? (
-                <div className="flex items-center gap-2">
-                  <Input
-                    type="text"
-                    className="flex-1 rounded-lg"
-                    value={displayName}
-                    onChange={(e) => setDisplayName(e.target.value)}
-                    onKeyDown={(e) => e.key === 'Enter' && saveName()}
-                    autoFocus
-                  />
-                  <Button size="icon-sm" className="rounded-full" onClick={saveName}>
-                    <Check className="size-3.5" />
-                  </Button>
+                <div className="flex flex-col gap-1.5">
+                  <label className="text-xs font-medium text-stone-500">Nickname</label>
+                  <div className="flex items-center gap-2">
+                    <Input
+                      type="text"
+                      className="flex-1 rounded-lg"
+                      value={displayName}
+                      onChange={(e) => setDisplayName(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') saveName()
+                        if (e.key === 'Escape' && !savingName) setEditing(false)
+                      }}
+                      autoFocus
+                      maxLength={50}
+                      disabled={savingName}
+                    />
+                    {savingName ? (
+                      <Loader2 className="size-4 shrink-0 animate-spin text-stone-400" />
+                    ) : (
+                      <>
+                        <Button size="icon-sm" variant="ghost" className="rounded-full" onClick={() => setEditing(false)}>
+                          <X className="size-3.5" />
+                        </Button>
+                        <Button size="icon-sm" className="rounded-full" onClick={saveName} disabled={!displayName.trim()}>
+                          <Check className="size-3.5" />
+                        </Button>
+                      </>
+                    )}
+                  </div>
                 </div>
               ) : (
-                <div className="flex items-center gap-2">
-                  <p className="font-semibold text-stone-800">
-                    {profile?.display_name ?? 'Guest'}
-                  </p>
-                  <Button
-                    variant="ghost"
-                    size="icon-xs"
-                    className="rounded-full"
-                    onClick={startEditing}
-                  >
-                    <Pencil className="size-3" />
-                  </Button>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <p className="font-semibold text-stone-800">
+                      {profile?.display_name ?? 'Guest'}
+                    </p>
+                    <Button
+                      variant="ghost"
+                      size="icon-xs"
+                      className="rounded-full"
+                      onClick={startEditing}
+                    >
+                      <Pencil className="size-3" />
+                    </Button>
+                  </div>
+                  <p className="text-xs text-stone-400">Nickname</p>
                 </div>
               )}
               <p className="mt-0.5 text-sm text-stone-500">{user?.email ?? 'Not signed in'}</p>

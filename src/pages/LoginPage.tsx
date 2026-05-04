@@ -19,6 +19,7 @@ export function LoginPage() {
   const [sessionExpiredNotice, setSessionExpiredNotice] = useState(false)
   const [inactiveAccountNotice, setInactiveAccountNotice] = useState(false)
   const [email, setEmail] = useState('')
+  const [nickname, setNickname] = useState('')
   const [password, setPassword] = useState('')
   const [showPassword, setShowPassword] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -89,7 +90,7 @@ export function LoginPage() {
           setError(error.message)
         }
       } else if (mode === 'signup') {
-        const { error, requiresEmailConfirmation } = await signUp(email, password)
+        const { error, requiresEmailConfirmation } = await signUp(email, password, nickname)
         if (error) {
           setError(error.message)
         } else {
@@ -116,6 +117,7 @@ export function LoginPage() {
 
   function switchMode(newMode: Mode) {
     setMode(newMode)
+    setNickname('')
     setError(null)
     setSuccess(null)
   }
@@ -181,6 +183,23 @@ export function LoginPage() {
                 required
               />
             </div>
+
+            {mode === 'signup' && (
+              <div className="flex w-full flex-col gap-2">
+                <label className="text-sm font-medium text-stone-800" htmlFor="nickname">
+                  Nickname
+                </label>
+                <Input
+                  id="nickname"
+                  type="text"
+                  placeholder="How should we call you?"
+                  value={nickname}
+                  onChange={(e) => setNickname(e.target.value)}
+                  required
+                  maxLength={50}
+                />
+              </div>
+            )}
 
             {mode !== 'forgot' && (
               <div className="flex w-full flex-col gap-2">

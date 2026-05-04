@@ -29,16 +29,21 @@ import { AuthContext } from '@/hooks/auth-context'
  *
  * When `prefetched` is the row from `profiles` (e.g. account gate `select('*')`), skips a redundant fetch.
  */
-async function ensureProfile(userId: string, email: string, prefetched?: Profile | null) {
+async function ensureProfile(userId: string, email: string, prefetched?: Profile | null, displayNameFallback?: string) {
   const cacheKey = `${userId}:${email}`
   if (ensureProfileInFlight.has(cacheKey)) {
     await ensureProfileInFlight.get(cacheKey)
     return
   }
 
+  const nickname = displayNameFallback ?? pendingSignupNickname.get(userId)
+
   const task = (async () => {
     const existing = await db.profiles.get(userId)
-    if (existing) return
+    if (existing) {
+      pendingSignupNickname.delete(userId)
+      return
+    }
 
     if (prefetched) {
       await db.profiles.put({
@@ -66,11 +71,12 @@ async function ensureProfile(userId: string, email: string, prefetched?: Profile
       return
     }
 
+    pendingSignupNickname.delete(userId)
     const timestamp = now()
     await db.profiles.put({
       id: userId,
       email,
-      display_name: email.split('@')[0] || 'User',
+      display_name: nickname || email.split('@')[0] || 'User',
       avatar_url: null,
       user_type: 'user',
       account_status: 'active',
@@ -95,6 +101,7 @@ async function ensureProfile(userId: string, email: string, prefetched?: Profile
 }
 
 const ensureProfileInFlight = new Map<string, Promise<void>>()
+const pendingSignupNickname = new Map<string, string>()
 
 /**
  * Single source of truth for session + profile bootstrap. Must wrap any tree that calls `useAuth`.
@@ -232,13 +239,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return { error: null }
   }, [])
 
-  const signUp = useCallback(async (email: string, password: string) => {
+  const signUp = useCallback(async (email: string, password: string, nickname: string) => {
     const { data, error } = await supabase.auth.signUp({
       email,
       password,
       options: {
         // Must match an entry under Supabase → Authentication → URL Configuration → Redirect URLs
         emailRedirectTo: authRedirectUrl('/login'),
+        data: { display_name: nickname.trim() },
       },
     })
     if (error) {
@@ -246,6 +254,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
 
     const requiresEmailConfirmation = !data.session
+
+    if (data.user) {
+      pendingSignupNickname.set(data.user.id, nickname.trim())
+    }
 
     // When a session is returned immediately, account gate + Dexie seed run in applySession.
 
