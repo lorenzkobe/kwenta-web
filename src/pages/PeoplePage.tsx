@@ -13,6 +13,7 @@ import { useCurrentUser } from '@/hooks/useCurrentUser'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 
 export function PeoplePage() {
   const { userId } = useCurrentUser()
@@ -20,6 +21,7 @@ export function PeoplePage() {
   const [newName, setNewName] = useState('')
   const [adding, setAdding] = useState(false)
   const [duplicateNotice, setDuplicateNotice] = useState<string | null>(null)
+  const [balanceFilter, setBalanceFilter] = useState<'with_balance' | 'all'>('with_balance')
 
   const rows = useLiveQuery(async () => {
     if (!userId) return []
@@ -87,6 +89,9 @@ export function PeoplePage() {
   }
 
   const rowsLoading = rows === undefined
+  const filteredRows = balanceFilter === 'with_balance'
+    ? rows?.filter((r) => r.tone !== 'balanced')
+    : rows
 
   return (
     <div className="space-y-5">
@@ -149,6 +154,21 @@ export function PeoplePage() {
         </div>
       )}
 
+      {!rowsLoading && (rows?.length ?? 0) > 0 && (
+        <div className="flex items-center justify-end gap-1.5">
+          <span className="text-xs text-stone-500">Filter</span>
+          <Select value={balanceFilter} onValueChange={(v) => setBalanceFilter(v as typeof balanceFilter)}>
+            <SelectTrigger className="h-8 w-auto rounded-full px-3 text-xs">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="with_balance">With balance</SelectItem>
+              <SelectItem value="all">All</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+      )}
+
       {rowsLoading && !showAdd ? (
         <div className="space-y-2">
           {Array.from({ length: 4 }).map((_, i) => (
@@ -181,7 +201,10 @@ export function PeoplePage() {
         </div>
       ) : (
         <div className="space-y-2">
-          {rows?.map((r) => (
+          {(filteredRows?.length ?? 0) === 0 && balanceFilter === 'with_balance' && (
+            <p className="py-6 text-center text-sm text-stone-400">No outstanding balances</p>
+          )}
+          {filteredRows?.map((r) => (
             <Link
               key={r.id}
               to={`/app/people/${r.id}`}
