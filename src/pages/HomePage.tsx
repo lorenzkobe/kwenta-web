@@ -50,22 +50,27 @@ function BreakdownLines({
   label,
   m,
   colorClass,
+  labelClass,
 }: {
   label: string
   m: Map<string, number>
   colorClass: string
+  labelClass?: string
 }) {
   const lines = [...m.entries()].filter(([, v]) => v > EPS)
+  const resolvedLabel = labelClass
+    ? <span className={`font-medium ${labelClass}`}>{label}</span>
+    : <span className="font-medium">{label}</span>
   if (lines.length === 0) {
     return (
-      <p className="text-stone-500">
-        <span className="font-medium text-stone-600">{label}</span> {formatCurrency(0)}
+      <p>
+        {resolvedLabel} {formatCurrency(0)}
       </p>
     )
   }
   return (
-    <div className="text-stone-600">
-      <span className="font-medium text-stone-700">{label}</span>{' '}
+    <div>
+      {resolvedLabel}{' '}
       <span className={colorClass}>
         {lines.map(([cur, v], i) => (
           <span key={cur}>
@@ -90,30 +95,6 @@ export function HomePage() {
     overallPay,
   } = useOverallBalanceRollups(userId ?? undefined)
 
-  const stats = useLiveQuery(async () => {
-    if (!userId) return { billCount: 0, totalSpent: 0, groupCount: 0 }
-    const mySplits = await db.item_splits.where('user_id').equals(userId).toArray()
-    const activeSplits = mySplits.filter((s) => !s.is_deleted)
-    const myItemIds = [...new Set(activeSplits.map((s) => s.item_id))]
-    const myItems = myItemIds.length > 0
-      ? await db.bill_items.where('id').anyOf(myItemIds).toArray()
-      : []
-    const activeItemBillIds = new Set(myItems.filter((i) => !i.is_deleted).map((i) => i.bill_id))
-    const myBills = activeItemBillIds.size > 0
-      ? await db.bills.where('id').anyOf([...activeItemBillIds]).toArray()
-      : []
-    const activeBillIds = new Set(myBills.filter((b) => !b.is_deleted).map((b) => b.id))
-    const totalSpent = activeSplits
-      .filter((s) => {
-        const item = myItems.find((i) => i.id === s.item_id)
-        return item && !item.is_deleted && activeBillIds.has(item.bill_id)
-      })
-      .reduce((sum, s) => sum + s.computed_amount, 0)
-    const memberships = await db.group_members.where('user_id').equals(userId).toArray()
-    const activeGroups = memberships.filter((m) => !m.is_deleted)
-    return { billCount: activeBillIds.size, totalSpent, groupCount: activeGroups.length }
-  }, [userId])
-
   const recentBills = useLiveQuery(async () => {
     if (!userId) return []
     const bills = await db.bills.where('paid_by').equals(userId).toArray()
@@ -134,7 +115,6 @@ export function HomePage() {
     }))
   }, [userId])
 
-  const statsLoading = stats === undefined
   const recentBillsLoading = recentBills === undefined
 
   function greeting() {
@@ -166,61 +146,29 @@ export function HomePage() {
           {profile?.display_name && profile.display_name !== 'You' ? `, ${profile.display_name}` : ''}
         </h2>
         <p className="mt-2 max-w-xl text-sm leading-7 text-white/80">
-          Your overview of bills, groups, and expenses.
+          Your balances across groups and personal bills.
         </p>
 
-        <div className="mt-6 grid gap-3 sm:grid-cols-3">
-          <div className="rounded-2xl border border-white/10 bg-white/10 p-4">
-            <p className="text-xs font-medium text-white/65">Total bills</p>
-            {statsLoading ? (
-              <div className="mt-2 h-8 w-16 animate-pulse rounded bg-white/25" />
-            ) : (
-              <p className="mt-1 text-2xl font-semibold">{stats?.billCount ?? 0}</p>
-            )}
-          </div>
-          <div className="rounded-2xl border border-white/10 bg-white/10 p-4">
-            <p className="text-xs font-medium text-white/65">Total spent</p>
-            {statsLoading ? (
-              <div className="mt-2 h-8 w-24 animate-pulse rounded bg-white/25" />
-            ) : (
-              <p className="mt-1 text-2xl font-semibold">{formatCurrency(stats?.totalSpent ?? 0)}</p>
-            )}
-          </div>
-          <div className="rounded-2xl border border-white/10 bg-white/10 p-4">
-            <p className="text-xs font-medium text-white/65">Active groups</p>
-            {statsLoading ? (
-              <div className="mt-2 h-8 w-16 animate-pulse rounded bg-white/25" />
-            ) : (
-              <p className="mt-1 text-2xl font-semibold">{stats?.groupCount ?? 0}</p>
-            )}
-          </div>
-        </div>
-      </section>
-
-      <section className="rounded-3xl border border-stone-200 bg-white p-5 shadow-sm">
-        <h3 className="text-base font-semibold">Balances</h3>
-        <p className="mt-1 text-sm text-stone-600">What you should receive and pay across groups and personal bills.</p>
-
         {balancesLoading ? (
-          <div className="mt-4 flex justify-center py-8">
-            <Loader2 className="size-6 animate-spin text-teal-800" aria-label="Loading balances" />
+          <div className="mt-6 flex justify-center py-8">
+            <Loader2 className="size-6 animate-spin text-white/60" aria-label="Loading balances" />
           </div>
         ) : (
-          <div className="mt-4 grid gap-3 sm:grid-cols-2">
-            <div className="rounded-2xl border border-emerald-500/20 bg-emerald-500/8 p-4">
-              <p className="text-xs font-medium text-emerald-600/70">To receive</p>
-              <OverallAmountLines lines={receiveLines} className="text-emerald-600" />
-              <div className="mt-3 space-y-1.5 border-t border-emerald-500/15 pt-3 text-xs">
-                <BreakdownLines label="Personal" m={personalReceive} colorClass="font-semibold text-emerald-600" />
-                <BreakdownLines label="Group" m={groupReceive} colorClass="font-semibold text-emerald-600" />
+          <div className="mt-6 grid gap-3 sm:grid-cols-2">
+            <div className="rounded-2xl border border-emerald-400/20 bg-emerald-400/10 p-4">
+              <p className="text-xs font-medium text-emerald-300/80">To receive</p>
+              <OverallAmountLines lines={receiveLines} className="text-emerald-300" />
+              <div className="mt-3 space-y-1.5 border-t border-emerald-400/15 pt-3 text-xs text-white/60">
+                <BreakdownLines label="Personal" m={personalReceive} colorClass="font-semibold text-emerald-300" />
+                <BreakdownLines label="Group" m={groupReceive} colorClass="font-semibold text-emerald-300" />
               </div>
             </div>
-            <div className="rounded-2xl border border-amber-500/20 bg-amber-500/8 p-4">
-              <p className="text-xs font-medium text-amber-600/70">To pay</p>
-              <OverallAmountLines lines={payLines} className="text-amber-600" />
-              <div className="mt-3 space-y-1.5 border-t border-amber-500/15 pt-3 text-xs">
-                <BreakdownLines label="Personal" m={personalPay} colorClass="font-semibold text-amber-600" />
-                <BreakdownLines label="Group" m={groupPay} colorClass="font-semibold text-amber-600" />
+            <div className="rounded-2xl border border-amber-400/20 bg-amber-400/10 p-4">
+              <p className="text-xs font-medium text-amber-300/80">To pay</p>
+              <OverallAmountLines lines={payLines} className="text-amber-300" />
+              <div className="mt-3 space-y-1.5 border-t border-amber-400/15 pt-3 text-xs text-white/60">
+                <BreakdownLines label="Personal" m={personalPay} colorClass="font-semibold text-amber-300" />
+                <BreakdownLines label="Group" m={groupPay} colorClass="font-semibold text-amber-300" />
               </div>
             </div>
           </div>

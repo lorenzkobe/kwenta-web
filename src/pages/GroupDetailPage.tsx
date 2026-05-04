@@ -446,30 +446,33 @@ const SPENDING_COLORS = [
   '#10b981', '#f97316', '#ec4899', '#06b6d4', '#84cc16',
 ]
 
+function buildPiePaths(slices: { value: number; color: string }[], total: number) {
+  const cx = 100, cy = 100, r = 88
+  const { paths } = slices.reduce<{ paths: { i: number; d: string; color: string }[]; angle: number }>(
+    ({ paths, angle }, slice, i) => {
+      const sweep = (slice.value / total) * 2 * Math.PI
+      const x1 = cx + r * Math.cos(angle)
+      const y1 = cy + r * Math.sin(angle)
+      const nextAngle = angle + sweep
+      const x2 = cx + r * Math.cos(nextAngle)
+      const y2 = cy + r * Math.sin(nextAngle)
+      const d = `M ${cx} ${cy} L ${x1} ${y1} A ${r} ${r} 0 ${sweep > Math.PI ? 1 : 0} 1 ${x2} ${y2} Z`
+      return { paths: [...paths, { i, d, color: slice.color }], angle: nextAngle }
+    },
+    { paths: [], angle: -Math.PI / 2 }
+  )
+  return paths
+}
+
 function SpendingPie({ slices }: { slices: { value: number; color: string }[] }) {
   const total = slices.reduce((s, x) => s + x.value, 0)
   if (total === 0) return null
-  const cx = 100, cy = 100, r = 88
-  let angle = -Math.PI / 2
+  const paths = buildPiePaths(slices, total)
   return (
     <svg viewBox="0 0 200 200" className="w-44 h-44">
-      {slices.map((slice, i) => {
-        const sweep = (slice.value / total) * 2 * Math.PI
-        const x1 = cx + r * Math.cos(angle)
-        const y1 = cy + r * Math.sin(angle)
-        angle += sweep
-        const x2 = cx + r * Math.cos(angle)
-        const y2 = cy + r * Math.sin(angle)
-        return (
-          <path
-            key={i}
-            d={`M ${cx} ${cy} L ${x1} ${y1} A ${r} ${r} 0 ${sweep > Math.PI ? 1 : 0} 1 ${x2} ${y2} Z`}
-            fill={slice.color}
-            stroke="white"
-            strokeWidth="1.5"
-          />
-        )
-      })}
+      {paths.map(({ i, d, color }) => (
+        <path key={i} d={d} fill={color} stroke="white" strokeWidth="1.5" />
+      ))}
     </svg>
   )
 }
@@ -859,7 +862,7 @@ export function GroupDetailPage() {
             <h2 className="text-lg font-semibold">Members</h2>
           </div>
 
-          <ul className="mt-4 space-y-2">
+          <ul className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-2">
             {membersLoading &&
               Array.from({ length: 4 }).map((_, i) => (
                 <li
@@ -1180,6 +1183,7 @@ export function GroupDetailPage() {
           fromUserId={recordSettlement.fromUserId}
           toUserId={recordSettlement.recipients[0]?.toUserId ?? recordSettlement.fromUserId}
           defaultAmount={recordSettlement.totalAmount}
+          amountEditable
           fromName={recordSettlement.fromName}
           toName={
             recordSettlement.recipients.length === 1
@@ -1190,7 +1194,7 @@ export function GroupDetailPage() {
           helperLines={recordSettlement.recipients.map(
             (recipient) => `${recipient.toName}: ${formatCurrency(recipient.amount, group.currency)}`,
           )}
-          onSubmit={async ({ label }) => {
+          onSubmit={async ({ amount, label }) => {
             if (recordSettlement.recipients.length <= 1) {
               const recipient = recordSettlement.recipients[0]
               if (!recipient) return
@@ -1198,7 +1202,7 @@ export function GroupDetailPage() {
                 groupId,
                 recordSettlement.fromUserId,
                 recipient.toUserId,
-                recipient.amount,
+                amount,
                 group.currency,
                 userId,
                 label,
@@ -1206,10 +1210,16 @@ export function GroupDetailPage() {
               )
               return
             }
+            const scale = amount / recordSettlement.totalAmount
+            const scaled = recordSettlement.recipients.map((r) =>
+              Math.round(r.amount * scale * 100) / 100,
+            )
+            const drift = Math.round((amount - scaled.reduce((a, b) => a + b, 0)) * 100) / 100
+            if (drift !== 0) scaled[scaled.length - 1] = Math.round((scaled[scaled.length - 1] + drift) * 100) / 100
             await createBundledGroupSettlement({
               groupId,
               fromUserId: recordSettlement.fromUserId,
-              recipients: recordSettlement.recipients,
+              recipients: recordSettlement.recipients.map((r, i) => ({ ...r, amount: scaled[i] })),
               currency: group.currency,
               markedBy: userId,
               label,

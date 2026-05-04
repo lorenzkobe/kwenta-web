@@ -23,10 +23,10 @@ function csvRow(...cells: (string | number | null | undefined)[]): string {
   return cells.map(escapeCsv).join(',')
 }
 
-// Two blank rows before each section: one empty row is genuinely hard to see in a
-// spreadsheet grid at default row height, so we use two for a clearly visible gap.
 function section(label: string): string[] {
-  return ['', '', label.toUpperCase()]
+  // Two blank rows before for gap, bold-like === markers since CSV has no formatting,
+  // one blank row after so column headers don't run directly against the section header.
+  return ['', '', `=== ${label.toUpperCase()} ===`, '']
 }
 
 function triggerDownload(content: string, filename: string) {

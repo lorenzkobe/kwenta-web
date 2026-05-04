@@ -412,25 +412,56 @@ export async function generateGroupPDF(groupId: string, currentUserId: string): 
     }
   }
 
-  // Bills — 22+70+28+32+30 = 182 (no per-member split cols in portrait — too narrow)
+  // Bills — per-member split columns shown when group has ≤ 5 members.
+  // With 6+ members portrait width can't fit readable columns; layout stays fixed.
+  const memberIds = members.map((m) => m.user_id)
+  const showMemberSplits = memberIds.length > 0 && memberIds.length <= 5
+
+  // Allocate 74 mm pool for member columns; distribute evenly.
+  const memberColW = showMemberSplits ? Math.floor(74 / memberIds.length) : 0
+  const memberTotalW = memberColW * memberIds.length
+  // Date(22) + Total(26) + Paid By(26) = 74 fixed; title takes whatever remains.
+  const titleW = CW - 22 - 26 - 26 - memberTotalW
+
+  function truncateName(name: string, maxW: number): string {
+    const maxChars = Math.max(4, Math.floor(maxW / 1.8))
+    return name.length <= maxChars ? name : `${name.slice(0, maxChars - 1)}…`
+  }
+
   y = drawSectionTitle(doc, 'Bills', y)
   const billCols: ColDef[] = [
     { label: 'Date', w: 22 },
-    { label: 'Title', w: 70 },
-    { label: 'Category', w: 28 },
-    { label: 'Total', w: 32, align: 'right' },
-    { label: 'Paid By', w: 30 },
+    { label: 'Title', w: titleW },
+    { label: 'Total', w: 26, align: 'right' },
+    { label: 'Paid By', w: 26 },
+    ...(showMemberSplits
+      ? memberIds.map((uid) => ({
+          label: truncateName(memberNames[uid] ?? uid, memberColW),
+          w: memberColW,
+          align: 'right' as const,
+        }))
+      : []),
   ]
 
   const billRows: (string | number | null | undefined)[][] = []
   for (const bill of bills) {
     const paidBy = memberNames[bill.created_by] ?? 'Unknown'
+    const shareByUser: Record<string, number> = {}
+    if (showMemberSplits) {
+      const items = (await db.bill_items.where('bill_id').equals(bill.id).toArray()).filter((i) => !i.is_deleted)
+      for (const item of items) {
+        const splits = (await db.item_splits.where('item_id').equals(item.id).toArray()).filter((s) => !s.is_deleted)
+        for (const s of splits) shareByUser[s.user_id] = (shareByUser[s.user_id] ?? 0) + s.computed_amount
+      }
+    }
     billRows.push([
       shortDate(bill.created_at),
       bill.title,
-      catLabel(bill.category),
       fmt(bill.total_amount, bill.currency),
       paidBy,
+      ...(showMemberSplits
+        ? memberIds.map((uid) => (shareByUser[uid] ? fmt(shareByUser[uid], bill.currency) : '—'))
+        : []),
     ])
   }
   y = drawTable(doc, billCols, billRows, y)
