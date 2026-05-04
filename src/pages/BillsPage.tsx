@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useMemo, useState } from 'react'
 import { Plus, ReceiptText, Share2, Trash2, Users } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { useLiveQuery } from 'dexie-react-hooks'
@@ -56,8 +56,14 @@ export function BillsPage() {
   const [exportOpen, setExportOpen] = useState(false)
   const [myBillsShown, setMyBillsShown] = useState(10)
   const [sharedBillsShown, setSharedBillsShown] = useState(10)
-
-  useEffect(() => { setMyBillsShown(10) }, [filter, sort, filterCategory])
+  const [lastFilterKey, setLastFilterKey] = useState(`${filter}|${sort}|${filterCategory}`)
+  const filterKey = `${filter}|${sort}|${filterCategory}`
+  let resolvedMyBillsShown = myBillsShown
+  if (filterKey !== lastFilterKey) {
+    setLastFilterKey(filterKey)
+    setMyBillsShown(10)
+    resolvedMyBillsShown = 10
+  }
 
   const billBuckets = useLiveQuery(async () => {
     if (!userId) return { myBills: [] as EnrichedBill[], sharedBills: [] as EnrichedBill[] }
@@ -344,7 +350,7 @@ export function BillsPage() {
             </div>
           ) : (
             <>
-              {bills.slice(0, myBillsShown).map((bill) => (
+              {bills.slice(0, resolvedMyBillsShown).map((bill) => (
                 <div
                   key={bill.id}
                   className="rounded-2xl border border-stone-200 bg-white p-4 shadow-sm transition-colors hover:bg-stone-50"
@@ -411,13 +417,13 @@ export function BillsPage() {
                   </div>
                 </div>
               ))}
-              {bills.length > myBillsShown && (
+              {bills.length > resolvedMyBillsShown && (
                 <button
                   type="button"
                   onClick={() => setMyBillsShown((n) => n + 10)}
                   className="w-full rounded-2xl border border-stone-200 py-3 text-sm font-medium text-stone-500 transition-colors hover:bg-stone-50"
                 >
-                  Show more ({bills.length - myBillsShown} remaining)
+                  Show more ({bills.length - resolvedMyBillsShown} remaining)
                 </button>
               )}
             </>
