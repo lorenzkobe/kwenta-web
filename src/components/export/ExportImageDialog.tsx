@@ -85,12 +85,14 @@ export function ExportImageDialog({
   }
 
   // True only on real mobile browsers (iOS Safari, Android Chrome) that support
-  // file sharing via the native share sheet. Desktop browsers — including Chrome
-  // in responsive/mobile-emulation mode — return false from canShare({ files }).
+  // file sharing via the native share sheet. Newer desktop browsers (Chrome on macOS)
+  // can also return true from canShare, so we additionally require a touch pointer
+  // to confirm it's an actual mobile device before using the share sheet.
   const canShareFiles = useMemo(() => {
     if (typeof navigator === 'undefined') return false
     if (typeof navigator.share !== 'function') return false
     if (typeof navigator.canShare !== 'function') return false
+    if (!window.matchMedia('(hover: none) and (pointer: coarse)').matches) return false
     try {
       return navigator.canShare({ files: [new File([''], 'test.png', { type: 'image/png' })] })
     } catch {
