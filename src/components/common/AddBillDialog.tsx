@@ -100,7 +100,17 @@ export function AddBillDialog({
 
   const simpleAmountNum = parseFloat(simpleAmount) || 0
   const pendingRemoveLine = removeItemKey ? items.find((i) => i.key === removeItemKey) : undefined
-  const itemizedTotal = items.reduce((sum, i) => sum + (parseFloat(i.amount) || 0), 0)
+  const itemizedTotal = items.reduce((sum, i) => {
+    const amt = parseFloat(i.amount) || 0
+    if (i.splitType === 'quantity' && i.selectedUserIds.length > 0) {
+      const totalUnits = i.selectedUserIds.reduce(
+        (s, uid) => s + (parseInt(i.splitValues[uid] ?? '0', 10) || 0),
+        0,
+      )
+      return sum + totalUnits * amt
+    }
+    return sum + amt
+  }, 0)
 
   const simpleSplitsOk =
     groupMembers.length === 0 ||
@@ -362,6 +372,11 @@ export function AddBillDialog({
         if (item.splitType === 'percentage') {
           return { ...item, selectedUserIds: allIds, splitValues: equalPercentMap(allIds), pinnedSplit: {} }
         }
+        if (item.splitType === 'quantity') {
+          const defaultQty: Record<string, string> = {}
+          allIds.forEach((id) => { defaultQty[id] = item.splitValues[id] ?? '1' })
+          return { ...item, selectedUserIds: allIds, splitValues: defaultQty, pinnedSplit: {} }
+        }
         const amt = parseFloat(item.amount) || 0
         return {
           ...item,
@@ -415,6 +430,11 @@ export function AddBillDialog({
             pinnedSplit: pinned,
           }
         }
+        if (item.splitType === 'quantity') {
+          const nextValues = { ...values }
+          if (adding) nextValues[uid] = nextValues[uid] ?? '1'
+          return { ...item, selectedUserIds: nextIds, splitValues: nextValues, pinnedSplit: {} }
+        }
         const amt = parseFloat(item.amount) || 0
         if (item.splitType === 'custom' && amt > 0) {
           if (Object.keys(pinned).length === 0) {
@@ -455,6 +475,11 @@ export function AddBillDialog({
             pinnedSplit: {},
           }
         }
+        if (t === 'quantity') {
+          const defaultQty: Record<string, string> = {}
+          item.selectedUserIds.forEach((uid) => { defaultQty[uid] = '1' })
+          return { ...item, splitType: t, splitValues: defaultQty, pinnedSplit: {} }
+        }
         const amt = parseFloat(item.amount) || 0
         return {
           ...item,
@@ -470,6 +495,9 @@ export function AddBillDialog({
     setItems((prev) =>
       prev.map((item) => {
         if (item.key !== itemKey) return item
+        if (item.splitType === 'quantity') {
+          return { ...item, splitValues: { ...item.splitValues, [uid]: raw.replace(/[^0-9]/g, '') } }
+        }
         const target = item.splitType === 'percentage' ? 100 : parseFloat(item.amount) || 0
         const pinned = { ...item.pinnedSplit }
         if (raw.trim() === '') {
@@ -908,7 +936,7 @@ export function AddBillDialog({
                           <Input
                             type="text"
                             inputMode="decimal"
-                            placeholder="0.00"
+                            placeholder={item.splitType === 'quantity' ? 'Unit price' : '0.00'}
                             className="rounded-lg sm:w-28"
                             value={item.amount}
                             onChange={(e) => {
@@ -1001,6 +1029,7 @@ export function AddBillDialog({
                                 <SelectItem value="equal">Equal</SelectItem>
                                 <SelectItem value="percentage">Percentage</SelectItem>
                                 <SelectItem value="custom">Custom</SelectItem>
+                                <SelectItem value="quantity">Quantity</SelectItem>
                               </SelectContent>
                             </Select>
                           </div>

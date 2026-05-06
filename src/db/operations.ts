@@ -98,7 +98,13 @@ export interface CreateBillInput {
 
 export async function createBill(input: CreateBillInput): Promise<string> {
   const billId = generateId()
-  const totalAmount = input.items.reduce((sum, item) => sum + item.amount, 0)
+  const totalAmount = input.items.reduce((sum, item) => {
+    if (item.splits.length > 0 && item.splits[0].splitType === 'quantity') {
+      const computed = computeSplits(item.amount, item.splits as SplitInput[])
+      return sum + computed.reduce((s, r) => s + r.computedAmount, 0)
+    }
+    return sum + item.amount
+  }, 0)
 
   await db.transaction('rw', [db.bills, db.bill_items, db.item_splits, db.activity_log], async () => {
     const bill: Bill = {
@@ -206,7 +212,13 @@ export async function updateBill(
   if (!bill || bill.is_deleted) return
   if (bill.created_by !== editorUserId) return
 
-  const totalAmount = patch.items.reduce((sum, item) => sum + item.amount, 0)
+  const totalAmount = patch.items.reduce((sum, item) => {
+    if (item.splits.length > 0 && item.splits[0].splitType === 'quantity') {
+      const computed = computeSplits(item.amount, item.splits as SplitInput[])
+      return sum + computed.reduce((s, r) => s + r.computedAmount, 0)
+    }
+    return sum + item.amount
+  }, 0)
 
   await db.transaction('rw', [db.bills, db.bill_items, db.item_splits, db.activity_log], async () => {
     const existingItems = await db.bill_items.where('bill_id').equals(billId).toArray()

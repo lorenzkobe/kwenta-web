@@ -180,8 +180,16 @@ export function AddBillPage() {
   }, [userId])
 
   const itemizedTotal = items.reduce((sum, item) => {
-    const val = parseFloat(item.amount)
-    return sum + (isNaN(val) ? 0 : val)
+    const amt = parseFloat(item.amount)
+    if (isNaN(amt)) return sum
+    if (item.splitType === 'quantity' && item.selectedUserIds.length > 0) {
+      const totalUnits = item.selectedUserIds.reduce(
+        (s, uid) => s + (parseInt(item.splitValues[uid] ?? '0', 10) || 0),
+        0,
+      )
+      return sum + totalUnits * amt
+    }
+    return sum + amt
   }, 0)
 
   const simpleAmountNum = parseFloat(simpleAmount) || 0
@@ -531,6 +539,11 @@ export function AddBillPage() {
             pinnedSplit: pinned,
           }
         }
+        if (item.splitType === 'quantity') {
+          const nextValues = { ...values }
+          if (adding) nextValues[uid] = nextValues[uid] ?? '1'
+          return { ...item, selectedUserIds: nextIds, splitValues: nextValues, pinnedSplit: {} }
+        }
         const amt = parseFloat(item.amount) || 0
         if (item.splitType === 'custom' && amt > 0) {
           if (Object.keys(pinned).length === 0) {
@@ -571,6 +584,11 @@ export function AddBillPage() {
             pinnedSplit: {},
           }
         }
+        if (t === 'quantity') {
+          const defaultQty: Record<string, string> = {}
+          item.selectedUserIds.forEach((uid) => { defaultQty[uid] = '1' })
+          return { ...item, splitType: t, splitValues: defaultQty, pinnedSplit: {} }
+        }
         const amt = parseFloat(item.amount) || 0
         return {
           ...item,
@@ -586,6 +604,9 @@ export function AddBillPage() {
     setItems((prev) =>
       prev.map((item) => {
         if (item.key !== itemKey) return item
+        if (item.splitType === 'quantity') {
+          return { ...item, splitValues: { ...item.splitValues, [uid]: raw.replace(/[^0-9]/g, '') } }
+        }
         const target = item.splitType === 'percentage' ? 100 : parseFloat(item.amount) || 0
         const pinned = { ...item.pinnedSplit }
         if (raw.trim() === '') {
@@ -1158,7 +1179,15 @@ export function AddBillPage() {
                             {item.name.trim() || `Item ${index + 1}`}
                           </span>
                           <span className="shrink-0 tabular-nums text-sm font-semibold text-stone-700">
-                            {formatCurrency(parseFloat(item.amount) || 0, currency)}
+                            {item.splitType === 'quantity'
+                              ? formatCurrency(
+                                  item.selectedUserIds.reduce(
+                                    (s, uid) => s + (parseInt(item.splitValues[uid] ?? '0', 10) || 0),
+                                    0,
+                                  ) * (parseFloat(item.amount) || 0),
+                                  currency,
+                                )
+                              : formatCurrency(parseFloat(item.amount) || 0, currency)}
                           </span>
                           <ChevronRight className="size-4 shrink-0 text-stone-400" aria-hidden />
                         </button>
@@ -1185,7 +1214,7 @@ export function AddBillPage() {
                         <Input
                           type="text"
                           inputMode="decimal"
-                          placeholder="0.00"
+                          placeholder={item.splitType === 'quantity' ? 'Unit price' : '0.00'}
                           className="rounded-lg sm:w-32"
                           value={item.amount}
                           onChange={(e) => {
@@ -1271,6 +1300,7 @@ export function AddBillPage() {
                               <SelectItem value="equal">Equal</SelectItem>
                               <SelectItem value="percentage">Percentage</SelectItem>
                               <SelectItem value="custom">Custom</SelectItem>
+                              <SelectItem value="quantity">Quantity</SelectItem>
                             </SelectContent>
                           </Select>
                         </div>

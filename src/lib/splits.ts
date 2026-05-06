@@ -21,6 +21,8 @@ export function computeSplits(
       return computePercentage(itemAmount, splits)
     case 'custom':
       return computeCustom(itemAmount, splits)
+    case 'quantity':
+      return computeQuantity(itemAmount, splits)
     default:
       return []
   }
@@ -47,6 +49,16 @@ function computePercentage(
   return splits.map((s) => ({
     userId: s.userId,
     computedAmount: Math.round(amount * (s.splitValue / 100) * 100) / 100,
+  }))
+}
+
+function computeQuantity(
+  unitPrice: number,
+  splits: SplitInput[],
+): { userId: string; computedAmount: number }[] {
+  return splits.map((s) => ({
+    userId: s.userId,
+    computedAmount: Math.round(s.splitValue * unitPrice * 100) / 100,
   }))
 }
 

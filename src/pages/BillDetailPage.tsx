@@ -393,7 +393,9 @@ export function BillDetailPage() {
                   <div className="flex items-center justify-between">
                     <p className="font-medium text-stone-800">{item.name}</p>
                     <p className="font-semibold text-stone-800">
-                      {formatCurrency(item.amount, bill.currency)}
+                      {item.splits[0]?.split_type === 'quantity'
+                        ? `${formatCurrency(item.amount, bill.currency)}/ea`
+                        : formatCurrency(item.amount, bill.currency)}
                     </p>
                   </div>
                   {item.splits.length > 0 && (
@@ -406,9 +408,16 @@ export function BillDetailPage() {
                         {item.splits.map((split) => (
                           <div key={split.id} className="flex items-center justify-between text-sm">
                             <span className="text-stone-600">{split.displayName}</span>
-                            <span className="font-medium text-stone-800">
-                              {formatCurrency(split.computed_amount, bill.currency)}
-                            </span>
+                            {split.split_type === 'quantity' ? (
+                              <span className="font-medium text-stone-800">
+                                {split.split_value} × {formatCurrency(item.amount, bill.currency)} ={' '}
+                                {formatCurrency(split.computed_amount, bill.currency)}
+                              </span>
+                            ) : (
+                              <span className="font-medium text-stone-800">
+                                {formatCurrency(split.computed_amount, bill.currency)}
+                              </span>
+                            )}
                           </div>
                         ))}
                       </div>

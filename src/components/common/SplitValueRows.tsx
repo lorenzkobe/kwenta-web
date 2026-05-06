@@ -35,13 +35,21 @@ export function SplitValueRows({
   const sum = selectedUserIds.reduce((a, uid) => a + parseSplitNumber(values[uid]), 0)
   const pctOk = splitType === 'percentage' && Math.abs(sum - 100) <= 0.06
   const customOk = splitType === 'custom' && lineAmount > 0 && Math.abs(sum - lineAmount) <= 0.06
+  const qtyValid =
+    splitType === 'quantity' &&
+    selectedUserIds.every((uid) => {
+      const n = parseSplitNumber(values[uid])
+      return Number.isInteger(n) && n >= 1
+    })
 
   return (
     <div className="mt-2 space-y-2 rounded-xl border border-stone-200 bg-white px-3 py-2">
       <p className="text-xs font-medium text-stone-500">
-        {splitType === 'percentage'
-          ? 'Percent per person (total must be 100%). Edited fields stay fixed; the rest update.'
-          : `Amount per person (${currency}, must total the line amount). Edited fields stay fixed.`}
+        {splitType === 'quantity'
+          ? 'Units per person (must be 1 or more each)'
+          : splitType === 'percentage'
+            ? 'Percent per person (total must be 100%). Edited fields stay fixed; the rest update.'
+            : `Amount per person (${currency}, must total the line amount). Edited fields stay fixed.`}
       </p>
       {selectedUserIds.map((uid) => {
         const m = members.find((x) => x.userId === uid)
@@ -55,22 +63,38 @@ export function SplitValueRows({
               {locked && <Lock className="size-3 shrink-0 text-stone-400" aria-hidden />}
               {m?.isCurrentUser ? 'You' : m?.displayName}
             </span>
-            <Input
-              type="text"
-              inputMode="decimal"
-              className="h-9 flex-1 rounded-lg text-sm"
-              placeholder={splitType === 'percentage' ? '%' : '0.00'}
-              value={values[uid] ?? ''}
-              onChange={(e) => onChange(uid, filterDecimalInput(e.target.value))}
-              onBlur={() => {
-                const v = values[uid] ?? ''
-                const next = stripLeadingZerosAmount(v)
-                if (next !== v) onChange(uid, next)
-              }}
-            />
+            {splitType === 'quantity' ? (
+              <Input
+                type="text"
+                inputMode="numeric"
+                className="h-9 flex-1 rounded-lg text-sm"
+                placeholder="Qty"
+                value={values[uid] ?? ''}
+                onChange={(e) => onChange(uid, e.target.value.replace(/[^0-9]/g, ''))}
+              />
+            ) : (
+              <Input
+                type="text"
+                inputMode="decimal"
+                className="h-9 flex-1 rounded-lg text-sm"
+                placeholder={splitType === 'percentage' ? '%' : '0.00'}
+                value={values[uid] ?? ''}
+                onChange={(e) => onChange(uid, filterDecimalInput(e.target.value))}
+                onBlur={() => {
+                  const v = values[uid] ?? ''
+                  const next = stripLeadingZerosAmount(v)
+                  if (next !== v) onChange(uid, next)
+                }}
+              />
+            )}
           </div>
         )
       })}
+      {splitType === 'quantity' && lineAmount > 0 && (
+        <p className={cn('text-xs', qtyValid ? 'text-emerald-600' : 'text-amber-600')}>
+          {sum} unit{sum !== 1 ? 's' : ''} · {formatCurrency(sum * lineAmount, currency)} total
+        </p>
+      )}
       {splitType === 'percentage' && (
         <p className={cn('text-xs', pctOk ? 'text-emerald-600' : 'text-amber-600')}>
           Total: {sum.toFixed(2)}%

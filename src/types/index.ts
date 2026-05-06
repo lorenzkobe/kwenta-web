@@ -57,7 +57,7 @@ export interface BillItem extends SyncFields {
   amount: number
 }
 
-export type SplitType = 'equal' | 'percentage' | 'custom'
+export type SplitType = 'equal' | 'percentage' | 'custom' | 'quantity'
 
 export interface ItemSplit extends SyncFields {
   item_id: string

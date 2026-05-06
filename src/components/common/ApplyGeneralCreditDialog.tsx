@@ -289,7 +289,7 @@ export function ApplyGeneralCreditDialog({
         splitValues,
         pinnedBucketIds,
         bucketId,
-        splitType,
+        splitType === 'percentage' ? 'percentage' : 'custom',
         targetTotal,
       )
       setSplitValues(next.values)

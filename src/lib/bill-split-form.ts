@@ -154,6 +154,9 @@ export function lineSplitsValid(
     const sum = nums.reduce((a, b) => a + b, 0)
     return Math.abs(sum - lineAmount) <= SUM_EPS
   }
+  if (splitType === 'quantity') {
+    return nums.every((n) => Number.isInteger(n) && n >= 1)
+  }
   return true
 }
 
