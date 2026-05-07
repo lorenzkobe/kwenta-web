@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { Check, ChevronDown, LayoutList, Plus, Save, SplitSquareHorizontal, Tag, Trash2, UserPlus, Users, X } from 'lucide-react'
+import { Check, ChevronDown, ChevronRight, LayoutList, Plus, Save, SplitSquareHorizontal, Tag, Trash2, UserPlus, Users, X } from 'lucide-react'
 import { BILL_CATEGORIES, CATEGORY_ICONS, CATEGORY_LABELS } from '@/lib/bill-categories'
 import { toast } from 'sonner'
 import {
@@ -24,7 +24,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@/components/ui/select'
-import { SplitValueRows } from '@/components/common/SplitValueRows'
+import { SplitPersonSelector } from '@/components/common/SplitPersonSelector'
 import { ConfirmDialog } from '@/components/common/ConfirmDialog'
 
 type BillMode = 'simple' | 'itemized'
@@ -53,6 +53,13 @@ interface AddBillDialogProps {
   editBillId?: string | null
   onClose: () => void
   onSaved: () => void
+}
+
+const SPLIT_TYPE_LABEL: Record<string, string> = {
+  equal: 'Equal',
+  percentage: 'By %',
+  custom: 'Custom',
+  quantity: 'By qty',
 }
 
 function newItem(): ItemDraft {
@@ -96,6 +103,7 @@ export function AddBillDialog({
   const simpleSplitValues = simpleSplitMeta.values
 
   const [items, setItems] = useState<ItemDraft[]>([newItem()])
+  const [collapsedItemKeys, setCollapsedItemKeys] = useState<string[]>([])
   const [removeItemKey, setRemoveItemKey] = useState<string | null>(null)
 
   const simpleAmountNum = parseFloat(simpleAmount) || 0
@@ -117,27 +125,29 @@ export function AddBillDialog({
     (simpleSelectedUserIds.length > 0 &&
       lineSplitsValid(simpleSplitType, simpleAmountNum, simpleSelectedUserIds, simpleSplitValues))
 
+  const hasAnyCompleteItem = items.some((i) => i.name.trim() && parseFloat(i.amount) > 0)
+
   const itemizedLinesOk =
     groupMembers.length === 0 ||
-    items
-      .filter((i) => i.name.trim() && parseFloat(i.amount) > 0)
-      .every((item) => {
-        if (item.selectedUserIds.length === 0) return false
-        return lineSplitsValid(
-          item.splitType,
-          parseFloat(item.amount) || 0,
-          item.selectedUserIds,
-          item.splitValues,
-        )
-      })
+    items.every((item) => {
+      const hasName = !!item.name.trim()
+      const hasAmount = parseFloat(item.amount) > 0
+      if (!hasName && !hasAmount) return true
+      if (!hasName || !hasAmount) return false
+      if (item.selectedUserIds.length === 0) return false
+      return lineSplitsValid(
+        item.splitType,
+        parseFloat(item.amount) || 0,
+        item.selectedUserIds,
+        item.splitValues,
+      )
+    })
 
   const canSave =
-    title.trim() &&
-    simpleSplitsOk &&
-    itemizedLinesOk &&
+    !!title.trim() &&
     (mode === 'simple'
-      ? simpleAmountNum > 0
-      : items.some((i) => i.name.trim() && parseFloat(i.amount) > 0))
+      ? simpleSplitsOk && simpleAmountNum > 0
+      : itemizedLinesOk && hasAnyCompleteItem)
 
   const selectedIdsRef = useRef(simpleSelectedUserIds)
   selectedIdsRef.current = simpleSelectedUserIds
@@ -338,6 +348,14 @@ export function AddBillDialog({
       const next = prev.filter((i) => i.key !== key)
       return next.length === 0 ? [newItem()] : next
     })
+  }
+
+  function collapseItemLine(key: string) {
+    setCollapsedItemKeys((k) => (k.includes(key) ? k : [...k, key]))
+  }
+
+  function expandItemLine(key: string) {
+    setCollapsedItemKeys(items.map((i) => i.key).filter((k) => k !== key))
   }
 
   function selectAllSimpleUsers() {
@@ -652,7 +670,19 @@ export function AddBillDialog({
                       key={id}
                       type="button"
                       disabled={isEdit}
-                      onClick={() => setMode(id)}
+                      onClick={() => {
+                        setMode(id)
+                        setTitle('')
+                        setPaidBy(currentUserId)
+                        setNote('')
+                        setCategory(null)
+                        setSimpleAmount('')
+                        setSimpleSplitType('equal')
+                        setSimpleSelectedUserIds([])
+                        setSimpleSplitMeta({ values: {}, pinned: {} })
+                        setItems([newItem()])
+                        setCollapsedItemKeys([])
+                      }}
                       className={cn(
                         'flex items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-sm font-medium transition-colors',
                         mode === id
@@ -826,65 +856,24 @@ export function AddBillDialog({
                             <SelectItem value="equal">Equal split</SelectItem>
                             <SelectItem value="percentage">By percentage</SelectItem>
                             <SelectItem value="custom">Custom amounts</SelectItem>
+                            <SelectItem value="quantity">By quantity</SelectItem>
                           </SelectContent>
                         </Select>
                       </div>
 
                       <div className="flex flex-col gap-2">
-                        <div className="flex items-center justify-between">
-                          <div className="flex items-center gap-1.5 text-sm font-medium text-stone-600">
-                            <UserPlus className="size-3.5" />
-                            Split with
-                          </div>
-                          {groupMembers.length > 1 && (
-                            <button
-                              type="button"
-                              onClick={() => {
-                                const allSelected = groupMembers.every((m) =>
-                                  simpleSelectedUserIds.includes(m.userId),
-                                )
-                                if (allSelected) deselectAllSimpleUsers()
-                                else selectAllSimpleUsers()
-                              }}
-                              className="text-xs font-medium text-teal-700 hover:text-teal-900"
-                            >
-                              {groupMembers.every((m) => simpleSelectedUserIds.includes(m.userId))
-                                ? 'Deselect all'
-                                : 'Select all'}
-                            </button>
-                          )}
-                        </div>
-                        <div className="flex flex-wrap gap-1.5">
-                          {groupMembers.map((m) => {
-                            const selected = simpleSelectedUserIds.includes(m.userId)
-                            return (
-                              <button
-                                key={m.userId}
-                                type="button"
-                                onClick={() => toggleSimpleUser(m.userId)}
-                                className={cn(
-                                  'inline-flex cursor-pointer items-center gap-1.5 rounded-full border px-3 py-2 text-sm font-medium transition-colors',
-                                  selected
-                                    ? 'border-transparent bg-teal-800 text-white'
-                                    : 'border-stone-200 bg-white text-stone-600 hover:bg-stone-100',
-                                )}
-                              >
-                                <Users className="size-3.5" />
-                                {m.isCurrentUser ? 'You' : m.displayName}
-                              </button>
-                            )
-                          })}
-                        </div>
-
-                        <SplitValueRows
+                        <SplitPersonSelector
+                          members={groupMembers}
+                          selectedUserIds={simpleSelectedUserIds}
+                          onToggle={toggleSimpleUser}
                           splitType={simpleSplitType}
                           currency={groupCurrency}
-                          selectedUserIds={simpleSelectedUserIds}
-                          members={groupMembers}
                           values={simpleSplitValues}
                           pinnedUserIds={simpleSplitMeta.pinned}
                           lineAmount={simpleAmountNum}
-                          onChange={onSimpleSplitInputChange}
+                          onValueChange={onSimpleSplitInputChange}
+                          onSelectAll={selectAllSimpleUsers}
+                          onDeselectAll={deselectAllSimpleUsers}
                         />
 
                         {simpleSelectedUserIds.length > 0 && simpleAmountNum > 0 && (
@@ -919,10 +908,62 @@ export function AddBillDialog({
                 <div className="space-y-3">
                   <p className="text-sm font-medium text-stone-600">Items</p>
 
-                  {items.map((item, index) => (
+                  {items.map((item, index) => {
+                    const lineComplete =
+                      !!item.name.trim() &&
+                      parseFloat(item.amount) > 0 &&
+                      (groupMembers.length === 0 || item.selectedUserIds.length > 0) &&
+                      lineSplitsValid(item.splitType, parseFloat(item.amount) || 0, item.selectedUserIds, item.splitValues)
+                    const collapsed = collapsedItemKeys.includes(item.key)
+
+                    if (collapsed) {
+                      const peopleNames = item.selectedUserIds
+                        .map((uid) => groupMembers.find((m) => m.userId === uid))
+                        .filter(Boolean)
+                        .map((m) => (m!.isCurrentUser ? 'You' : m!.displayName))
+                      return (
+                        <div key={item.key} className="rounded-2xl border border-stone-200 bg-stone-50 p-2">
+                          <button
+                            type="button"
+                            onClick={() => expandItemLine(item.key)}
+                            className="flex w-full items-center gap-2 rounded-xl px-3 py-2.5 text-left transition-colors hover:bg-stone-100"
+                          >
+                            <span className={cn(
+                              'flex size-5 shrink-0 items-center justify-center rounded-full text-[0.6rem] font-semibold text-white',
+                              lineComplete ? 'bg-teal-800' : 'bg-amber-400',
+                            )}>
+                              {index + 1}
+                            </span>
+                            <div className="min-w-0 flex-1">
+                              <p className="truncate text-sm font-medium text-stone-800">
+                                {item.name.trim() || `Item ${index + 1}`}
+                              </p>
+                              <p className="truncate text-xs text-stone-400">
+                                {SPLIT_TYPE_LABEL[item.splitType] ?? item.splitType}
+                                {peopleNames.length > 0 && <> · {peopleNames.join(', ')}</>}
+                              </p>
+                            </div>
+                            <span className="shrink-0 text-sm font-semibold tabular-nums text-stone-700">
+                              {item.splitType === 'quantity'
+                                ? formatCurrency(
+                                    item.selectedUserIds.reduce((s, uid) => s + (parseInt(item.splitValues[uid] ?? '0', 10) || 0), 0) * (parseFloat(item.amount) || 0),
+                                    groupCurrency,
+                                  )
+                                : formatCurrency(parseFloat(item.amount) || 0, groupCurrency)}
+                            </span>
+                            <ChevronRight className="size-4 shrink-0 text-stone-400" aria-hidden />
+                          </button>
+                        </div>
+                      )
+                    }
+
+                    return (
                     <div key={item.key} className="rounded-2xl border border-stone-200 bg-stone-50 p-3">
                       <div className="flex items-start gap-2">
-                        <span className="mt-2.5 flex size-5 shrink-0 items-center justify-center rounded-full bg-teal-800 text-[0.6rem] font-semibold text-white">
+                        <span className={cn(
+                          'mt-2.5 flex size-5 shrink-0 items-center justify-center rounded-full text-[0.6rem] font-semibold text-white',
+                          lineComplete ? 'bg-teal-800' : 'bg-amber-400',
+                        )}>
                           {index + 1}
                         </span>
                         <div className="flex flex-1 flex-col gap-2 sm:flex-row">
@@ -977,17 +1018,28 @@ export function AddBillDialog({
                             onBlur={() => commitItemLineAmount(item.key, item.amount)}
                           />
                         </div>
-                        {items.length > 1 && (
+                        <div className="flex shrink-0 gap-0.5">
                           <Button
                             variant="ghost"
                             size="icon-xs"
                             type="button"
-                            className="mt-1.5 rounded-full text-red-600"
-                            onClick={() => setRemoveItemKey(item.key)}
+                            className="mt-1.5 rounded-full text-stone-500"
+                            onClick={() => collapseItemLine(item.key)}
                           >
-                            <Trash2 className="size-3.5" />
+                            <ChevronDown className="size-4" />
                           </Button>
-                        )}
+                          {items.length > 1 && (
+                            <Button
+                              variant="ghost"
+                              size="icon-xs"
+                              type="button"
+                              className="mt-1.5 rounded-full text-red-600"
+                              onClick={() => setRemoveItemKey(item.key)}
+                            >
+                              <Trash2 className="size-3.5" />
+                            </Button>
+                          )}
+                        </div>
                       </div>
 
                       {groupMembers.length > 0 && (
@@ -1034,38 +1086,21 @@ export function AddBillDialog({
                             </Select>
                           </div>
 
-                          <div className="mt-3 flex flex-wrap gap-1.5">
-                            {groupMembers.map((m) => {
-                              const selected = item.selectedUserIds.includes(m.userId)
-                              return (
-                                <button
-                                  key={m.userId}
-                                  type="button"
-                                  onClick={() => toggleUserForItem(item.key, m.userId)}
-                                  className={cn(
-                                    'inline-flex cursor-pointer items-center gap-1 rounded-full border px-2.5 py-1.5 text-xs font-medium transition-colors',
-                                    selected
-                                      ? 'border-transparent bg-teal-800 text-white'
-                                      : 'border-stone-200 bg-white text-stone-600 hover:bg-stone-100',
-                                  )}
-                                >
-                                  <Users className="size-3" />
-                                  {m.isCurrentUser ? 'You' : m.displayName}
-                                </button>
-                              )
-                            })}
+                          <div className="mt-3">
+                            <SplitPersonSelector
+                              size="compact"
+                              showHeader={false}
+                              members={groupMembers}
+                              selectedUserIds={item.selectedUserIds}
+                              onToggle={(uid) => toggleUserForItem(item.key, uid)}
+                              splitType={item.splitType}
+                              currency={groupCurrency}
+                              values={item.splitValues}
+                              pinnedUserIds={item.pinnedSplit}
+                              lineAmount={parseFloat(item.amount) || 0}
+                              onValueChange={(uid, raw) => onItemSplitValueChange(item.key, uid, raw)}
+                            />
                           </div>
-
-                          <SplitValueRows
-                            splitType={item.splitType}
-                            currency={groupCurrency}
-                            selectedUserIds={item.selectedUserIds}
-                            members={groupMembers}
-                            values={item.splitValues}
-                            pinnedUserIds={item.pinnedSplit}
-                            lineAmount={parseFloat(item.amount) || 0}
-                            onChange={(uid, raw) => onItemSplitValueChange(item.key, uid, raw)}
-                          />
 
                           {item.selectedUserIds.length > 0 &&
                             item.splitType === 'equal' &&
@@ -1081,13 +1116,18 @@ export function AddBillDialog({
                         </div>
                       )}
                     </div>
-                  ))}
+                    )
+                  })}
 
                   <Button
                     variant="outline"
                     type="button"
                     className="h-10 w-full rounded-xl border-dashed border-stone-300"
-                    onClick={() => setItems((prev) => [...prev, newItem()])}
+                    onClick={() => {
+                      const ni = newItem()
+                      setCollapsedItemKeys(items.map((i) => i.key))
+                      setItems((prev) => [...prev, ni])
+                    }}
                   >
                     <Plus className="size-4" />
                     Add item

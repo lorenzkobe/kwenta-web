@@ -240,7 +240,7 @@ export function SettingsPage() {
               <p className="mt-2 text-sm leading-relaxed text-stone-600">
                 If someone has you saved as a local contact, they can link that contact to your Kwenta
                 account with your email:{' '}
-                <span className="font-medium text-stone-900">{user.email}</span>. They’ll use{' '}
+                <span className="font-medium text-stone-900">{user.email}</span>. They'll use{' '}
                 <span className="font-medium text-stone-800">People → Link</span> on their device. Their phone
                 or browser needs your profile already (for example from a shared group and a sync).
               </p>
@@ -357,15 +357,15 @@ export function SettingsPage() {
                 <p className="text-xs text-stone-500">
                   {isOnline
                     ? syncStatus === 'syncing'
-                      ? 'Syncing…'
+                      ? 'Syncing your changes…'
                       : syncStatus === 'error'
-                        ? 'Online — last sync had errors'
+                        ? 'Something went wrong — your changes are saved locally. Tap the sync button in the header to retry.'
                         : hasPendingSync === true
-                          ? 'Waiting to sync — changes are saved here and will upload when the server accepts them'
-                          : 'Online — changes sync to your account when signed in'
+                          ? 'Changes saved — uploading to your account shortly'
+                          : 'All changes synced to your account'
                     : hasPendingSync === true
-                      ? 'Offline — you have changes not yet on the server; they’ll upload when you’re online'
-                      : 'Offline — changes stay on this device until you’re online'}
+                      ? "Offline — your unsaved changes will sync automatically when you're back online"
+                      : 'Offline — connect to the internet to sync your data'}
                 </p>
               </div>
               <div className={`size-2.5 rounded-full ${isOnline ? 'bg-emerald-500' : 'bg-amber-500'}`} />

@@ -394,7 +394,7 @@ export function BillDetailPage() {
                     <p className="font-medium text-stone-800">{item.name}</p>
                     <p className="font-semibold text-stone-800">
                       {item.splits[0]?.split_type === 'quantity'
-                        ? `${formatCurrency(item.amount, bill.currency)}/ea`
+                        ? `${formatCurrency(item.amount, bill.currency)}/each`
                         : formatCurrency(item.amount, bill.currency)}
                     </p>
                   </div>
@@ -409,9 +409,13 @@ export function BillDetailPage() {
                           <div key={split.id} className="flex items-center justify-between text-sm">
                             <span className="text-stone-600">{split.displayName}</span>
                             {split.split_type === 'quantity' ? (
-                              <span className="font-medium text-stone-800">
-                                {split.split_value} × {formatCurrency(item.amount, bill.currency)} ={' '}
-                                {formatCurrency(split.computed_amount, bill.currency)}
+                              <span className="flex items-center gap-1">
+                                <span className="text-stone-400">
+                                  {split.split_value} × {formatCurrency(item.amount, bill.currency)} =
+                                </span>
+                                <span className="font-medium text-stone-800">
+                                  {formatCurrency(split.computed_amount, bill.currency)}
+                                </span>
                               </span>
                             ) : (
                               <span className="font-medium text-stone-800">
@@ -429,17 +433,35 @@ export function BillDetailPage() {
           </>
         ) : (
           <>
-            <div className="flex items-center gap-2">
-              <Users className="size-4 text-teal-800" />
-              <h2 className="text-lg font-semibold">Split</h2>
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <Users className="size-4 text-teal-800" />
+                <h2 className="text-lg font-semibold">Split</h2>
+              </div>
+              {bill.items[0]?.splits[0]?.split_type === 'quantity' && (
+                <span className="text-sm text-stone-500">
+                  {formatCurrency(bill.items[0].amount, bill.currency)}/each
+                </span>
+              )}
             </div>
             <div className="mt-4 space-y-1.5">
               {(bill.items[0]?.splits ?? []).map((split) => (
                 <div key={split.id} className="flex items-center justify-between rounded-xl border border-stone-200 bg-stone-100/60 px-4 py-3 text-sm">
                   <span className="text-stone-600">{split.displayName}</span>
-                  <span className="font-medium text-stone-800">
-                    {formatCurrency(split.computed_amount, bill.currency)}
-                  </span>
+                  {split.split_type === 'quantity' ? (
+                    <span className="flex items-center gap-1">
+                      <span className="text-stone-400">
+                        {split.split_value} × {formatCurrency(bill.items[0].amount, bill.currency)} =
+                      </span>
+                      <span className="font-medium text-stone-800">
+                        {formatCurrency(split.computed_amount, bill.currency)}
+                      </span>
+                    </span>
+                  ) : (
+                    <span className="font-medium text-stone-800">
+                      {formatCurrency(split.computed_amount, bill.currency)}
+                    </span>
+                  )}
                 </div>
               ))}
             </div>

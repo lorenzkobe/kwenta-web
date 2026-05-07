@@ -1,9 +1,13 @@
-import { useEffect, useMemo, useState, type FormEvent } from 'react'
+import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import {
+  Check,
+  ChevronDown,
   LayoutList,
+  Pencil,
   Plus,
   ReceiptText,
   RotateCcw,
+  Search,
   SplitSquareHorizontal,
   Trash2,
   UserPlus,
@@ -31,7 +35,7 @@ import {
 } from '@/landing/landing-demo-persistence'
 
 const CURRENCIES = ['PHP', 'USD', 'EUR', 'JPY', 'KRW', 'GBP'] as const
-const SPLIT_TYPES: SplitType[] = ['equal', 'percentage', 'custom']
+const SPLIT_TYPES: SplitType[] = ['equal', 'percentage', 'custom', 'quantity']
 type LandingProductDemoVariant = 'standalone' | 'embedded'
 type LandingProductDemoProps = {
   variant?: LandingProductDemoVariant
@@ -65,6 +69,7 @@ type ItemizedBill = {
 function splitTypeLabel(splitType: SplitType): string {
   if (splitType === 'equal') return 'Equal'
   if (splitType === 'percentage') return 'By percentage'
+  if (splitType === 'quantity') return 'By quantity'
   return 'Custom amounts'
 }
 
@@ -95,6 +100,14 @@ function computePerUserAmounts(
   splitValues: Record<string, number>,
 ): Record<string, number> {
   if (splitWith.length === 0 || amount <= 0) return {}
+  if (splitType === 'quantity') {
+    return Object.fromEntries(
+      splitWith.map((name) => {
+        const qty = Math.max(0, Math.floor(splitValues[name] ?? 0))
+        return [name, roundToTwo(qty * amount)]
+      }),
+    )
+  }
   if (splitType === 'equal') {
     const amounts = splitTotalEvenly(amount, splitWith.length)
     return Object.fromEntries(splitWith.map((name, index) => [name, amounts[index] ?? 0]))
@@ -167,6 +180,12 @@ function splitsAreValid(
 ): boolean {
   if (selected.length === 0) return false
   if (splitType === 'equal') return true
+  if (splitType === 'quantity') {
+    return selected.every((name) => {
+      const n = parseInt((values[name] ?? '').replace(/[^0-9]/g, '') || '0', 10)
+      return Number.isInteger(n) && n >= 1
+    })
+  }
   if (amount <= 0) return false
 
   const numericValues = selected.map((name) => Number.parseFloat((values[name] ?? '').replace(/,/g, '')))
@@ -186,6 +205,13 @@ function rebalanceSplitValues(
 ): { values: Record<string, string>; pinned: PinnedSplits } {
   if (splitType === 'equal' || selected.length === 0) {
     return { values: {}, pinned: {} }
+  }
+  if (splitType === 'quantity') {
+    const existing = sanitizeSplitValueMap(values, selected)
+    return {
+      values: Object.fromEntries(selected.map((name) => [name, existing[name] ?? '1'])),
+      pinned: {},
+    }
   }
 
   const cleanedValues = sanitizeSplitValueMap(values, selected)
@@ -213,7 +239,7 @@ function rebalanceSplitValues(
   }
 }
 
-function PersonChipGroup({
+function DemoPersonDropdown({
   people,
   selected,
   onToggle,
@@ -222,31 +248,117 @@ function PersonChipGroup({
   selected: string[]
   onToggle: (person: string) => void
 }) {
+  const [open, setOpen] = useState(false)
+  const [search, setSearch] = useState('')
+  const containerRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (!open) return
+    function handle(e: MouseEvent) {
+      if (!containerRef.current?.contains(e.target as Node)) {
+        setOpen(false)
+        setSearch('')
+      }
+    }
+    document.addEventListener('mousedown', handle)
+    return () => document.removeEventListener('mousedown', handle)
+  }, [open])
+
   if (people.length === 0) {
-    return <p className="text-xs text-stone-500">Add at least one person to continue.</p>
+    return <p className="text-xs text-stone-500">Add at least one person above to continue.</p>
   }
 
+  const filtered = search
+    ? people.filter((p) => p.toLowerCase().includes(search.toLowerCase()))
+    : people
+
   return (
-    <div className="flex flex-wrap gap-2" role="group" aria-label="Split with">
-      {people.map((person) => {
-        const active = selected.includes(person)
-        return (
-          <button
-            key={person}
-            type="button"
-            onClick={() => onToggle(person)}
-            className={cn(
-              'inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-medium transition-colors',
-              active
-                ? 'bg-teal-800 text-white shadow-sm'
-                : 'border border-stone-200 bg-white text-stone-600 hover:border-stone-300 hover:bg-stone-50',
+    <div className="relative" ref={containerRef}>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className={cn(
+          'flex min-h-10 w-full flex-wrap items-center gap-1.5 rounded-xl border bg-white px-3 py-2 text-left transition-colors',
+          open ? 'border-stone-400' : 'border-stone-200 hover:border-stone-300',
+        )}
+      >
+        {selected.length === 0 ? (
+          <span className="flex-1 text-sm text-stone-400">Select people…</span>
+        ) : (
+          <div className="flex flex-1 flex-wrap gap-1">
+            {selected.map((name) => (
+              <span
+                key={name}
+                className="inline-flex items-center gap-0.5 rounded-full bg-teal-800/10 px-2 py-0.5 text-xs font-medium text-teal-800"
+              >
+                {name}
+                <button
+                  type="button"
+                  onClick={(e) => { e.stopPropagation(); onToggle(name) }}
+                  className="ml-0.5 rounded-full p-0.5 hover:bg-teal-800/20"
+                >
+                  <X className="size-2.5" />
+                </button>
+              </span>
+            ))}
+          </div>
+        )}
+        <ChevronDown
+          className={cn(
+            'ml-auto size-4 shrink-0 text-stone-400 transition-transform',
+            open && 'rotate-180',
+          )}
+        />
+      </button>
+
+      {open && (
+        <div className="absolute z-50 mt-1 w-full rounded-xl border border-stone-200 bg-white shadow-md">
+          <div className="border-b border-stone-100 p-2">
+            <div className="flex items-center gap-2 rounded-lg border border-stone-200 bg-stone-50 px-2.5">
+              <Search className="size-3.5 shrink-0 text-stone-400" />
+              <input
+                type="text"
+                placeholder="Search people…"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Escape') { setOpen(false); setSearch('') } }}
+                className="flex-1 bg-transparent py-2 text-sm outline-none placeholder:text-stone-400"
+                autoFocus
+              />
+            </div>
+          </div>
+          <div className="max-h-48 overflow-y-auto overscroll-contain p-1">
+            {filtered.length === 0 ? (
+              <p className="px-2 py-3 text-center text-xs text-stone-400">No people found</p>
+            ) : (
+              filtered.map((name) => {
+                const isSelected = selected.includes(name)
+                return (
+                  <div
+                    key={name}
+                    onClick={() => onToggle(name)}
+                    className="flex cursor-pointer items-center gap-2 rounded-lg px-2 py-2 hover:bg-stone-50"
+                  >
+                    <div
+                      className={cn(
+                        'flex size-4 shrink-0 items-center justify-center rounded-full border transition-colors',
+                        isSelected
+                          ? 'border-transparent bg-teal-800 text-white'
+                          : 'border-stone-300 bg-white',
+                      )}
+                    >
+                      {isSelected && <Check className="size-2.5" />}
+                    </div>
+                    <span className={cn('flex-1 truncate text-sm', isSelected && 'font-medium text-stone-800')}>
+                      {name}
+                    </span>
+                  </div>
+                )
+              })
             )}
-          >
-            <Users className="size-3 shrink-0 opacity-90" aria-hidden />
-            {person}
-          </button>
-        )
-      })}
+          </div>
+        </div>
+      )}
     </div>
   )
 }
@@ -259,7 +371,7 @@ function SplitTypeButtons({
   onChange: (splitType: SplitType) => void
 }) {
   return (
-    <div className="grid grid-cols-1 gap-2 sm:grid-cols-3" role="group" aria-label="Split type">
+    <div className="grid grid-cols-2 gap-2 sm:grid-cols-4" role="group" aria-label="Split type">
       {SPLIT_TYPES.map((splitType) => (
         <button
           key={splitType}
@@ -295,6 +407,40 @@ function SplitValuesEditor({
   onChange: (name: string, value: string) => void
 }) {
   if (splitType === 'equal' || selected.length === 0) return null
+
+  if (splitType === 'quantity') {
+    const totalUnits = selected.reduce((s, name) => s + (parseInt(values[name] ?? '0', 10) || 0), 0)
+    const isValid = selected.every((name) => {
+      const n = parseInt(values[name] ?? '0', 10)
+      return Number.isInteger(n) && n >= 1
+    })
+    return (
+      <div className="space-y-2 rounded-lg border border-stone-200 bg-white p-3">
+        <p className="text-xs font-medium text-stone-600">Split values</p>
+        <p className="text-[0.7rem] text-stone-500">Units per person (min 1 each).</p>
+        {selected.map((name) => (
+          <div key={name} className="grid grid-cols-[1fr_8rem] items-center gap-2">
+            <span className="text-xs font-medium text-stone-700">{name}</span>
+            <Input
+              type="text"
+              inputMode="numeric"
+              pattern="[0-9]*"
+              value={values[name] ?? ''}
+              onChange={(e) => onChange(name, e.target.value.replace(/[^0-9]/g, ''))}
+              placeholder="1"
+              className="h-9 rounded-md border-stone-200 bg-white text-sm tabular-nums"
+              autoComplete="off"
+            />
+          </div>
+        ))}
+        {amount > 0 && (
+          <p className={cn('text-[0.7rem]', isValid ? 'text-emerald-600' : 'text-amber-600')}>
+            {totalUnits} unit{totalUnits !== 1 ? 's' : ''} · {formatCurrency(totalUnits * amount, currency)} total
+          </p>
+        )}
+      </div>
+    )
+  }
 
   const helperText =
     splitType === 'percentage'
@@ -337,7 +483,16 @@ function SplitValuesEditor({
 }
 
 function totalItemizedBill(bill: ItemizedBill): number {
-  return bill.items.reduce((sum, item) => sum + item.amount, 0)
+  return bill.items.reduce((sum, item) => {
+    if (item.splitType === 'quantity') {
+      const totalUnits = item.splitWith.reduce(
+        (s, name) => s + (parseInt(String(item.splitValues[name] ?? 0), 10) || 0),
+        0,
+      )
+      return sum + totalUnits * item.amount
+    }
+    return sum + item.amount
+  }, 0)
 }
 
 function toSplitValueInputMap(bill: SimpleBill): Record<string, string> {
@@ -372,6 +527,7 @@ export function LandingProductDemo({ variant = 'standalone', className }: Landin
   const [lineSplitWith, setLineSplitWith] = useState<string[]>(demoInit.lineSplitWith)
   const [lineSplitValues, setLineSplitValues] = useState<Record<string, string>>(demoInit.lineSplitValues)
   const [linePinnedSplits, setLinePinnedSplits] = useState<PinnedSplits>(demoInit.linePinnedSplits)
+  const [editingLineId, setEditingLineId] = useState<string | null>(null)
 
   useEffect(() => {
     const payload = buildLandingDemoPayload({
@@ -692,6 +848,11 @@ export function LandingProductDemo({ variant = 'standalone', className }: Landin
     }
     setItemizedBills((prev) => [bill, ...prev])
     setItemizedSelectedId(bill.id)
+    setEditingLineId(null)
+    setLineName('')
+    setLineAmount('')
+    setLineSplitValues({})
+    setLinePinnedSplits({})
   }
 
   function addLineToBill(e: FormEvent) {
@@ -702,8 +863,7 @@ export function LandingProductDemo({ variant = 'standalone', className }: Landin
     if (!name || Number.isNaN(amount) || amount <= 0 || lineSplitWith.length === 0) return
     if (!splitsAreValid(lineSplitType, amount, lineSplitWith, lineSplitValues)) return
 
-    const line: ItemizedLine = {
-      id: crypto.randomUUID(),
+    const lineData = {
       name,
       amount,
       splitType: lineSplitType,
@@ -711,17 +871,73 @@ export function LandingProductDemo({ variant = 'standalone', className }: Landin
       splitValues: parseSplitValueMap(lineSplitValues, lineSplitWith),
     }
 
-    setItemizedBills((prev) =>
-      prev.map((bill) => (bill.id === itemizedSelected.id ? { ...bill, items: [...bill.items, line] } : bill)),
-    )
+    if (editingLineId) {
+      setItemizedBills((prev) =>
+        prev.map((bill) =>
+          bill.id === itemizedSelected.id
+            ? { ...bill, items: bill.items.map((item) => item.id === editingLineId ? { ...item, ...lineData } : item) }
+            : bill,
+        ),
+      )
+      setEditingLineId(null)
+    } else {
+      setItemizedBills((prev) =>
+        prev.map((bill) =>
+          bill.id === itemizedSelected.id
+            ? { ...bill, items: [...bill.items, { id: crypto.randomUUID(), ...lineData }] }
+            : bill,
+        ),
+      )
+    }
     setLineName('')
     setLineAmount('')
+    setLineSplitType('equal')
+    setLineSplitWith([])
+    setLineSplitValues({})
+    setLinePinnedSplits({})
+  }
+
+  function selectLineForEdit(item: ItemizedLine) {
+    setEditingLineId(item.id)
+    setLineName(item.name)
+    setLineAmount(String(item.amount))
+    setLineSplitType(item.splitType)
+    const validWith = item.splitWith.filter((name) => people.includes(name))
+    setLineSplitWith(validWith)
+    setLineSplitValues(
+      item.splitType === 'equal'
+        ? {}
+        : Object.fromEntries(
+            validWith.map((name) => [
+              name,
+              String(item.splitValues[name] ?? (item.splitType === 'quantity' ? 1 : 0)),
+            ]),
+          ),
+    )
+    setLinePinnedSplits({})
+  }
+
+  function clearLineEdit() {
+    setEditingLineId(null)
+    setLineName('')
+    setLineAmount('')
+    setLineSplitType('equal')
+    setLineSplitWith([])
     setLineSplitValues({})
     setLinePinnedSplits({})
   }
 
   function removeLineFromBill(lineId: string) {
     if (!itemizedSelected) return
+    if (editingLineId === lineId) {
+      setEditingLineId(null)
+      setLineName('')
+      setLineAmount('')
+      setLineSplitType('equal')
+      setLineSplitWith([])
+      setLineSplitValues({})
+      setLinePinnedSplits({})
+    }
     setItemizedBills((prev) =>
       prev.map((bill) =>
         bill.id === itemizedSelected.id
@@ -825,7 +1041,7 @@ export function LandingProductDemo({ variant = 'standalone', className }: Landin
                   <Input
                     value={newPersonName}
                     onChange={(e) => setNewPersonName(e.target.value)}
-                    placeholder="Add a person"
+                    placeholder="Name"
                     className="rounded-lg border-stone-200 bg-white text-sm"
                     autoComplete="off"
                     onKeyDown={(e) => {
@@ -889,7 +1105,7 @@ export function LandingProductDemo({ variant = 'standalone', className }: Landin
                       </div>
                       <div className="space-y-1">
                         <label htmlFor="demo-simple-amount" className="text-xs font-medium text-stone-600">
-                          Amount
+                          {simpleSplitType === 'quantity' ? 'Unit price' : 'Amount'}
                         </label>
                         <Input
                           id="demo-simple-amount"
@@ -935,7 +1151,7 @@ export function LandingProductDemo({ variant = 'standalone', className }: Landin
                     </div>
                     <div className="space-y-1">
                       <p className="text-xs font-medium text-stone-600">Split with</p>
-                      <PersonChipGroup
+                      <DemoPersonDropdown
                         people={people}
                         selected={simpleSplitWith}
                         onToggle={toggleSimpleSplitPerson}
@@ -1024,9 +1240,28 @@ export function LandingProductDemo({ variant = 'standalone', className }: Landin
                   </form>
 
                   {itemizedSelected && (
-                    <form onSubmit={addLineToBill} className="mt-5 space-y-3 rounded-xl border border-stone-200 bg-stone-50/50 p-3">
+                    <form
+                      onSubmit={addLineToBill}
+                      className={cn(
+                        'mt-5 space-y-3 rounded-xl border p-3 transition-colors',
+                        editingLineId
+                          ? 'border-teal-800/25 bg-teal-800/5'
+                          : 'border-stone-200 bg-stone-50/50',
+                      )}
+                    >
                       <div className="flex items-center justify-between gap-2">
-                        <p className="text-sm font-medium text-stone-600">Add item</p>
+                        <p className="text-sm font-medium text-stone-600">
+                          {editingLineId ? 'Edit item' : 'Add item'}
+                        </p>
+                        {editingLineId && (
+                          <button
+                            type="button"
+                            onClick={clearLineEdit}
+                            className="text-xs text-stone-400 hover:text-stone-600"
+                          >
+                            Clear
+                          </button>
+                        )}
                       </div>
                       <div className="grid gap-3 sm:grid-cols-[1fr_7rem] sm:items-end">
                         <div className="space-y-1">
@@ -1044,7 +1279,7 @@ export function LandingProductDemo({ variant = 'standalone', className }: Landin
                         </div>
                         <div className="space-y-1">
                           <label htmlFor="demo-item-amount" className="text-xs font-medium text-stone-600">
-                            Amount
+                            {lineSplitType === 'quantity' ? 'Unit price' : 'Amount'}
                           </label>
                           <Input
                             id="demo-item-amount"
@@ -1090,7 +1325,7 @@ export function LandingProductDemo({ variant = 'standalone', className }: Landin
                       </div>
                       <div className="space-y-1">
                         <p className="text-xs font-medium text-stone-600">Split with</p>
-                        <PersonChipGroup
+                        <DemoPersonDropdown
                           people={people}
                           selected={lineSplitWith}
                           onToggle={toggleLineSplitPerson}
@@ -1105,8 +1340,8 @@ export function LandingProductDemo({ variant = 'standalone', className }: Landin
                         onChange={handleLineSplitValueChange}
                       />
                       <Button type="submit" className="h-10 w-full rounded-lg">
-                        <Plus className="size-4" />
-                        Add item
+                        {editingLineId ? <Pencil className="size-4" /> : <Plus className="size-4" />}
+                        {editingLineId ? 'Update item' : 'Add item'}
                       </Button>
                     </form>
                   )}
@@ -1151,7 +1386,9 @@ export function LandingProductDemo({ variant = 'standalone', className }: Landin
                                   <span className="tabular-nums font-medium">
                                     {simpleSelected.splitType === 'percentage'
                                       ? `${simpleSelected.splitValues[person] ?? 0}%`
-                                      : formatCurrency(simpleSelected.splitValues[person] ?? 0, simpleSelected.currency)}
+                                      : simpleSelected.splitType === 'quantity'
+                                        ? `${simpleSelected.splitValues[person] ?? 0}×`
+                                        : formatCurrency(simpleSelected.splitValues[person] ?? 0, simpleSelected.currency)}
                                   </span>
                                 )}
                               </li>
@@ -1242,17 +1479,37 @@ export function LandingProductDemo({ variant = 'standalone', className }: Landin
                           itemizedSelected.items.map((item, index) => (
                             <div
                               key={item.id}
-                              className="rounded-2xl border border-stone-200/90 bg-white p-4 shadow-sm shadow-stone-900/4"
+                              className={cn(
+                                'rounded-2xl border p-4 shadow-sm shadow-stone-900/4 transition-colors',
+                                editingLineId === item.id
+                                  ? 'border-teal-800/40 bg-teal-800/5'
+                                  : 'border-stone-200/90 bg-white',
+                              )}
                             >
                               <div className="flex items-start justify-between gap-3">
-                                <div className="min-w-0">
+                                <button
+                                  type="button"
+                                  onClick={() => selectLineForEdit(item)}
+                                  className="min-w-0 flex-1 text-left"
+                                >
                                   <p className="text-sm font-semibold text-stone-900">
                                     {index + 1}. {item.name}
                                   </p>
                                   <p className="mt-1 text-sm font-semibold tabular-nums text-stone-900">
-                                    {formatCurrency(item.amount, itemizedSelected.currency)}
+                                    {item.splitType === 'quantity'
+                                      ? formatCurrency(
+                                          item.splitWith.reduce(
+                                            (s, name) => s + Math.floor(item.splitValues[name] ?? 0),
+                                            0,
+                                          ) * item.amount,
+                                          itemizedSelected.currency,
+                                        )
+                                      : formatCurrency(item.amount, itemizedSelected.currency)}
                                   </p>
-                                </div>
+                                  <p className="mt-0.5 text-[0.65rem] font-medium text-teal-700">
+                                    {editingLineId === item.id ? 'Editing…' : 'Tap to edit'}
+                                  </p>
+                                </button>
                                 <Button
                                   type="button"
                                   variant="ghost"
@@ -1281,7 +1538,9 @@ export function LandingProductDemo({ variant = 'standalone', className }: Landin
                                         <span className="tabular-nums font-medium">
                                           {item.splitType === 'percentage'
                                             ? `${item.splitValues[person] ?? 0}%`
-                                            : formatCurrency(item.splitValues[person] ?? 0, itemizedSelected.currency)}
+                                            : item.splitType === 'quantity'
+                                              ? `${item.splitValues[person] ?? 0}×`
+                                              : formatCurrency(item.splitValues[person] ?? 0, itemizedSelected.currency)}
                                         </span>
                                       )}
                                     </li>

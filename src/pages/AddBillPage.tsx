@@ -48,7 +48,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@/components/ui/select'
-import { SplitValueRows } from '@/components/common/SplitValueRows'
+import { SplitPersonSelector } from '@/components/common/SplitPersonSelector'
 import { ConfirmDialog } from '@/components/common/ConfirmDialog'
 
 type BillMode = 'simple' | 'itemized'
@@ -61,6 +61,13 @@ interface ItemDraft {
   selectedUserIds: string[]
   splitValues: Record<string, string>
   pinnedSplit: PinnedSplits
+}
+
+const SPLIT_TYPE_LABEL: Record<string, string> = {
+  equal: 'Equal',
+  percentage: 'By %',
+  custom: 'Custom',
+  quantity: 'By qty',
 }
 
 function newItem(): ItemDraft {
@@ -223,29 +230,31 @@ export function AddBillPage() {
     (effectiveSimpleSelectedUserIds.length > 0 &&
       lineSplitsValid(simpleSplitType, simpleAmountNum, effectiveSimpleSelectedUserIds, simpleSplitValues))
 
+  const hasAnyCompleteItem = items.some((i) => i.name.trim() && parseFloat(i.amount) > 0)
+
   const itemizedLinesOk =
     members.length === 0 ||
-    items
-      .filter((i) => i.name.trim() && parseFloat(i.amount) > 0)
-      .every((item) => {
-        const effectiveIds = getEffectiveItemIds(item)
-        if (effectiveIds.length === 0) return false
-        return lineSplitsValid(
-          item.splitType,
-          parseFloat(item.amount) || 0,
-          effectiveIds,
-          item.splitValues,
-        )
-      })
+    items.every((item) => {
+      const hasName = !!item.name.trim()
+      const hasAmount = parseFloat(item.amount) > 0
+      if (!hasName && !hasAmount) return true
+      if (!hasName || !hasAmount) return false
+      const effectiveIds = getEffectiveItemIds(item)
+      if (effectiveIds.length === 0) return false
+      return lineSplitsValid(
+        item.splitType,
+        parseFloat(item.amount) || 0,
+        effectiveIds,
+        item.splitValues,
+      )
+    })
 
   const canSave =
     Boolean(userId) &&
-    title.trim() &&
-    simpleSplitsOk &&
-    itemizedLinesOk &&
+    !!title.trim() &&
     (mode === 'simple'
-      ? simpleAmountNum > 0
-      : items.some((i) => i.name.trim() && parseFloat(i.amount) > 0))
+      ? simpleSplitsOk && simpleAmountNum > 0
+      : itemizedLinesOk && hasAnyCompleteItem)
 
   useEffect(() => {
     if (userId && !paidBy && !editBillId) setPaidBy(userId)
@@ -357,6 +366,12 @@ export function AddBillPage() {
       setSimpleSplitMeta({ values: equalPercentMap(ids), pinned: {} })
       return
     }
+    if (t === 'quantity') {
+      const defaultQty: Record<string, string> = {}
+      ids.forEach((uid) => { defaultQty[uid] = '1' })
+      setSimpleSplitMeta({ values: defaultQty, pinned: {} })
+      return
+    }
     const amt = parseFloat(simpleAmount) || 0
     setSimpleSplitMeta({
       values: amt > 0 ? equalCustomMap(ids, amt) : {},
@@ -369,6 +384,9 @@ export function AddBillPage() {
     const st = simpleSplitTypeRef.current
     const amt = parseFloat(simpleAmountStrRef.current) || 0
     setSimpleSplitMeta((meta) => {
+      if (st === 'quantity') {
+        return { ...meta, values: { ...meta.values, [uid]: raw } }
+      }
       const pinned = { ...meta.pinned }
       if (raw.trim() === '') {
         const target = st === 'percentage' ? 100 : amt
@@ -414,6 +432,11 @@ export function AddBillPage() {
             values: redistributeWithPinned(next, values, pinned, 100),
           }
         }
+        if (st === 'quantity') {
+          const nextValues = { ...values }
+          if (adding) nextValues[uid] = nextValues[uid] ?? '1'
+          return { values: nextValues, pinned: {} }
+        }
         if (st === 'custom' && amt > 0) {
           if (Object.keys(pinned).length === 0) {
             return { values: equalCustomMap(next, amt), pinned: {} }
@@ -438,7 +461,8 @@ export function AddBillPage() {
   }
 
   function expandItemLine(key: string) {
-    setCollapsedItemKeys((k) => k.filter((x) => x !== key))
+    // Collapse all other items, open only this one
+    setCollapsedItemKeys(items.map((i) => i.key).filter((k) => k !== key))
   }
 
   function openAddPerson(target: 'simple' | string) {
@@ -771,7 +795,20 @@ export function AddBillPage() {
               <button
                 type="button"
                 disabled={isEdit}
-                onClick={() => setMode('simple')}
+                onClick={() => {
+                  setMode('simple')
+                  setTitle('')
+                  setCurrency('PHP')
+                  setPaidBy(userId ?? '')
+                  setNote('')
+                  setCategory(null)
+                  setItems([newItem()])
+                  setCollapsedItemKeys([])
+                  setSimpleAmount('')
+                  setSimpleSplitType('equal')
+                  setSimpleSelectedUserIds([])
+                  setSimpleSplitMeta({ values: {}, pinned: {} })
+                }}
                 className={cn(
                   'flex items-center justify-center gap-2 rounded-2xl px-4 py-3 text-sm font-medium transition-colors',
                   mode === 'simple'
@@ -785,7 +822,20 @@ export function AddBillPage() {
               <button
                 type="button"
                 disabled={isEdit}
-                onClick={() => setMode('itemized')}
+                onClick={() => {
+                  setMode('itemized')
+                  setTitle('')
+                  setCurrency('PHP')
+                  setPaidBy(userId ?? '')
+                  setNote('')
+                  setCategory(null)
+                  setSimpleAmount('')
+                  setSimpleSplitType('equal')
+                  setSimpleSelectedUserIds([])
+                  setSimpleSplitMeta({ values: {}, pinned: {} })
+                  setItems([newItem()])
+                  setCollapsedItemKeys([])
+                }}
                 className={cn(
                   'flex items-center justify-center gap-2 rounded-2xl px-4 py-3 text-sm font-medium transition-colors',
                   mode === 'itemized'
@@ -951,7 +1001,9 @@ export function AddBillPage() {
 
               <div className="mt-4 space-y-3">
                 <div className="flex flex-col gap-2">
-                  <label className="text-sm font-medium">Total amount</label>
+                  <label className="text-sm font-medium">
+                    {simpleSplitType === 'quantity' ? 'Unit price' : 'Total amount'}
+                  </label>
                   <Input
                     type="text"
                     inputMode="decimal"
@@ -1005,39 +1057,26 @@ export function AddBillPage() {
                           <SelectItem value="equal">Equal split</SelectItem>
                           <SelectItem value="percentage">By percentage</SelectItem>
                           <SelectItem value="custom">Custom amounts</SelectItem>
+                          <SelectItem value="quantity">By quantity</SelectItem>
                         </SelectContent>
                       </Select>
                     </div>
 
                     <div className="flex flex-col gap-2">
-                      <div className="flex items-center gap-1.5 text-sm font-medium text-stone-600">
-                        <UserPlus className="size-3.5" />
-                        Split with
-                      </div>
-                      <div className="flex flex-wrap gap-1.5">
-                        {members.map((member) => {
-                          const isSelected = effectiveSimpleSelectedUserIds.includes(member.userId)
-                          const isLocked = lockUserInSplits && member.isCurrentUser
-                          return (
-                            <button
-                              key={member.userId}
-                              type="button"
-                              disabled={isLocked}
-                              onClick={() => !isLocked && toggleSimpleUser(member.userId)}
-                              className={cn(
-                                'inline-flex cursor-pointer items-center gap-1.5 rounded-full border px-3 py-2 text-sm font-medium transition-colors',
-                                isSelected
-                                  ? 'border-transparent bg-teal-800 text-white'
-                                  : 'border-stone-200 bg-white text-stone-600 hover:bg-stone-100',
-                                isLocked && 'cursor-default opacity-70',
-                              )}
-                            >
-                              <Users className="size-3.5" />
-                              {member.isCurrentUser ? 'You' : member.displayName}
-                            </button>
-                          )
-                        })}
-                      </div>
+                      <SplitPersonSelector
+                        members={members}
+                        selectedUserIds={effectiveSimpleSelectedUserIds}
+                        onToggle={toggleSimpleUser}
+                        lockedUserIds={
+                          lockUserInSplits && userId ? new Set([userId]) : undefined
+                        }
+                        splitType={simpleSplitType}
+                        currency={currency}
+                        values={simpleSplitValues}
+                        pinnedUserIds={simpleSplitMeta.pinned}
+                        lineAmount={simpleAmountNum}
+                        onValueChange={onSimpleSplitInputChange}
+                      />
 
                       {lockUserInSplits && (
                         <p className="text-xs text-stone-400">
@@ -1047,19 +1086,20 @@ export function AddBillPage() {
 
                       {!groupId && userId && (
                         <>
-                          <Button
-                            type="button"
-                            variant="ghost"
-                            size="sm"
-                            className="h-9 w-fit rounded-full px-2 text-teal-800"
-                            onClick={() => openAddPerson('simple')}
-                          >
-                            <UserPlus className="size-3.5" />
-                            Add person
-                          </Button>
+                          <div className="mt-4 flex items-center gap-1.5">
+                            <UserPlus className="size-3.5 shrink-0 text-stone-400" />
+                            <span className="text-xs text-stone-400">Someone missing?</span>
+                            <button
+                              type="button"
+                              className="text-xs font-medium text-teal-700 hover:text-teal-900"
+                              onClick={() => openAddPerson('simple')}
+                            >
+                              Add a person
+                            </button>
+                          </div>
                           {addPersonOpen && addPersonTarget === 'simple' && (
                             <div className="rounded-xl border border-teal-800/20 bg-teal-800/5 p-3">
-                              <p className="text-xs font-medium text-stone-700">New local contact</p>
+                              <p className="text-xs font-medium text-stone-700">Add as a new contact</p>
                               <div className="mt-2 flex flex-col gap-2 sm:flex-row sm:items-center">
                                 <Input
                                   placeholder="Name"
@@ -1096,17 +1136,6 @@ export function AddBillPage() {
                         </>
                       )}
 
-                      <SplitValueRows
-                        splitType={simpleSplitType}
-                        currency={currency}
-                        selectedUserIds={effectiveSimpleSelectedUserIds}
-                        members={members}
-                        values={simpleSplitValues}
-                        pinnedUserIds={simpleSplitMeta.pinned}
-                        lineAmount={simpleAmountNum}
-                        onChange={onSimpleSplitInputChange}
-                      />
-
                       {effectiveSimpleSelectedUserIds.length > 0 && simpleAmountNum > 0 && (
                         <div className="rounded-2xl border border-teal-800/20 bg-teal-800/5 px-4 py-3">
                           {simpleSplitType === 'equal' ? (
@@ -1120,6 +1149,22 @@ export function AddBillPage() {
                               each across {effectiveSimpleSelectedUserIds.length}{' '}
                               {effectiveSimpleSelectedUserIds.length === 1 ? 'person' : 'people'}
                             </p>
+                          ) : simpleSplitType === 'quantity' ? (
+                            (() => {
+                              const totalUnits = effectiveSimpleSelectedUserIds.reduce(
+                                (s, uid) => s + (parseInt(simpleSplitValues[uid] ?? '0', 10) || 0),
+                                0,
+                              )
+                              return (
+                                <p className="text-sm text-stone-500">
+                                  {totalUnits} unit{totalUnits !== 1 ? 's' : ''} ·{' '}
+                                  <span className="font-semibold text-stone-800">
+                                    {formatCurrency(totalUnits * simpleAmountNum, currency)}
+                                  </span>{' '}
+                                  total
+                                </p>
+                              )
+                            })()
                           ) : (
                             <p className="text-sm text-stone-500">
                               Total:{' '}
@@ -1160,8 +1205,12 @@ export function AddBillPage() {
                   const memberPicker = members.length > 0
                   const effectiveItemIds = getEffectiveItemIds(item)
                   const lineComplete = isItemizedLineComplete({ ...item, selectedUserIds: effectiveItemIds }, memberPicker)
-                  const collapsed = collapsedItemKeys.includes(item.key) && lineComplete
+                  const collapsed = collapsedItemKeys.includes(item.key)
                   if (collapsed) {
+                    const peopleNames = effectiveItemIds
+                      .map((uid) => members.find((m) => m.userId === uid))
+                      .filter(Boolean)
+                      .map((m) => (m!.isCurrentUser ? 'You' : m!.displayName))
                     return (
                       <div
                         key={item.key}
@@ -1170,15 +1219,26 @@ export function AddBillPage() {
                         <button
                           type="button"
                           onClick={() => expandItemLine(item.key)}
-                          className="flex w-full items-center gap-2 rounded-xl px-3 py-3 text-left transition-colors hover:bg-stone-100/80"
+                          className="flex w-full items-center gap-2 rounded-xl px-3 py-2.5 text-left transition-colors hover:bg-stone-100/80"
                         >
-                          <span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-teal-800 text-[0.65rem] font-semibold text-white">
+                          <span className={cn(
+                            'flex size-6 shrink-0 items-center justify-center rounded-full text-[0.65rem] font-semibold text-white',
+                            lineComplete ? 'bg-teal-800' : 'bg-amber-400',
+                          )}>
                             {index + 1}
                           </span>
-                          <span className="min-w-0 flex-1 truncate font-medium text-stone-800">
-                            {item.name.trim() || `Item ${index + 1}`}
-                          </span>
-                          <span className="shrink-0 tabular-nums text-sm font-semibold text-stone-700">
+                          <div className="min-w-0 flex-1">
+                            <p className="truncate text-sm font-medium text-stone-800">
+                              {item.name.trim() || `Item ${index + 1}`}
+                            </p>
+                            <p className="truncate text-xs text-stone-400">
+                              {SPLIT_TYPE_LABEL[item.splitType] ?? item.splitType}
+                              {peopleNames.length > 0 && (
+                                <> · {peopleNames.join(', ')}</>
+                              )}
+                            </p>
+                          </div>
+                          <span className="shrink-0 text-sm font-semibold tabular-nums text-stone-700">
                             {item.splitType === 'quantity'
                               ? formatCurrency(
                                   item.selectedUserIds.reduce(
@@ -1256,18 +1316,16 @@ export function AddBillPage() {
                         />
                       </div>
                       <div className="flex shrink-0 gap-0.5">
-                        {lineComplete && (
-                          <Button
-                            variant="ghost"
-                            size="icon-xs"
-                            type="button"
-                            className="mt-1.5 rounded-full text-stone-500"
-                            onClick={() => collapseItemLine(item.key)}
-                            aria-label="Collapse line"
-                          >
-                            <ChevronDown className="size-4" />
-                          </Button>
-                        )}
+                        <Button
+                          variant="ghost"
+                          size="icon-xs"
+                          type="button"
+                          className="mt-1.5 rounded-full text-stone-500"
+                          onClick={() => collapseItemLine(item.key)}
+                          aria-label="Collapse line"
+                        >
+                          <ChevronDown className="size-4" />
+                        </Button>
                         {items.length > 1 && (
                           <Button
                             variant="ghost"
@@ -1305,43 +1363,41 @@ export function AddBillPage() {
                           </Select>
                         </div>
 
-                        <div className="mt-3 flex flex-wrap gap-1.5">
-                          {members.map((member) => {
-                            const isSelected = effectiveItemIds.includes(member.userId)
-                            const isLocked = lockUserInSplits && member.isCurrentUser
-                            return (
-                              <button
-                                key={member.userId}
-                                type="button"
-                                disabled={isLocked}
-                                onClick={() => !isLocked && toggleUserForItem(item.key, member.userId)}
-                                className={cn(
-                                  'inline-flex cursor-pointer items-center gap-1 rounded-full border px-3 py-1.5 text-xs font-medium transition-colors',
-                                  isSelected
-                                    ? 'border-transparent bg-teal-800 text-white'
-                                    : 'border-stone-200 bg-white text-stone-600 hover:bg-stone-100',
-                                  isLocked && 'cursor-default opacity-70',
-                                )}
-                              >
-                                <Users className="size-3" />
-                                {member.isCurrentUser ? 'You' : member.displayName}
-                              </button>
-                            )
-                          })}
+                        <div className="mt-3">
+                          <SplitPersonSelector
+                            size="compact"
+                            showHeader={false}
+                            members={members}
+                            selectedUserIds={effectiveItemIds}
+                            onToggle={(uid) => {
+                              const isLocked = lockUserInSplits && members.find((m) => m.userId === uid)?.isCurrentUser
+                              if (!isLocked) toggleUserForItem(item.key, uid)
+                            }}
+                            lockedUserIds={
+                              lockUserInSplits && userId ? new Set([userId]) : undefined
+                            }
+                            splitType={item.splitType}
+                            currency={currency}
+                            values={item.splitValues}
+                            pinnedUserIds={item.pinnedSplit}
+                            lineAmount={parseFloat(item.amount) || 0}
+                            onValueChange={(uid, raw) => onItemSplitValueChange(item.key, uid, raw)}
+                          />
                         </div>
 
                         {!groupId && userId && (
                           <>
-                            <Button
-                              type="button"
-                              variant="ghost"
-                              size="sm"
-                              className="mt-1 h-8 w-fit rounded-full px-2 text-xs text-teal-800"
-                              onClick={() => openAddPerson(item.key)}
-                            >
-                              <UserPlus className="size-3" />
-                              Add person
-                            </Button>
+                            <div className="mt-4 flex items-center gap-1.5">
+                              <UserPlus className="size-3.5 shrink-0 text-stone-400" />
+                              <span className="text-xs text-stone-400">Someone missing?</span>
+                              <button
+                                type="button"
+                                className="text-xs font-medium text-teal-700 hover:text-teal-900"
+                                onClick={() => openAddPerson(item.key)}
+                              >
+                                Add a person
+                              </button>
+                            </div>
                             {addPersonOpen && addPersonTarget === item.key && (
                               <div className="mt-2 rounded-xl border border-teal-800/20 bg-teal-800/5 p-3">
                                 <p className="text-xs font-medium text-stone-700">New local contact</p>
@@ -1381,17 +1437,6 @@ export function AddBillPage() {
                           </>
                         )}
 
-                        <SplitValueRows
-                          splitType={item.splitType}
-                          currency={currency}
-                          selectedUserIds={effectiveItemIds}
-                          members={members}
-                          values={item.splitValues}
-                          pinnedUserIds={item.pinnedSplit}
-                          lineAmount={parseFloat(item.amount) || 0}
-                          onChange={(uid, raw) => onItemSplitValueChange(item.key, uid, raw)}
-                        />
-
                         {effectiveItemIds.length > 0 &&
                           item.splitType === 'equal' &&
                           parseFloat(item.amount) > 0 && (
@@ -1415,7 +1460,11 @@ export function AddBillPage() {
                   type="button"
                   variant="outline"
                   className="h-11 w-full rounded-xl border-dashed border-stone-300"
-                  onClick={() => setItems((prev) => [...prev, newItem()])}
+                  onClick={() => {
+                    const ni = newItem()
+                    setCollapsedItemKeys(items.map((i) => i.key))
+                    setItems((prev) => [...prev, ni])
+                  }}
                 >
                   <Plus className="size-4" />
                   Add item

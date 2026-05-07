@@ -109,13 +109,13 @@ export function AppHeader() {
             onClick={() => requestSyncNow()}
             title={
               !isOnline
-                ? 'Offline — connect to the internet to sync'
+                ? "You're offline — connect to sync your data"
                 : syncStatus === 'syncing'
                   ? 'Sync in progress…'
                   : syncStatus === 'error'
                     ? retryLabel
-                      ? `${retryLabel} — tap to retry now`
-                      : 'Tap to retry sync'
+                      ? `Sync failed — ${retryLabel.toLowerCase()} (tap to retry now)`
+                      : 'Sync failed — tap to retry'
                     : 'Tap to sync now'
             }
             className="h-auto max-w-44 gap-0 rounded-full border-stone-200/80 bg-stone-50 px-3 py-2 text-xs font-medium text-stone-600 hover:bg-stone-100 disabled:opacity-90 sm:max-w-none"
@@ -133,7 +133,7 @@ export function AppHeader() {
             ) : syncStatus === 'error' ? (
               <>
                 <Wifi className="mr-1 size-3 shrink-0 text-amber-600" />
-                <span className="truncate">{retryLabel ?? 'Sync issue'}</span>
+                <span className="truncate">{retryLabel ?? "Couldn't sync"}</span>
               </>
             ) : waitingToSync === true ? (
               <>

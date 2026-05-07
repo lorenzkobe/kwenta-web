@@ -6,11 +6,8 @@ import { filterDecimalInput, stripLeadingZerosAmount } from '@/lib/amount-input'
 import { cn, formatCurrency } from '@/lib/utils'
 import { Input } from '@/components/ui/input'
 
-export interface SplitMemberOption {
-  userId: string
-  displayName: string
-  isCurrentUser: boolean
-}
+import type { SplitMemberOption } from '@/components/common/SplitPersonSelector'
+export type { SplitMemberOption } from '@/components/common/SplitPersonSelector'
 
 export function SplitValueRows({
   splitType,
