@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import { useLiveQuery } from 'dexie-react-hooks'
-import { ArrowLeft, Check, Loader2, Pencil, ReceiptText, Share2, Trash2, Users } from 'lucide-react'
+import { ArrowLeft, Check, Clock, Loader2, Pencil, ReceiptText, Share2, Trash2, Users } from 'lucide-react'
 import {
   CATEGORY_COLORS,
   CATEGORY_ICONS,
@@ -26,6 +26,8 @@ import { generateBillDetailPDF } from '@/lib/export-pdf'
 import { exportBillsToCSV } from '@/lib/export-csv'
 import { Button } from '@/components/ui/button'
 import { RecordSettlementDialog } from '@/components/common/RecordSettlementDialog'
+import { SettlementHistoryList } from '@/components/common/SettlementHistoryList'
+import { listSettlementHistoryForBill } from '@/lib/settlement'
 import { ConfirmDialog } from '@/components/common/ConfirmDialog'
 import { ExportImageDialog } from '@/components/export/ExportImageDialog'
 import { BillExportCard } from '@/components/export/BillExportCard'
@@ -105,6 +107,11 @@ export function BillDetailPage() {
     const g = await db.groups.get(groupId)
     return g?.name ?? null
   }, [groupId])
+
+  const billPaymentHistory = useLiveQuery(async () => {
+    if (!billId) return []
+    return listSettlementHistoryForBill(billId)
+  }, [billId])
 
   const billPayments = useLiveQuery(async () => {
     if (!exportOpen || !billId) return []
@@ -377,6 +384,18 @@ export function BillDetailPage() {
               ),
             )}
           </ul>
+        </div>
+      )}
+
+      {(billPaymentHistory?.length ?? 0) > 0 && (
+        <div className="rounded-3xl border border-stone-200 bg-white p-5 shadow-sm">
+          <div className="flex items-center gap-2">
+            <Clock className="size-4 text-teal-800" />
+            <h2 className="text-lg font-semibold">Payment history</h2>
+          </div>
+          <div className="mt-4">
+            <SettlementHistoryList items={billPaymentHistory ?? []} currentUserId={userId} />
+          </div>
         </div>
       )}
 

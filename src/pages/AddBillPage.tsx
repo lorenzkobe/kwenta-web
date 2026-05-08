@@ -751,7 +751,7 @@ export function AddBillPage() {
 
   return (
     <>
-    <div className="space-y-5 overscroll-y-contain pb-28 lg:pb-0">
+    <div className="space-y-5 overscroll-y-contain pb-28">
       <div className="flex items-center justify-between">
         <Button asChild variant="ghost" size="sm" className="rounded-full gap-1">
           <Link
@@ -766,14 +766,6 @@ export function AddBillPage() {
             <ArrowLeft className="size-4" />
             Back
           </Link>
-        </Button>
-        <Button
-          onClick={handleSave}
-          disabled={!canSave || saving || loadingEdit}
-          className="hidden rounded-full lg:inline-flex"
-        >
-          <Save className="size-4" />
-          {saving ? 'Saving…' : isEdit ? 'Save changes' : 'Save bill'}
         </Button>
       </div>
 
@@ -1486,15 +1478,17 @@ export function AddBillPage() {
     </div>
 
     {!loadingEdit && (
-      <div className="fixed inset-x-0 bottom-[calc(3.5rem+env(safe-area-inset-bottom))] z-50 border-t border-stone-200/90 bg-white/95 px-4 py-3 backdrop-blur lg:hidden">
-        <Button
-          onClick={handleSave}
-          disabled={!canSave || saving}
-          className="h-11 w-full rounded-xl"
-        >
-          <Save className="size-4" />
-          {saving ? 'Saving…' : isEdit ? 'Save changes' : 'Save bill'}
-        </Button>
+      <div className="fixed inset-x-0 bottom-[calc(3.5rem+env(safe-area-inset-bottom))] z-50 border-t border-stone-200/90 bg-white/95 px-4 py-3 backdrop-blur lg:bottom-0">
+        <div className="mx-auto flex w-full max-w-7xl lg:justify-end sm:px-2">
+          <Button
+            onClick={handleSave}
+            disabled={!canSave || saving}
+            className="h-11 w-full rounded-xl lg:w-auto lg:rounded-full lg:px-6"
+          >
+            <Save className="size-4" />
+            {saving ? 'Saving…' : isEdit ? 'Save changes' : 'Save bill'}
+          </Button>
+        </div>
       </div>
     )}
 

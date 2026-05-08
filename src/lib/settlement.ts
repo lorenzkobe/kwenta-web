@@ -372,6 +372,17 @@ async function buildHistoryItemsFromRows(
   return items
 }
 
+export async function listSettlementHistoryForBill(
+  billId: string,
+): Promise<SettlementHistoryItem[]> {
+  const rows = await db.settlements
+    .where('bill_id')
+    .equals(billId)
+    .filter((s) => !s.is_deleted && s.is_settled)
+    .toArray()
+  return buildHistoryItemsFromRows(rows, null)
+}
+
 export async function listSettlementHistoryForGroup(
   groupId: string,
 ): Promise<SettlementHistoryItem[]> {
