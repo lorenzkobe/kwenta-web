@@ -11,7 +11,7 @@ const nav = [
 
 export function LandingHeader() {
   return (
-    <header className="sticky top-0 z-40 border-b border-stone-200/70 bg-[#faf8f5]/85 backdrop-blur-md">
+    <header className="sticky top-0 z-40 border-b border-stone-200/70 bg-[#faf8f5]/85 pt-[env(safe-area-inset-top)] backdrop-blur-md">
       <div className="mx-auto flex max-w-7xl items-center justify-between gap-4 px-4 py-3 sm:px-6 lg:px-8">
         <Link to="/" className="flex items-center gap-2.5 text-stone-900">
           <span className="flex size-10 items-center justify-center rounded-2xl bg-teal-800/12 text-teal-900">
