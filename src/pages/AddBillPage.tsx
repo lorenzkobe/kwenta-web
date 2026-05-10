@@ -889,7 +889,7 @@ export function AddBillPage() {
                               value={payorSearch}
                               onChange={(e) => setPayorSearch(e.target.value)}
                               autoFocus
-                              className="h-8 rounded-lg text-sm"
+                              className="h-8 rounded-lg text-[16px] leading-5"
                             />
                           </div>
                           <div className="max-h-48 overflow-y-auto pb-1">

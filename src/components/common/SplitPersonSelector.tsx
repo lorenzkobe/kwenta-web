@@ -212,7 +212,7 @@ export function SplitPersonSelector({
                   onKeyDown={(e) => {
                     if (e.key === 'Escape') closeDropdown()
                   }}
-                  className="flex-1 bg-transparent py-2 text-sm outline-none placeholder:text-stone-400"
+                  className="flex-1 bg-transparent py-2 text-[16px] leading-5 outline-none placeholder:text-stone-400"
                   autoFocus
                 />
               </div>
@@ -242,7 +242,12 @@ export function SplitPersonSelector({
                   return (
                     <div
                       key={m.userId}
-                      onClick={() => !locked && onToggle(m.userId)}
+                      onMouseDown={(e) => e.preventDefault()}
+                      onClick={() => {
+                        if (locked) return
+                        onToggle(m.userId)
+                        setSearch('')
+                      }}
                       className={cn(
                         'flex items-center gap-2 rounded-lg px-2 py-2',
                         locked ? 'cursor-default opacity-70' : 'cursor-pointer hover:bg-stone-50',
