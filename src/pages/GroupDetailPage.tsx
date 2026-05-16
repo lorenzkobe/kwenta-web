@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect } from 'react'
 import {
   ArrowLeft,
   ArrowRight,
@@ -21,7 +21,6 @@ import { Link, useNavigate, useParams } from 'react-router-dom'
 import { useLiveQuery } from 'dexie-react-hooks'
 import { db } from '@/db/db'
 import {
-  addGroupMember,
   addExistingGroupMember,
   createBundledGroupSettlement,
   createSettlement,
@@ -60,7 +59,8 @@ import { ExportImageDialog } from '@/components/export/ExportImageDialog'
 import { GroupExportCard } from '@/components/export/GroupExportCard'
 import { GroupMemberExportCard, type GroupMemberBillEntry } from '@/components/export/GroupMemberExportCard'
 import { useGroupSettlementHistory } from '@/db/hooks'
-import { getMemberSuggestions } from '@/lib/people'
+import { listCanonicalRelatedProfileIds, resolveProfileDisplay } from '@/lib/people'
+import { MemberMultiPicker } from '@/components/common/MemberMultiPicker'
 
 const CURRENCY_OPTIONS = [
   ['PHP', 'PHP — Philippine Peso'],
@@ -105,45 +105,63 @@ function ManageMembersDialog({
   onClose: () => void
   onChanged: () => void
 }) {
-  const [newName, setNewName] = useState('')
+  const [selectedIds, setSelectedIds] = useState<string[]>([])
   const [adding, setAdding] = useState(false)
   const [removing, setRemoving] = useState<string | null>(null)
   const [removeMemberTarget, setRemoveMemberTarget] = useState<{
     userId: string
     profileName: string
   } | null>(null)
-  const [suggestions, setSuggestions] = useState<
-    Awaited<ReturnType<typeof getMemberSuggestions>>
+  const [phonebook, setPhonebook] = useState<
+    { id: string; displayName: string; subtitle?: string }[]
   >([])
-  const inputRef = useRef<HTMLInputElement>(null)
+  const [keyboardInset, setKeyboardInset] = useState(0)
 
   useEffect(() => {
-    inputRef.current?.focus()
+    if (typeof window === 'undefined' || !window.visualViewport) return
+    const vv = window.visualViewport
+    const update = () => {
+      const inset = window.innerHeight - vv.height - vv.offsetTop
+      setKeyboardInset(inset > 0 ? inset : 0)
+    }
+    vv.addEventListener('resize', update)
+    vv.addEventListener('scroll', update)
+    update()
+    return () => {
+      vv.removeEventListener('resize', update)
+      vv.removeEventListener('scroll', update)
+    }
   }, [])
 
   useEffect(() => {
     let cancelled = false
     async function run() {
-      const q = newName.trim()
-      if (q.length < 1) {
-        setSuggestions([])
-        return
+      const ids = await listCanonicalRelatedProfileIds(currentUserId)
+      const rows: { id: string; displayName: string; subtitle?: string }[] = []
+      for (const id of ids) {
+        const disp = await resolveProfileDisplay(id, currentUserId)
+        rows.push({ id, displayName: disp.displayName, subtitle: disp.subtitle })
       }
-      const s = await getMemberSuggestions(currentUserId, q)
-      if (!cancelled) setSuggestions(s)
+      rows.sort((a, b) => a.displayName.localeCompare(b.displayName))
+      if (!cancelled) setPhonebook(rows)
     }
     void run()
     return () => {
       cancelled = true
     }
-  }, [newName, currentUserId])
+  }, [currentUserId])
 
-  async function handleAdd() {
-    if (!newName.trim()) return
+  const existingMemberIds = new Set(members.map((m) => m.userId))
+  const pickablePeople = phonebook.filter((p) => !existingMemberIds.has(p.id))
+
+  async function handleAddSelected() {
+    if (selectedIds.length === 0) return
     setAdding(true)
     try {
-      await addGroupMember(groupId, newName.trim(), currentUserId)
-      setNewName('')
+      for (const id of selectedIds) {
+        await addExistingGroupMember(groupId, id, currentUserId)
+      }
+      setSelectedIds([])
       onChanged()
     } finally {
       setAdding(false)
@@ -163,21 +181,12 @@ function ManageMembersDialog({
     }
   }
 
-  async function handlePickSuggestion(profileId: string) {
-    setAdding(true)
-    try {
-      await addExistingGroupMember(groupId, profileId, currentUserId)
-      setNewName('')
-      setSuggestions([])
-      onChanged()
-    } finally {
-      setAdding(false)
-    }
-  }
-
   return (
     <>
-    <div className="fixed inset-0 z-50 flex items-end justify-center p-4 sm:items-center">
+    <div
+      className="fixed inset-0 z-50 flex items-end justify-center p-4 sm:items-center"
+      style={{ paddingBottom: `calc(1rem + ${keyboardInset}px)` }}
+    >
       {sheetBackdrop(onClose)}
       <div className="relative w-full max-w-sm animate-[slideUp_0.25s_ease-out] rounded-3xl border border-stone-200 bg-white shadow-[0_20px_60px_rgba(28,25,23,0.18)]">
         <div className="flex items-center justify-between border-b border-stone-100 px-5 py-4">
@@ -236,55 +245,32 @@ function ManageMembersDialog({
         </div>
 
         {isCreator && <div className="border-t border-stone-100 px-5 py-4">
-          <p className="mb-3 text-xs font-medium text-stone-500">Add a member</p>
-          {suggestions.filter((s) => !members.some((m) => m.userId === s.id)).length > 0 && (
-            <div className="mb-3 flex flex-wrap gap-1.5">
-              {suggestions
-                .filter((s) => !members.some((m) => m.userId === s.id))
-                .map((s) => (
-                <button
-                  key={s.id}
-                  type="button"
-                  disabled={adding}
-                  onClick={() => void handlePickSuggestion(s.id)}
-                  className={cn(
-                    'rounded-full border px-2.5 py-1 text-xs font-medium transition-colors',
-                    s.kind === 'local'
-                      ? 'border-teal-800/25 bg-teal-800/8 text-teal-900 hover:bg-teal-800/10'
-                      : 'border-stone-200 bg-stone-100 text-stone-700 hover:bg-stone-200',
-                  )}
-                >
-                  {s.displayName}
-                  <span className="ml-1 text-[0.65rem] opacity-70">
-                    {s.kind === 'local' ? 'Saved' : 'Group'}
-                  </span>
-                </button>
-              ))}
-            </div>
-          )}
-          <div className="flex gap-2">
-            <Input
-              ref={inputRef}
-              type="text"
-              placeholder="Member name"
-              value={newName}
-              onChange={(e) => setNewName(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && handleAdd()}
-              className="flex-1 rounded-lg"
-            />
-            <Button
-              size="sm"
-              className="rounded-lg"
-              disabled={!newName.trim() || adding}
-              onClick={handleAdd}
-            >
-              <UserPlus className="size-3.5" />
-              {adding ? '…' : 'Add'}
-            </Button>
-          </div>
+          <p className="mb-3 text-xs font-medium text-stone-500">Add members from your phonebook</p>
+          <MemberMultiPicker
+            people={pickablePeople}
+            selectedIds={selectedIds}
+            onChange={setSelectedIds}
+            placeholder={
+              pickablePeople.length === 0 ? 'No people available to add' : 'Select people…'
+            }
+            emptyMessage="No matches in your phonebook"
+            disabled={adding || pickablePeople.length === 0}
+          />
+          <Button
+            size="sm"
+            className="mt-3 w-full rounded-lg"
+            disabled={selectedIds.length === 0 || adding}
+            onClick={handleAddSelected}
+          >
+            <UserPlus className="size-3.5" />
+            {adding
+              ? 'Adding…'
+              : selectedIds.length > 0
+                ? `Add ${selectedIds.length} member${selectedIds.length === 1 ? '' : 's'}`
+                : 'Add members'}
+          </Button>
           <p className="mt-2 text-[0.65rem] text-stone-400">
-            New names are saved to your phonebook (unique per name). Tap a suggestion to add someone
-            you already know.
+            Only people already in your phonebook can be added. Create new contacts from the People page.
           </p>
         </div>}
       </div>

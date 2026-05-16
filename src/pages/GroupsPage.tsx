@@ -1,15 +1,17 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { ChevronRight, Layers3, Plus, Users, X } from 'lucide-react'
 import { useCurrentUser } from '@/hooks/useCurrentUser'
-import { createGroup } from '@/db/operations'
+import { addExistingGroupMember, createGroup } from '@/db/operations'
 import { useLiveQuery } from 'dexie-react-hooks'
 import { db } from '@/db/db'
 import { computeAllGroupBalances, type GroupBalanceSummary } from '@/lib/settlement'
+import { listCanonicalRelatedProfileIds, resolveProfileDisplay } from '@/lib/people'
 import { formatCurrency, cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@/components/ui/select'
+import { MemberMultiPicker } from '@/components/common/MemberMultiPicker'
 
 type GroupFilter = 'all' | 'has_balance' | 'balanced'
 type GroupSort = 'name_asc' | 'name_desc' | 'updated_desc' | 'updated_asc'
@@ -39,6 +41,29 @@ export function GroupsPage() {
   const [creating, setCreating] = useState(false)
   const [filter, setFilter] = useState<GroupFilter>('all')
   const [sort, setSort] = useState<GroupSort>('name_asc')
+  const [selectedMemberIds, setSelectedMemberIds] = useState<string[]>([])
+  const [phonebook, setPhonebook] = useState<
+    { id: string; displayName: string; subtitle?: string }[]
+  >([])
+
+  useEffect(() => {
+    if (!userId || !showCreate) return
+    let cancelled = false
+    async function run() {
+      const ids = await listCanonicalRelatedProfileIds(userId!)
+      const rows: { id: string; displayName: string; subtitle?: string }[] = []
+      for (const id of ids) {
+        const disp = await resolveProfileDisplay(id, userId!)
+        rows.push({ id, displayName: disp.displayName, subtitle: disp.subtitle })
+      }
+      rows.sort((a, b) => a.displayName.localeCompare(b.displayName))
+      if (!cancelled) setPhonebook(rows)
+    }
+    void run()
+    return () => {
+      cancelled = true
+    }
+  }, [userId, showCreate])
 
   const groupsWithBalances = useLiveQuery(async () => {
     if (!userId) return []
@@ -106,8 +131,12 @@ export function GroupsPage() {
     if (!userId || !name.trim()) return
     setCreating(true)
     try {
-      await createGroup(name.trim(), currency, userId)
+      const groupId = await createGroup(name.trim(), currency, userId)
+      for (const memberId of selectedMemberIds) {
+        await addExistingGroupMember(groupId, memberId, userId)
+      }
       setName('')
+      setSelectedMemberIds([])
       setShowCreate(false)
     } finally {
       setCreating(false)
@@ -202,6 +231,24 @@ export function GroupsPage() {
                   <SelectItem value="GBP">GBP — British Pound</SelectItem>
                 </SelectContent>
               </Select>
+            </div>
+            <div className="flex flex-col gap-2">
+              <label className="text-sm font-medium text-stone-800">
+                Add members (optional)
+              </label>
+              <MemberMultiPicker
+                people={phonebook}
+                selectedIds={selectedMemberIds}
+                onChange={setSelectedMemberIds}
+                placeholder={
+                  phonebook.length === 0 ? 'No people in your phonebook yet' : 'Select people…'
+                }
+                emptyMessage="No matches in your phonebook"
+                disabled={creating || phonebook.length === 0}
+              />
+              <p className="text-[0.65rem] text-stone-400">
+                Only people already in your phonebook can be added. Create new contacts from the People page.
+              </p>
             </div>
             <Button
               className="w-full rounded-xl"
