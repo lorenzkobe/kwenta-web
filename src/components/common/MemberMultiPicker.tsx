@@ -47,6 +47,7 @@ export function MemberMultiPicker({
     const spaceBelow = window.innerHeight - rect.bottom - 8
     const spaceAbove = rect.top - 8
     const openUpward = spaceAbove > spaceBelow && spaceBelow < 200
+    const MAX_DROPDOWN_HEIGHT = 280
 
     setDropdownStyle(
       openUpward
@@ -55,7 +56,7 @@ export function MemberMultiPicker({
             bottom: window.innerHeight - rect.top + 4,
             left: rect.left,
             width: rect.width,
-            maxHeight: Math.max(spaceAbove, 120),
+            maxHeight: `clamp(120px, calc(${spaceAbove}px - env(safe-area-inset-top)), ${MAX_DROPDOWN_HEIGHT}px)`,
             zIndex: 9999,
           }
         : {
@@ -63,7 +64,7 @@ export function MemberMultiPicker({
             top: rect.bottom + 4,
             left: rect.left,
             width: rect.width,
-            maxHeight: Math.max(spaceBelow, 120),
+            maxHeight: `clamp(120px, calc(${spaceBelow}px - env(safe-area-inset-bottom)), ${MAX_DROPDOWN_HEIGHT}px)`,
             zIndex: 9999,
           },
     )
