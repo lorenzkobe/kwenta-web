@@ -2032,7 +2032,11 @@ export async function getBillWithDetails(billId: string) {
 
       const splitsWithNames = await Promise.all(
         activeSplits.map(async (split) => {
-          const profile = await db.profiles.get(split.user_id)
+          let profile = await db.profiles.get(split.user_id)
+          if (!profile) {
+            await fetchRemoteProfileIntoDexie(split.user_id)
+            profile = await db.profiles.get(split.user_id)
+          }
           let displayName = profile?.display_name
           if (!displayName && bill.group_id) {
             const member = await db.group_members
@@ -2049,7 +2053,11 @@ export async function getBillWithDetails(billId: string) {
     }),
   )
 
-  const creator = await db.profiles.get(bill.created_by)
+  let creator = await db.profiles.get(bill.created_by)
+  if (!creator) {
+    await fetchRemoteProfileIntoDexie(bill.created_by)
+    creator = await db.profiles.get(bill.created_by)
+  }
   let creatorName = creator?.display_name
   if (!creatorName && bill.group_id) {
     const member = await db.group_members
@@ -2063,7 +2071,11 @@ export async function getBillWithDetails(billId: string) {
   if (bill.paid_by === bill.created_by) {
     payorName = creatorName
   } else {
-    const payor = await db.profiles.get(bill.paid_by)
+    let payor = await db.profiles.get(bill.paid_by)
+    if (!payor) {
+      await fetchRemoteProfileIntoDexie(bill.paid_by)
+      payor = await db.profiles.get(bill.paid_by)
+    }
     payorName = payor?.display_name
     if (!payorName && bill.group_id) {
       const member = await db.group_members

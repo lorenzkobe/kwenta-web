@@ -5,7 +5,7 @@ import { useLiveQuery } from 'dexie-react-hooks'
 import { db } from '@/db/db'
 import { deleteBill } from '@/db/operations'
 import { isPersonalBillFullySettled } from '@/lib/personal-bill-status'
-import { participantUnionForBill } from '@/lib/people'
+import { fetchRemoteProfileIntoDexie, participantUnionForBill } from '@/lib/people'
 import { useCurrentUser } from '@/hooks/useCurrentUser'
 import { formatCurrency, timeAgo, cn } from '@/lib/utils'
 import {
@@ -93,7 +93,11 @@ export function BillsPage() {
       for (const uid of union) {
         if (seen.has(uid)) continue
         seen.add(uid)
-        const p = await db.profiles.get(uid)
+        let p = await db.profiles.get(uid)
+        if (!p) {
+          await fetchRemoteProfileIntoDexie(uid)
+          p = await db.profiles.get(uid)
+        }
         const name = p?.display_name ?? 'Someone'
         participantPills.push({
           id: uid,
@@ -105,7 +109,11 @@ export function BillsPage() {
         if (b.label === 'You') return 1
         return a.label.localeCompare(b.label)
       })
-      const payor = await db.profiles.get(bill.paid_by)
+      let payor = await db.profiles.get(bill.paid_by)
+      if (!payor) {
+        await fetchRemoteProfileIntoDexie(bill.paid_by)
+        payor = await db.profiles.get(bill.paid_by)
+      }
       const settled = await isPersonalBillFullySettled(bill.id, currentUserId)
       return {
         id: bill.id,
