@@ -5,7 +5,13 @@ import { useLiveQuery } from 'dexie-react-hooks'
 import { db } from '@/db/db'
 import { deleteBill } from '@/db/operations'
 import { isPersonalBillFullySettled } from '@/lib/personal-bill-status'
-import { fetchRemoteProfileIntoDexie, participantUnionForBill } from '@/lib/people'
+import {
+  dedupeParticipantIds,
+  expandProfileIdsForSplitMatching,
+  fetchRemoteProfileIntoDexie,
+  participantUnionForBill,
+  resolveProfileDisplay,
+} from '@/lib/people'
 import { useCurrentUser } from '@/hooks/useCurrentUser'
 import { formatCurrency, timeAgo, cn } from '@/lib/utils'
 import {
@@ -88,21 +94,16 @@ export function BillsPage() {
       const items = await db.bill_items.where('bill_id').equals(bill.id).toArray()
       const activeItems = items.filter((i) => !i.is_deleted)
       const union = await participantUnionForBill(bill.id)
+      const reps = await dedupeParticipantIds(union, currentUserId)
       const participantPills: { id: string; label: string }[] = []
-      const seen = new Set<string>()
-      for (const uid of union) {
-        if (seen.has(uid)) continue
-        seen.add(uid)
-        let p = await db.profiles.get(uid)
-        if (!p) {
-          await fetchRemoteProfileIntoDexie(uid)
-          p = await db.profiles.get(uid)
+      const myIds = await expandProfileIdsForSplitMatching(currentUserId, currentUserId)
+      for (const uid of reps) {
+        if (myIds.has(uid)) {
+          participantPills.push({ id: uid, label: 'You' })
+          continue
         }
-        const name = p?.display_name ?? 'Someone'
-        participantPills.push({
-          id: uid,
-          label: uid === currentUserId ? 'You' : name,
-        })
+        const disp = await resolveProfileDisplay(uid, currentUserId)
+        participantPills.push({ id: uid, label: disp.displayName })
       }
       participantPills.sort((a, b) => {
         if (a.label === 'You') return -1

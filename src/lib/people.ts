@@ -155,8 +155,8 @@ export async function resolveProfileDisplay(
     }
     if (linked && !linked.is_deleted) {
       return {
-        displayName: linked.display_name,
-        subtitle: `Linked · Saved as ${p.display_name}`,
+        displayName: p.display_name,
+        subtitle: `Linked · ${linked.display_name}`,
       }
     }
     return {
@@ -1090,6 +1090,37 @@ export async function participantUnionForBill(billId: string): Promise<Set<strin
     }
   }
   return union
+}
+
+/**
+ * Collapse participant ids that refer to the same real person into one representative id.
+ * A linked local contact and its remote account can both end up in a single bill's participant
+ * set (push rewrites splits/paid_by to the remote id asynchronously, leaving the local copy mixed).
+ * Prefers an owned local contact as the representative so the viewer's saved name is shown.
+ */
+export async function dedupeParticipantIds(
+  ids: Iterable<string>,
+  viewerUserId: string,
+): Promise<string[]> {
+  const input = [...new Set(ids)]
+  const assigned = new Set<string>()
+  const reps: string[] = []
+  for (const id of input) {
+    if (assigned.has(id)) continue
+    const cluster = await expandProfileIdsForSplitMatching(id, viewerUserId)
+    const members = input.filter((x) => cluster.has(x))
+    for (const m of members) assigned.add(m)
+    let rep = id
+    for (const m of members) {
+      const p = await db.profiles.get(m)
+      if (p && !p.is_deleted && p.is_local && p.owner_id === viewerUserId) {
+        rep = m
+        break
+      }
+    }
+    reps.push(rep)
+  }
+  return reps
 }
 
 function profileSetTouchesBill(

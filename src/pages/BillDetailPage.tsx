@@ -14,6 +14,7 @@ import { BILL_BACK_QUERY, billDetailBackPath, withBillBackQuery } from '@/lib/bi
 import {
   computePairwiseNet,
   computePairwiseNetForBill,
+  dedupeParticipantIds,
   expandProfileIdsForSplitMatching,
   participantUnionForBill,
   resolveProfileDisplay,
@@ -143,7 +144,9 @@ export function BillDetailPage() {
     }
     const union = await participantUnionForBill(billId)
     union.add(bill.paid_by)
-    const others = [...union].filter((id) => id !== userId)
+    const myIds = await expandProfileIdsForSplitMatching(userId, userId)
+    const reps = await dedupeParticipantIds(union, userId)
+    const others = reps.filter((id) => !myIds.has(id))
     const rows: { otherId: string; displayName: string; net: number; autoOffset?: boolean; globalNet?: number }[] = []
     for (const oid of others) {
       const net = await computePairwiseNetForBill(billId, userId, oid)
