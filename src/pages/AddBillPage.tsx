@@ -217,13 +217,9 @@ export function AddBillPage() {
     return [...simpleSelectedUserIds, userId]
   }, [lockUserInSplits, userId, simpleSelectedUserIds])
 
-  // Same guarantee for each itemized line.
-  function getEffectiveItemIds(item: ItemDraft): string[] {
-    if (!lockUserInSplits || !userId || item.selectedUserIds.includes(userId)) {
-      return item.selectedUserIds
-    }
-    return [...item.selectedUserIds, userId]
-  }
+  // Itemized lines are NOT force-locked to the current user. When someone else
+  // paid, the user only needs to appear in at least one complete item (see
+  // itemizedIncludesUser), not every item — they may not have consumed all of them.
 
   const simpleSplitsOk =
     members.length === 0 ||
@@ -239,29 +235,40 @@ export function AddBillPage() {
       const hasAmount = parseFloat(item.amount) > 0
       if (!hasName && !hasAmount) return true
       if (!hasName || !hasAmount) return false
-      const effectiveIds = getEffectiveItemIds(item)
-      if (effectiveIds.length === 0) return false
+      if (item.selectedUserIds.length === 0) return false
       return lineSplitsValid(
         item.splitType,
         parseFloat(item.amount) || 0,
-        effectiveIds,
+        item.selectedUserIds,
         item.splitValues,
       )
     })
+
+  // When someone else paid a personal bill, the current user must appear in at
+  // least one complete item (they owe their share of something on the bill).
+  const itemizedIncludesUser =
+    !lockUserInSplits ||
+    !userId ||
+    items.some(
+      (item) =>
+        item.name.trim() &&
+        parseFloat(item.amount) > 0 &&
+        item.selectedUserIds.includes(userId),
+    )
 
   const canSave =
     Boolean(userId) &&
     !!title.trim() &&
     (mode === 'simple'
       ? simpleSplitsOk && simpleAmountNum > 0
-      : itemizedLinesOk && hasAnyCompleteItem)
+      : itemizedLinesOk && hasAnyCompleteItem && itemizedIncludesUser)
 
   useEffect(() => {
     if (userId && !paidBy && !editBillId) setPaidBy(userId)
   }, [userId, paidBy, editBillId])
 
-  // Both simple and itemized modes now derive effective IDs synchronously
-  // (effectiveSimpleSelectedUserIds / getEffectiveItemIds), so no async lock effect needed.
+  // Simple mode derives effective IDs synchronously (effectiveSimpleSelectedUserIds),
+  // so no async lock effect needed. Itemized lines use their raw selections.
 
   const payorOptions = members
   const filteredPayorOptions = payorSearch.trim()
@@ -703,7 +710,7 @@ export function AddBillPage() {
           items: validItems.map((item) => ({
             name: item.name.trim(),
             amount: parseFloat(item.amount),
-            splits: buildSplitPayload(getEffectiveItemIds(item), item.splitType, item.splitValues),
+            splits: buildSplitPayload(item.selectedUserIds, item.splitType, item.splitValues),
           })),
         }
       }
@@ -1190,13 +1197,18 @@ export function AddBillPage() {
                   {items.filter((i) => parseFloat(i.amount) > 0).length} item
                   {items.filter((i) => parseFloat(i.amount) > 0).length !== 1 ? 's' : ''}
                 </p>
+                {lockUserInSplits && !itemizedIncludesUser && (
+                  <p className="mt-1 text-xs text-amber-600">
+                    Someone else paid, so add yourself to at least one item.
+                  </p>
+                )}
               </div>
 
               <div className="mt-4 space-y-3">
                 {items.map((item, index) => {
                   const memberPicker = members.length > 0
-                  const effectiveItemIds = getEffectiveItemIds(item)
-                  const lineComplete = isItemizedLineComplete({ ...item, selectedUserIds: effectiveItemIds }, memberPicker)
+                  const effectiveItemIds = item.selectedUserIds
+                  const lineComplete = isItemizedLineComplete(item, memberPicker)
                   const collapsed = collapsedItemKeys.includes(item.key)
                   if (collapsed) {
                     const peopleNames = effectiveItemIds
@@ -1361,13 +1373,7 @@ export function AddBillPage() {
                             showHeader={false}
                             members={members}
                             selectedUserIds={effectiveItemIds}
-                            onToggle={(uid) => {
-                              const isLocked = lockUserInSplits && members.find((m) => m.userId === uid)?.isCurrentUser
-                              if (!isLocked) toggleUserForItem(item.key, uid)
-                            }}
-                            lockedUserIds={
-                              lockUserInSplits && userId ? new Set([userId]) : undefined
-                            }
+                            onToggle={(uid) => toggleUserForItem(item.key, uid)}
                             splitType={item.splitType}
                             currency={currency}
                             values={item.splitValues}
