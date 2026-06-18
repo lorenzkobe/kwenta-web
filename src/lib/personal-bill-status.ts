@@ -1,5 +1,6 @@
 import { db } from '@/db/db'
 import { computePairwiseNetForBill, participantUnionForBill } from '@/lib/people'
+import { isEffectivelyZero } from '@/lib/utils'
 
 /** True when all bill-attributed pairwise nets vs other participants are ~zero (nothing left to settle on this bill). */
 export async function isPersonalBillFullySettled(
@@ -12,7 +13,7 @@ export async function isPersonalBillFullySettled(
   const others = [...union].filter((id) => id !== currentUserId)
   for (const oid of others) {
     const net = await computePairwiseNetForBill(billId, currentUserId, oid)
-    if (Math.abs(net) > 0.02) return false
+    if (!isEffectivelyZero(net)) return false
   }
   return true
 }

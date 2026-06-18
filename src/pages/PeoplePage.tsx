@@ -63,7 +63,7 @@ export function PeoplePage() {
   }, [duplicateNotice])
 
   async function handleAddContact() {
-    if (!userId || !newName.trim()) return
+    if (!userId || !newName.trim() || adding) return
     setDuplicateNotice(null)
     setAdding(true)
     try {

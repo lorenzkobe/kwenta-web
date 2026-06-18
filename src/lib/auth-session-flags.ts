@@ -1,14 +1,22 @@
 /** User chose Sign out in Settings (not session expiry / tab close). */
-let voluntarySignOut = false
+const VOLUNTARY_SIGN_OUT_KEY = 'kwenta_voluntary_sign_out'
 
 export function markVoluntarySignOut() {
-  voluntarySignOut = true
+  try {
+    sessionStorage.setItem(VOLUNTARY_SIGN_OUT_KEY, '1')
+  } catch {
+    /* sessionStorage unavailable; best effort */
+  }
 }
 
 export function consumeVoluntarySignOut(): boolean {
-  const v = voluntarySignOut
-  voluntarySignOut = false
-  return v
+  try {
+    const v = sessionStorage.getItem(VOLUNTARY_SIGN_OUT_KEY) === '1'
+    sessionStorage.removeItem(VOLUNTARY_SIGN_OUT_KEY)
+    return v
+  } catch {
+    return false
+  }
 }
 
 export const SESSION_EXPIRED_MESSAGE_KEY = 'kwenta_show_session_expired_on_login'

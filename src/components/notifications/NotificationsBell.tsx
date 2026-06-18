@@ -29,6 +29,9 @@ export function NotificationsBell({ userId }: { userId: string }) {
   const wrapRef = useRef<HTMLDivElement>(null)
   const initializedRef = useRef(false)
   const loadListRef = useRef<() => Promise<void>>(() => Promise.resolve())
+  // Ids already reflected in the unread counter. Used to dedupe realtime INSERTs
+  // against rows the mount/online fetch already counted (synchronous, unlike React state).
+  const countedIdsRef = useRef<Set<string>>(new Set())
   const unreadCacheKey = `kwenta_notifications_unread:${userId}`
 
   const loadList = useCallback(async () => {
@@ -38,6 +41,7 @@ export function NotificationsBell({ userId }: { userId: string }) {
     try {
       const rows = await withMetric('notifications.fetchList', () => fetchKwentaNotifications(userId), { trigger: 'open_or_manual' })
       setItems(rows)
+      countedIdsRef.current = new Set(rows.map((r) => r.id))
       const nextUnread = rows.filter((r) => !r.read_at).length
       setUnread(nextUnread)
       localStorage.setItem(unreadCacheKey, String(nextUnread))
@@ -92,15 +96,21 @@ export function NotificationsBell({ userId }: { userId: string }) {
           if (payload.eventType === 'DELETE') {
             const prev = (payload.old ?? null) as Partial<KwentaNotificationRow> | null
             if (!prev?.id) return
+            const wasCounted = countedIdsRef.current.delete(prev.id)
             setItems((rows) => rows.filter((r) => r.id !== prev.id))
-            if (!prev.read_at) setUnread((n) => Math.max(0, n - 1))
+            if (!prev.read_at && wasCounted) setUnread((n) => Math.max(0, n - 1))
             return
           }
           const next = payload.new as KwentaNotificationRow | null
           if (!next) return
           if (payload.eventType === 'INSERT') {
+            // Synchronous dedupe: only count + toast when this row hasn't already been
+            // reflected in the counter (guards against the mount/online fetch and the
+            // realtime INSERT double-counting the same row).
+            const isNew = !countedIdsRef.current.has(next.id)
+            countedIdsRef.current.add(next.id)
             setItems((prev) => [next, ...prev.filter((p) => p.id !== next.id)].slice(0, 50))
-            if (!next.read_at) {
+            if (!next.read_at && isNew) {
               setUnread((n) => n + 1)
               toast(next.title, { description: next.body, id: next.id })
             }

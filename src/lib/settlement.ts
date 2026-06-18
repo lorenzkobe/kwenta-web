@@ -65,6 +65,24 @@ export async function computeGroupBalances(
     profileMap.set(m.user_id, profile?.display_name ?? m.display_name)
   }
 
+  // Canonicalize identities so a person who exists as both a local-contact id and a
+  // linked remote account id collapses to a single balance entry. Without this, the
+  // payer credit and the split debit for the same human can land on different ids
+  // (during/after linking), so the group never balances and the person shows twice.
+  // Members are keyed by their (possibly remote) membership id; map every local
+  // contact that links to a member id onto that member id.
+  const canonicalId = new Map<string, string>()
+  for (const m of activeMembers) canonicalId.set(m.user_id, m.user_id)
+  const linkedProfiles = await db.profiles
+    .filter((p) => Boolean(p.linked_profile_id) && !p.is_deleted)
+    .toArray()
+  for (const p of linkedProfiles) {
+    if (p.linked_profile_id && canonicalId.has(p.linked_profile_id)) {
+      canonicalId.set(p.id, p.linked_profile_id)
+    }
+  }
+  const canon = (id: string) => canonicalId.get(id) ?? id
+
   const bills = await db.bills.where('group_id').equals(groupId).toArray()
   const activeBills = bills.filter((b) => !b.is_deleted)
   const billIds = activeBills.map((bill) => bill.id)
@@ -95,6 +113,9 @@ export async function computeGroupBalances(
   }
 
   for (const bill of activeBills) {
+    // Group balances are single-currency (the group's). Defensively skip any row that
+    // somehow carries a different currency rather than summing across currencies.
+    if (bill.currency && bill.currency !== group.currency) continue
     for (const item of itemsByBillId.get(bill.id) ?? []) {
       const activeSplits = splitsByItemId.get(item.id) ?? []
 
@@ -104,19 +125,25 @@ export async function computeGroupBalances(
       if (!payer) continue
       const totalSplitAmount = activeSplits.reduce((sum, s) => sum + s.computed_amount, 0)
 
-      netBalance.set(payer, (netBalance.get(payer) ?? 0) + totalSplitAmount)
+      const payerId = canon(payer)
+      netBalance.set(payerId, (netBalance.get(payerId) ?? 0) + totalSplitAmount)
 
       for (const split of activeSplits) {
-        netBalance.set(split.user_id, (netBalance.get(split.user_id) ?? 0) - split.computed_amount)
+        const uid = canon(split.user_id)
+        netBalance.set(uid, (netBalance.get(uid) ?? 0) - split.computed_amount)
       }
     }
   }
 
   const settlements = await db.settlements.where('group_id').equals(groupId).toArray()
-  const activeSettlements = settlements.filter((s) => !s.is_deleted && s.is_settled)
+  const activeSettlements = settlements.filter(
+    (s) => !s.is_deleted && s.is_settled && (!s.currency || s.currency === group.currency),
+  )
   for (const s of activeSettlements) {
-    netBalance.set(s.from_user_id, (netBalance.get(s.from_user_id) ?? 0) + s.amount)
-    netBalance.set(s.to_user_id, (netBalance.get(s.to_user_id) ?? 0) - s.amount)
+    const fromId = canon(s.from_user_id)
+    const toId = canon(s.to_user_id)
+    netBalance.set(fromId, (netBalance.get(fromId) ?? 0) + s.amount)
+    netBalance.set(toId, (netBalance.get(toId) ?? 0) - s.amount)
   }
 
   // Resolve display names for any userId that appeared in splits/settlements
@@ -173,19 +200,22 @@ function optimizeSettlements(
   balances: BalanceEntry[],
   nameMap: Map<string, string>,
 ): SettlementSuggestion[] {
-  const receiveSide: { userId: string; amount: number }[] = []
-  const paySide: { userId: string; amount: number }[] = []
+  // Work in integer cents so min()/subtraction are exact: the previous float version
+  // could leave sub-cent residuals that prevented the suggestions from fully settling.
+  const receiveSide: { userId: string; cents: number }[] = []
+  const paySide: { userId: string; cents: number }[] = []
 
   for (const b of balances) {
-    if (b.amount > 0.01) {
-      receiveSide.push({ userId: b.userId, amount: b.amount })
-    } else if (b.amount < -0.01) {
-      paySide.push({ userId: b.userId, amount: Math.abs(b.amount) })
+    const cents = Math.round(b.amount * 100)
+    if (cents > 0) {
+      receiveSide.push({ userId: b.userId, cents })
+    } else if (cents < 0) {
+      paySide.push({ userId: b.userId, cents: -cents })
     }
   }
 
-  receiveSide.sort((a, b) => b.amount - a.amount)
-  paySide.sort((a, b) => b.amount - a.amount)
+  receiveSide.sort((a, b) => b.cents - a.cents)
+  paySide.sort((a, b) => b.cents - a.cents)
 
   const suggestions: SettlementSuggestion[] = []
   let ri = 0
@@ -194,23 +224,23 @@ function optimizeSettlements(
   while (ri < receiveSide.length && pi < paySide.length) {
     const receiver = receiveSide[ri]
     const payer = paySide[pi]
-    const amount = Math.round(Math.min(receiver.amount, payer.amount) * 100) / 100
+    const cents = Math.min(receiver.cents, payer.cents)
 
-    if (amount > 0) {
+    if (cents > 0) {
       suggestions.push({
         fromUserId: payer.userId,
         fromName: nameMap.get(payer.userId) ?? 'Unknown',
         toUserId: receiver.userId,
         toName: nameMap.get(receiver.userId) ?? 'Unknown',
-        amount,
+        amount: cents / 100,
       })
     }
 
-    receiver.amount -= amount
-    payer.amount -= amount
+    receiver.cents -= cents
+    payer.cents -= cents
 
-    if (receiver.amount < 0.01) ri++
-    if (payer.amount < 0.01) pi++
+    if (receiver.cents === 0) ri++
+    if (payer.cents === 0) pi++
   }
 
   return suggestions

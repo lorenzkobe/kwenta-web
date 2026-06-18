@@ -46,20 +46,44 @@ function computePercentage(
   amount: number,
   splits: SplitInput[],
 ): { userId: string; computedAmount: number }[] {
-  return splits.map((s) => ({
+  const rows = splits.map((s) => ({
     userId: s.userId,
     computedAmount: Math.round(amount * (s.splitValue / 100) * 100) / 100,
   }))
+  if (rows.length === 0) return rows
+  // Reconcile independent rounding so the shares sum to the intended total
+  // (round(amount × Σpct/100)); without this, e.g. 33.33/33.33/33.34 can drift a cent.
+  const totalPct = splits.reduce((sum, s) => sum + s.splitValue, 0)
+  const target = Math.round(amount * (totalPct / 100) * 100) / 100
+  const sum = rows.reduce((s, r) => s + r.computedAmount, 0)
+  const diff = Math.round((target - sum) * 100) / 100
+  if (diff !== 0) rows[0].computedAmount = Math.round((rows[0].computedAmount + diff) * 100) / 100
+  return rows
 }
 
 function computeQuantity(
   unitPrice: number,
   splits: SplitInput[],
 ): { userId: string; computedAmount: number }[] {
-  return splits.map((s) => ({
+  const rows = splits.map((s) => ({
     userId: s.userId,
     computedAmount: Math.round(s.splitValue * unitPrice * 100) / 100,
   }))
+  if (rows.length === 0) return rows
+  // Reconcile rounding so shares sum to round(unitPrice × Σqty); assign any leftover
+  // cent to the largest-quantity share.
+  const totalQty = splits.reduce((sum, s) => sum + s.splitValue, 0)
+  const target = Math.round(unitPrice * totalQty * 100) / 100
+  const sum = rows.reduce((s, r) => s + r.computedAmount, 0)
+  const diff = Math.round((target - sum) * 100) / 100
+  if (diff !== 0) {
+    let idx = 0
+    for (let i = 1; i < splits.length; i++) {
+      if (splits[i].splitValue > splits[idx].splitValue) idx = i
+    }
+    rows[idx].computedAmount = Math.round((rows[idx].computedAmount + diff) * 100) / 100
+  }
+  return rows
 }
 
 function computeCustom(

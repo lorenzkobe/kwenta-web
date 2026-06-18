@@ -9,9 +9,18 @@ npm run dev        # Start Vite dev server
 npm run build      # TypeScript check + Vite production build
 npm run lint       # Run ESLint
 npm run preview    # Preview production build locally
+npm test           # Run unit tests once (Vitest)
+npm run test:watch # Run unit tests in watch mode
 ```
 
-No test suite is configured.
+## Testing Policy (required)
+
+Tests are **mandatory** for this project — we create tests and run testing as part of every change, not as an afterthought.
+
+- The test runner is **Vitest** (`vitest.config.ts`, `happy-dom` environment, `@` alias). Tests live next to source as `*.test.ts` under `src/`.
+- When adding or changing behavior, add/extend unit tests that cover it. Prefer the pure-logic modules (`src/lib/splits.ts`, `src/lib/utils.ts`, `src/lib/settlement.ts` helpers, etc.). For Dexie-backed functions, use `fake-indexeddb` to stand up the DB.
+- Run `npm test` before considering any change complete — it must pass.
+- Existing coverage: `src/lib/splits.test.ts` (all split types + rounding/remainder edge cases) and `src/lib/utils.test.ts` (`cn`, `generateId`, `getDeviceId`, `now`, `formatCurrency`, `timeAgo`). Expand outward from here toward settlement/people/sync logic.
 
 After every edit, run `npm run build` to confirm no TypeScript errors. If the build reports `TS1127: Invalid character`, the Edit tool introduced Unicode curly quotes (`'`, `'`, `"`, `"`) into string literals. Fix with:
 

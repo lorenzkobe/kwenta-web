@@ -128,7 +128,7 @@ export function GroupsPage() {
   const groupsLoading = groupsWithBalances === undefined
 
   async function handleCreate() {
-    if (!userId || !name.trim()) return
+    if (!userId || !name.trim() || creating) return
     setCreating(true)
     try {
       const groupId = await createGroup(name.trim(), currency, userId)

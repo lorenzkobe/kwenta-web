@@ -3,7 +3,7 @@ import type { Bill } from '@/types'
 import type { SettlementHistoryItem } from '@/lib/settlement'
 import { computeGroupBalances } from '@/lib/settlement'
 import { supabase } from '@/lib/supabase'
-import { formatCurrency } from '@/lib/utils'
+import { formatCurrency, MONEY_EPSILON } from '@/lib/utils'
 
 /**
  * Fetch a profile from the server and insert it into local Dexie if missing.
@@ -170,7 +170,7 @@ export async function resolveProfileDisplay(
   }
 }
 
-/** Net balance per currency: positive = you should receive from them, negative = you should pay them. Personal bills use direct payer-split pairwise; group bills use each member's group-level net balance (same algorithm as computeGroupBalances) to derive the pairwise amount, so group settlements that consolidate multi-party debts are handled correctly. */
+/** Net balance per currency: positive = you should receive from them, negative = you should pay them. Personal bills use direct payer-split pairwise. Group bills only contribute when the group has exactly 2 members (where pairwise == group net exactly); 3+ member groups are intentionally excluded here because a pairwise figure can't be soundly derived from aggregate group nets — their standing is surfaced per-group by listSharedGroupsWithBalance. */
 export async function computePairwiseNet(
   meId: string,
   otherId: string,
@@ -301,6 +301,15 @@ export async function computePairwiseNet(
     const group = await db.groups.get(groupId)
     if (!group || group.is_deleted) continue
 
+    // Deriving a two-person figure from each member's group-level net is only exact in
+    // a 2-member group. With 3+ members, net balances aren't pairwise-additive (another
+    // member's debt can leak into this figure), so we don't fabricate a pairwise number
+    // for the headline. The honest per-group standing is shown separately by
+    // listSharedGroupsWithBalance on the Person page.
+    const groupMembers = await db.group_members.where('group_id').equals(groupId).toArray()
+    const activeMemberCount = groupMembers.filter((m) => !m.is_deleted).length
+    if (activeMemberCount > 2) continue
+
     const groupBills = await db.bills.where('group_id').equals(groupId).toArray()
     const activeGroupBills = groupBills.filter((bill) => !bill.is_deleted)
     const groupBillIds = activeGroupBills.map((bill) => bill.id)
@@ -358,10 +367,10 @@ export async function computePairwiseNet(
     const cur = group.currency
     const prev = byCurrency.get(cur) ?? 0
 
-    if (meGroupNet > 0.005 && otherGroupNet < -0.005) {
+    if (meGroupNet > MONEY_EPSILON && otherGroupNet < -MONEY_EPSILON) {
       // I should receive from the group, other should pay — other owes me up to min of both
       byCurrency.set(cur, prev + Math.min(meGroupNet, Math.abs(otherGroupNet)))
-    } else if (meGroupNet < -0.005 && otherGroupNet > 0.005) {
+    } else if (meGroupNet < -MONEY_EPSILON && otherGroupNet > MONEY_EPSILON) {
       // I should pay to the group, other should receive — I owe other up to min of both
       byCurrency.set(cur, prev - Math.min(Math.abs(meGroupNet), otherGroupNet))
     }
@@ -464,12 +473,12 @@ async function listEligiblePersonalBillBalances(params: {
   for (const bill of personal) {
     const net = await computePairwiseNetForBill(bill.id, params.meId, params.otherId)
     let due = 0
-    if (params.direction === 'other_to_me' && net > 0.005) {
+    if (params.direction === 'other_to_me' && net > MONEY_EPSILON) {
       due = net
-    } else if (params.direction === 'me_to_other' && net < -0.005) {
+    } else if (params.direction === 'me_to_other' && net < -MONEY_EPSILON) {
       due = Math.abs(net)
     }
-    if (due <= 0.005) continue
+    if (due <= MONEY_EPSILON) continue
     out.push({
       billId: bill.id,
       billTitle: bill.title,
@@ -519,9 +528,9 @@ export async function buildPersonalBillAllocationPlan(params: {
   let remaining = amountToApply
   const slices: PersonalBillAllocationSlice[] = []
   for (const row of eligible) {
-    if (remaining <= 0.005) break
+    if (remaining <= MONEY_EPSILON) break
     const applied = Math.min(remaining, row.amount)
-    if (applied <= 0.005) continue
+    if (applied <= MONEY_EPSILON) continue
     slices.push({ ...row, amount: Math.round(applied * 100) / 100 })
     remaining -= applied
   }
@@ -610,14 +619,14 @@ export async function listEligibleSharedGroupsForGeneralCredit(params: {
     if (!summary) continue
 
     let allocatableAmount = 0
-    if (direction === 'other_to_me' && summary.totalToReceive > 0.005 && row.theirNet < -0.005) {
+    if (direction === 'other_to_me' && summary.totalToReceive > MONEY_EPSILON && row.theirNet < -MONEY_EPSILON) {
       allocatableAmount = Math.min(summary.totalToReceive, Math.abs(row.theirNet))
-    } else if (direction === 'me_to_other' && summary.totalToPay > 0.005 && row.theirNet > 0.005) {
+    } else if (direction === 'me_to_other' && summary.totalToPay > MONEY_EPSILON && row.theirNet > MONEY_EPSILON) {
       allocatableAmount = Math.min(summary.totalToPay, row.theirNet)
     }
 
     const roundedAllocatableAmount = Math.round(allocatableAmount * 100) / 100
-    if (roundedAllocatableAmount <= 0.005) continue
+    if (roundedAllocatableAmount <= MONEY_EPSILON) continue
 
     eligible.push({
       groupId: row.groupId,
@@ -731,7 +740,7 @@ export async function buildManualGeneralCreditSelectionPlan(params: {
     }),
   ])
 
-  if (receiveDirectionPlan.maxApplicableAmount <= 0.005 && payDirectionPlan.maxApplicableAmount <= 0.005) {
+  if (receiveDirectionPlan.maxApplicableAmount <= MONEY_EPSILON && payDirectionPlan.maxApplicableAmount <= MONEY_EPSILON) {
     return null
   }
 
@@ -765,7 +774,7 @@ export async function buildManualGeneralCreditApplyPlan(params: {
 
   const receiveApplied = receiveDirectionPlan.personalPlan.appliedAmount
   const payApplied = payDirectionPlan.personalPlan.appliedAmount
-  if (receiveApplied <= 0.005 && payApplied <= 0.005) return null
+  if (receiveApplied <= MONEY_EPSILON && payApplied <= MONEY_EPSILON) return null
 
   const chosenPlan = receiveApplied >= payApplied ? receiveDirectionPlan : payDirectionPlan
   return {
@@ -893,9 +902,9 @@ export async function computePersonalNetRollup(meId: string): Promise<{
   for (const oid of peers) {
     const m = await computePairwiseNetPersonalOnly(meId, oid)
     for (const [cur, v] of m) {
-      if (v > 0.005) {
+      if (v > MONEY_EPSILON) {
         toReceiveByCurrency.set(cur, (toReceiveByCurrency.get(cur) ?? 0) + v)
-      } else if (v < -0.005) {
+      } else if (v < -MONEY_EPSILON) {
         toPayByCurrency.set(cur, (toPayByCurrency.get(cur) ?? 0) + Math.abs(v))
       }
     }
@@ -912,7 +921,7 @@ export async function getPersonalBalanceContactRows(meId: string): Promise<
   const rows: { otherId: string; displayName: string; netByCurrency: Map<string, number> }[] = []
   for (const oid of peers) {
     const m = await computePairwiseNetPersonalOnly(meId, oid)
-    const has = [...m.values()].some((v) => Math.abs(v) > 0.005)
+    const has = [...m.values()].some((v) => Math.abs(v) > MONEY_EPSILON)
     if (!has) continue
     const disp = await resolveProfileDisplay(oid, meId)
     rows.push({ otherId: oid, displayName: disp.displayName, netByCurrency: m })
@@ -926,7 +935,7 @@ export function formatPairwiseSummary(byCurrency: Map<string, number>): {
   primaryLabel: string
   tone: 'balanced' | 'receive' | 'pay'
 } {
-  const entries = [...byCurrency.entries()].filter(([, v]) => Math.abs(v) > 0.005)
+  const entries = [...byCurrency.entries()].filter(([, v]) => Math.abs(v) > MONEY_EPSILON)
   if (entries.length === 0) {
     return { lines: [], primaryLabel: 'Balanced', tone: 'balanced' }
   }

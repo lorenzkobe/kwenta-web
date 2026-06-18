@@ -892,13 +892,16 @@ export async function removeGroupMember(
             updated_at: timestamp,
           })
 
-          // For equal splits: redistribute amount evenly across remaining members
+          // For equal splits: redistribute amount evenly across remaining members.
+          // Use floor-to-cent + remainder-to-first so the splits sum to item.amount
+          // exactly (matches computeEqual in splits.ts; raw division loses/gains cents).
           const remaining = activeSplits.filter((s) => s.user_id !== memberUserId)
           if (memberSplit.split_type === 'equal' && remaining.length > 0) {
-            const newAmount = item.amount / remaining.length
-            for (const s of remaining) {
-              await db.item_splits.update(s.id, {
-                computed_amount: newAmount,
+            const base = Math.floor((item.amount / remaining.length) * 100) / 100
+            const cents = Math.round((item.amount - base * remaining.length) * 100) / 100
+            for (let i = 0; i < remaining.length; i++) {
+              await db.item_splits.update(remaining[i].id, {
+                computed_amount: i === 0 ? base + cents : base,
                 updated_at: timestamp,
                 synced_at: null,
               })
@@ -972,10 +975,12 @@ async function removePersonFromPersonalBills(memberUserId: string, removedBy: st
 
         const remaining = activeSplits.filter((s) => s.user_id !== memberUserId)
         if (memberSplit.split_type === 'equal' && remaining.length > 0) {
-          const newAmount = item.amount / remaining.length
-          for (const s of remaining) {
-            await db.item_splits.update(s.id, {
-              computed_amount: newAmount,
+          // floor-to-cent + remainder-to-first so splits sum to item.amount exactly.
+          const base = Math.floor((item.amount / remaining.length) * 100) / 100
+          const cents = Math.round((item.amount - base * remaining.length) * 100) / 100
+          for (let i = 0; i < remaining.length; i++) {
+            await db.item_splits.update(remaining[i].id, {
+              computed_amount: i === 0 ? base + cents : base,
               updated_at: timestamp,
               synced_at: null,
             })

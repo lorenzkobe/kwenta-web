@@ -43,6 +43,10 @@ type NotificationOutboxEntry = {
 }
 
 const NOTIFICATION_OUTBOX_KEY = 'kwenta_notification_outbox_v1'
+// After this many failed insert attempts, drop (dead-letter) an outbox entry so a
+// permanently-rejecting notification (e.g. recipient profile deleted) doesn't retry
+// forever on every sync and keep the outbox perpetually non-empty.
+const MAX_NOTIFICATION_FLUSH_ATTEMPTS = 6
 let flushInFlight: Promise<void> | null = null
 
 /**
@@ -127,9 +131,18 @@ export async function flushQueuedKwentaNotifications(options?: FlushOptions): Pr
       }
       const { error } = await supabase.from('kwenta_notifications').insert(entry.rows)
       if (error) {
+        const attempts = entry.attempts + 1
+        if (attempts >= MAX_NOTIFICATION_FLUSH_ATTEMPTS) {
+          // Dead-letter: stop retrying this entry so it can't block the outbox forever.
+          console.warn(
+            `[notifications] dropping outbox entry after ${attempts} failed attempts:`,
+            error.message,
+          )
+          continue
+        }
         nextQueue.push({
           ...entry,
-          attempts: entry.attempts + 1,
+          attempts,
           lastError: error.message,
         })
       }

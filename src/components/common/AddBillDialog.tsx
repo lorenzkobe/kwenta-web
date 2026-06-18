@@ -634,9 +634,16 @@ export function AddBillDialog({
       )
     : groupMembers
   const selectedPayor = groupMembers.find((m) => m.userId === paidBy)
+  // When editing a bill whose payer was since removed from the group, paidBy points at a
+  // user not in groupMembers. Don't mislabel them as "You" — the bill keeps its real
+  // payer attribution; surface it honestly so the header matches what's saved.
   const payorDisplayName = selectedPayor
-    ? selectedPayor.isCurrentUser ? 'You' : selectedPayor.displayName
-    : 'You'
+    ? selectedPayor.isCurrentUser
+      ? 'You'
+      : selectedPayor.displayName
+    : paidBy
+      ? 'Former member'
+      : 'You'
 
   const isEdit = Boolean(editBillId)
 

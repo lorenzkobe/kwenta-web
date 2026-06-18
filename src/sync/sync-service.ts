@@ -716,6 +716,37 @@ export async function syncRoundTrip(userId: string): Promise<{
     return { pushed: 0, pulled: 0, errors: ['kwenta_sync: invalid response shape'] }
   }
 
+  // Stamp pushed rows as synced FIRST, then apply the pull bundle. The pull carries
+  // server-authoritative updated_at, so any pushed row echoed back in the bundle ends
+  // up with synced_at = server updated_at. We stamp with the pushed row's own
+  // updated_at (not client now()) so that, for rows NOT echoed in the bundle, the
+  // unsynced predicate (updated_at > synced_at) is false and clock skew can't trigger
+  // an endless re-push of an already-synced row.
+  for (const tableName of TABLE_NAMES) {
+    const pushedRows = pPush[tableName]
+    if (!pushedRows?.length) continue
+    const table = getLocalTable(tableName)
+    for (const r of pushedRows) {
+      const syncedAt = (r as SyncFields).updated_at
+      if (tableName === 'item_splits') {
+        const s = r as ItemSplit
+        await table.update(s.id, { synced_at: syncedAt, user_id: s.user_id })
+      } else if (tableName === 'settlements') {
+        const s = r as Settlement
+        await table.update(s.id, {
+          synced_at: syncedAt,
+          from_user_id: s.from_user_id,
+          to_user_id: s.to_user_id,
+        })
+      } else if (tableName === 'group_members') {
+        const gm = r as GroupMember
+        await table.update(gm.id, { synced_at: syncedAt, user_id: gm.user_id })
+      } else {
+        await table.update((r as SyncFields).id, { synced_at: syncedAt })
+      }
+    }
+  }
+
   let pulled = 0
   for (const tableName of TABLE_NAMES) {
     const rows = bundle[tableName] as SyncFields[]
@@ -729,31 +760,6 @@ export async function syncRoundTrip(userId: string): Promise<{
       }
     }
     pulled += rows.length
-  }
-
-  const timestamp = now()
-  for (const tableName of TABLE_NAMES) {
-    const pushedRows = pPush[tableName]
-    if (!pushedRows?.length) continue
-    const table = getLocalTable(tableName)
-    for (const r of pushedRows) {
-      if (tableName === 'item_splits') {
-        const s = r as ItemSplit
-        await table.update(s.id, { synced_at: timestamp, user_id: s.user_id })
-      } else if (tableName === 'settlements') {
-        const s = r as Settlement
-        await table.update(s.id, {
-          synced_at: timestamp,
-          from_user_id: s.from_user_id,
-          to_user_id: s.to_user_id,
-        })
-      } else if (tableName === 'group_members') {
-        const gm = r as GroupMember
-        await table.update(gm.id, { synced_at: timestamp, user_id: gm.user_id })
-      } else {
-        await table.update((r as SyncFields).id, { synced_at: timestamp })
-      }
-    }
   }
 
   localStorage.setItem(KWENTA_LAST_PULL_STORAGE_KEY, now())

@@ -23,6 +23,25 @@ export function now(): string {
   return new Date().toISOString()
 }
 
+/**
+ * Single tolerance (in currency units) for treating a money value as zero/settled.
+ * Amounts are stored cent-rounded, so genuine differences are 0 or >= 0.01; a 0.005
+ * threshold cleanly separates rounding noise from a real one-cent obligation. Use this
+ * everywhere instead of ad-hoc 0.005 / 0.01 / 0.02 literals so a balance can't read
+ * "settled" in one place and "owed" in another.
+ */
+export const MONEY_EPSILON = 0.005
+
+/** Round a money amount to 2 decimal places (cents). */
+export function roundMoney(amount: number): number {
+  return Math.round(amount * 100) / 100
+}
+
+/** True when an amount is within rounding noise of zero. */
+export function isEffectivelyZero(amount: number): boolean {
+  return Math.abs(amount) <= MONEY_EPSILON
+}
+
 export function formatCurrency(amount: number, currency = 'PHP'): string {
   return new Intl.NumberFormat('en-PH', {
     style: 'currency',

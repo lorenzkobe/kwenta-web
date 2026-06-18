@@ -1,7 +1,7 @@
 import { db } from '@/db/db'
 import type { MutationEntityType, NotAppliedChange, PendingMutation } from '@/types'
 import { generateId, now } from '@/lib/utils'
-import { syncRoundTrip } from '@/sync/sync-service'
+import { hasUnsyncedLocalDataForUser, syncRoundTrip } from '@/sync/sync-service'
 
 export class CloudFirstMutationError extends Error {
   code: string
@@ -56,6 +56,12 @@ export async function enqueuePendingMutation(input: TrackMutationInput): Promise
 }
 
 export async function markPendingMutationsApplied(actorUserId: string): Promise<void> {
+  // Don't report success while anything for this actor is still unsynced. A row dropped
+  // by push RLS filtering stays synced_at=null even though the sync returned no errors;
+  // marking its mutation "applied" would mask a lost write. Leaving it pending lets the
+  // next sync retry, and a later clean sync marks everything applied.
+  if (await hasUnsyncedLocalDataForUser(actorUserId)) return
+
   const timestamp = now()
   const pending = await db.pending_mutations
     .where('actor_user_id')

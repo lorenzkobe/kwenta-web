@@ -37,6 +37,7 @@ import {
   equalCustomMap,
   equalPercentMap,
   lineSplitsValid,
+  parseSplitNumber,
   redistributeWithPinned,
   type PinnedSplits,
 } from '@/lib/bill-split-form'
@@ -221,9 +222,21 @@ export function AddBillPage() {
   // paid, the user only needs to appear in at least one complete item (see
   // itemizedIncludesUser), not every item — they may not have consumed all of them.
 
+  // When someone else paid a personal bill, the current user is force-added to the
+  // splits so they can't be left off. For equal they automatically get a share, and
+  // quantity already requires >= 1 per person. But for custom/percentage the others can
+  // sum to the full total while the forced user sits at 0 — which would record the user
+  // (who owes the payer) as owing nothing. Require a positive share in that case.
+  const lockedUserHasShare =
+    !lockUserInSplits ||
+    !userId ||
+    simpleSplitType === 'equal' ||
+    parseSplitNumber(simpleSplitValues[userId]) > 0
+
   const simpleSplitsOk =
     members.length === 0 ||
     (effectiveSimpleSelectedUserIds.length > 0 &&
+      lockedUserHasShare &&
       lineSplitsValid(simpleSplitType, simpleAmountNum, effectiveSimpleSelectedUserIds, simpleSplitValues))
 
   const hasAnyCompleteItem = items.some((i) => i.name.trim() && parseFloat(i.amount) > 0)
@@ -1175,6 +1188,12 @@ export function AddBillPage() {
                             </p>
                           )}
                         </div>
+                      )}
+
+                      {lockUserInSplits && !lockedUserHasShare && simpleAmountNum > 0 && (
+                        <p className="mt-1 text-xs text-amber-600">
+                          Someone else paid, so enter your own share above.
+                        </p>
                       )}
                     </div>
                   </>

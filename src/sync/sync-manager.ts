@@ -25,6 +25,9 @@ let backupTimer: ReturnType<typeof setInterval> | null = null
 let retryTimer: ReturnType<typeof setTimeout> | null = null
 let debounceTimer: ReturnType<typeof setTimeout> | null = null
 let isSyncing = false
+// Set when a new explicit/online sync is requested while one is already running, so
+// the in-flight sync (which already snapshotted Dexie) doesn't drop the newer mutation.
+let rerunRequested = false
 let backoffMs = BACKOFF_INITIAL_MS
 
 function isDatabaseClosedError(err: unknown): boolean {
@@ -80,7 +83,13 @@ async function resolveSessionWithRetry() {
 }
 
 async function runSync(reason: SyncRunReason) {
-  if (isSyncing) return
+  if (isSyncing) {
+    // A sync is already in flight. If this is a new request driven by a local mutation
+    // or coming back online, remember to run once more afterwards so the newer write
+    // (not in the in-flight snapshot) still gets pushed.
+    if (reason === 'explicit' || reason === 'online') rerunRequested = true
+    return
+  }
 
   const { isOnline } = useAppStore.getState()
   if (!isOnline) return
@@ -155,6 +164,10 @@ async function runSync(reason: SyncRunReason) {
     scheduleRetry()
   } finally {
     isSyncing = false
+    if (rerunRequested) {
+      rerunRequested = false
+      void runSync('explicit')
+    }
   }
 }
 

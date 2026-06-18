@@ -99,8 +99,12 @@ export function BillDetailPage() {
     }
   }, [billId, userId])
 
-  const bill = liveBill === undefined ? billState : liveBill
-  const loading = liveBill === undefined ? loadingState : false
+  // Prefer the live bill once it resolves to a real row; otherwise fall back to the
+  // effect's billState, which has the fullSync recovery for bills not yet synced
+  // locally. Keep showing the loading state until the effect's fullSync attempt
+  // finishes so a deep-linked, not-yet-synced bill doesn't flash "Bill not found".
+  const bill = liveBill ?? billState
+  const loading = liveBill ? false : loadingState
   const groupId = bill?.group_id ?? null
 
   const groupName = useLiveQuery(async () => {

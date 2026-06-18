@@ -118,8 +118,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     let cancelled = false
+    // Each applySession call gets a generation; only the latest may commit state. On
+    // rapid auth events (a sign-out arriving during a sign-in's profile fetch, or token
+    // refresh interleaving) this stops a slower earlier event from overwriting
+    // currentUserId with a stale id after a newer event already settled.
+    let applyGeneration = 0
 
     async function applySession(session: Session | null) {
+      const myGeneration = ++applyGeneration
       if (!session?.user) {
         setUser(null)
         setUserType(null)
@@ -161,7 +167,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         console.warn('[auth] ensureProfile failed', e)
       }
 
-      if (cancelled) return
+      if (cancelled || myGeneration !== applyGeneration) return
 
       setUser(u)
       setUserType(fullProf.user_type === 'admin' ? 'admin' : 'user')
