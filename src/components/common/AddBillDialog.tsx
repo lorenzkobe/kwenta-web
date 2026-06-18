@@ -83,6 +83,14 @@ export function AddBillDialog({
   onClose,
   onSaved,
 }: AddBillDialogProps) {
+  // Keep the latest onClose in a ref so the edit-load effect does not depend on
+  // it. The parent (GroupDetailPage) passes an inline arrow for onClose, which
+  // changes identity on every re-render; including it in the effect deps would
+  // re-run the load and clobber the user's in-progress edits with the original
+  // bill data while they are still editing.
+  const onCloseRef = useRef(onClose)
+  onCloseRef.current = onClose
+
   const [mode, setMode] = useState<BillMode>('simple')
   const [title, setTitle] = useState('')
   const [paidBy, setPaidBy] = useState<string>(currentUserId)
@@ -174,7 +182,7 @@ export function AddBillDialog({
       }
       if (d.created_by !== currentUserId) {
         setLoadingEdit(false)
-        onClose()
+        onCloseRef.current()
         return
       }
       setTitle(d.title)
@@ -219,7 +227,7 @@ export function AddBillDialog({
     return () => {
       cancelled = true
     }
-  }, [editBillId, currentUserId, onClose])
+  }, [editBillId, currentUserId])
 
   function setSimpleSplitTypeAndValues(t: SplitType) {
     setSimpleSplitType(t)
