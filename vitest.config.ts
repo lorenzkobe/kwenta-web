@@ -11,6 +11,7 @@ export default defineConfig({
     // happy-dom gives us localStorage / crypto / Intl for the pure helpers.
     environment: 'happy-dom',
     globals: true,
-    include: ['src/**/*.{test,spec}.{ts,tsx}'],
+    setupFiles: ['tests/setup.ts'],
+    include: ['tests/**/*.{test,spec}.{ts,tsx}'],
   },
 })

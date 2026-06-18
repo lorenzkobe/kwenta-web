@@ -17,10 +17,11 @@ npm run test:watch # Run unit tests in watch mode
 
 Tests are **mandatory** for this project — we create tests and run testing as part of every change, not as an afterthought.
 
-- The test runner is **Vitest** (`vitest.config.ts`, `happy-dom` environment, `@` alias). Tests live next to source as `*.test.ts` under `src/`.
-- When adding or changing behavior, add/extend unit tests that cover it. Prefer the pure-logic modules (`src/lib/splits.ts`, `src/lib/utils.ts`, `src/lib/settlement.ts` helpers, etc.). For Dexie-backed functions, use `fake-indexeddb` to stand up the DB.
+- The test runner is **Vitest** (`vitest.config.ts`, `happy-dom` environment, `@` alias). Tests live in the top-level **`tests/`** folder, mirroring the source tree: `tests/lib/*.test.ts` for `src/lib/*`, `tests/db/*.test.ts` for `src/db/*`. Import the code under test via the `@` alias (e.g. `@/lib/splits`); import shared test helpers by relative path (e.g. `../helpers/db`).
+- `tests/setup.ts` (registered as `setupFiles`) imports `fake-indexeddb/auto` so any module that touches `@/db/db` can open the DB. For Dexie-backed functions, use the factories + `resetDb()` in `tests/helpers/db.ts` (call `resetDb()` in `beforeEach`).
+- When adding or changing behavior, add/extend unit tests that cover it. Prefer the pure-logic modules (`src/lib/splits.ts`, `src/lib/utils.ts`, `src/lib/bill-split-form.ts`, etc.). DB-coupled modules (`settlement.ts`, `people.ts`, `personal-bill-status.ts`) are tested against `fake-indexeddb`.
 - Run `npm test` before considering any change complete — it must pass.
-- Existing coverage: `src/lib/splits.test.ts` (all split types + rounding/remainder edge cases) and `src/lib/utils.test.ts` (`cn`, `generateId`, `getDeviceId`, `now`, `formatCurrency`, `timeAgo`). Expand outward from here toward settlement/people/sync logic.
+- Existing coverage lives under `tests/lib/`: pure logic (`splits`, `utils`, `amount-input`, `bill-split-form`, `bill-navigation`, `balance-rollups`, `db-query-helpers`, `account-gate-messages`, `export-utils`, `bill-categories`, `auth-session-flags`, `runtime-flags`, `client-metrics`) and DB-backed (`settlement`, `people`, `personal-bill-status`). Expand outward toward `operations.ts` and sync logic.
 
 After every edit, run `npm run build` to confirm no TypeScript errors. If the build reports `TS1127: Invalid character`, the Edit tool introduced Unicode curly quotes (`'`, `'`, `"`, `"`) into string literals. Fix with:
 
