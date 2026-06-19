@@ -1,7 +1,12 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 import { db } from '@/db/db'
-import { computeAllGroupBalances, computeGroupBalances } from '@/lib/settlement'
 import {
+  computeAllGroupBalances,
+  computeGroupBalances,
+  listSettlementHistoryForBill,
+} from '@/lib/settlement'
+import {
+  makeBill,
   makeGroup,
   makeMember,
   makeProfile,
@@ -179,5 +184,47 @@ describe('computeAllGroupBalances', () => {
       makeMember({ group_id: 'G1', user_id: 'A', is_deleted: true }),
     )
     expect(await computeAllGroupBalances('A')).toEqual([])
+  })
+})
+
+describe('listSettlementHistoryForBill', () => {
+  it('returns settled, non-deleted settlements attributed to the bill', async () => {
+    await db.profiles.bulkAdd([
+      makeProfile({ id: 'A', display_name: 'Alice' }),
+      makeProfile({ id: 'B', display_name: 'Bob' }),
+    ])
+    await db.bills.add(makeBill({ id: 'BILL', title: 'Dinner', paid_by: 'A' }))
+    await db.settlements.add(
+      makeSettlement({
+        id: 'S1',
+        bill_id: 'BILL',
+        from_user_id: 'B',
+        to_user_id: 'A',
+        amount: 25,
+        is_settled: true,
+      }),
+    )
+
+    const history = await listSettlementHistoryForBill('BILL')
+    expect(history).toHaveLength(1)
+    expect(history[0].fromUserId).toBe('B')
+    expect(history[0].toUserId).toBe('A')
+    expect(history[0].amount).toBe(25)
+  })
+
+  it('excludes unsettled and soft-deleted settlements', async () => {
+    await db.bills.add(makeBill({ id: 'BILL', paid_by: 'A' }))
+    await db.settlements.bulkAdd([
+      makeSettlement({ id: 'S1', bill_id: 'BILL', amount: 10, is_settled: false }),
+      makeSettlement({ id: 'S2', bill_id: 'BILL', amount: 10, is_deleted: true }),
+    ])
+    expect(await listSettlementHistoryForBill('BILL')).toEqual([])
+  })
+
+  it('does not include settlements attributed to other bills', async () => {
+    await db.settlements.add(
+      makeSettlement({ id: 'S1', bill_id: 'OTHER', amount: 10 }),
+    )
+    expect(await listSettlementHistoryForBill('BILL')).toEqual([])
   })
 })

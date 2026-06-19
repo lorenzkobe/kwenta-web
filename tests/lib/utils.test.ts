@@ -1,5 +1,15 @@
 import { beforeEach, describe, expect, it } from 'vitest'
-import { cn, formatCurrency, generateId, getDeviceId, now, timeAgo } from '@/lib/utils'
+import {
+  cn,
+  formatCurrency,
+  generateId,
+  getDeviceId,
+  isEffectivelyZero,
+  MONEY_EPSILON,
+  now,
+  roundMoney,
+  timeAgo,
+} from '@/lib/utils'
 
 describe('cn', () => {
   it('joins truthy class names', () => {
@@ -63,6 +73,43 @@ describe('formatCurrency', () => {
     const result = formatCurrency(99, 'USD')
     expect(result).toContain('99')
     expect(result).toContain('$')
+  })
+})
+
+describe('roundMoney', () => {
+  it('rounds to two decimal places', () => {
+    expect(roundMoney(1.005)).toBe(1)
+    expect(roundMoney(1.006)).toBe(1.01)
+    expect(roundMoney(1.234)).toBe(1.23)
+    expect(roundMoney(1.235)).toBe(1.24)
+  })
+
+  it('collapses floating-point residue to clean cents', () => {
+    expect(roundMoney(0.1 + 0.2)).toBe(0.3)
+    expect(roundMoney(49.995 + 0.001)).toBe(50)
+  })
+
+  it('preserves sign for negatives', () => {
+    expect(roundMoney(-2.345)).toBe(-2.35)
+    expect(roundMoney(-0.004)).toBe(-0)
+  })
+})
+
+describe('isEffectivelyZero', () => {
+  it('treats exact zero as zero', () => {
+    expect(isEffectivelyZero(0)).toBe(true)
+  })
+
+  it('treats amounts within MONEY_EPSILON of zero as zero', () => {
+    expect(isEffectivelyZero(MONEY_EPSILON)).toBe(true)
+    expect(isEffectivelyZero(-MONEY_EPSILON)).toBe(true)
+    expect(isEffectivelyZero(0.004)).toBe(true)
+  })
+
+  it('treats amounts beyond MONEY_EPSILON as non-zero', () => {
+    expect(isEffectivelyZero(0.006)).toBe(false)
+    expect(isEffectivelyZero(-0.01)).toBe(false)
+    expect(isEffectivelyZero(0.5)).toBe(false)
   })
 })
 

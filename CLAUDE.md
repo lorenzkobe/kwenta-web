@@ -17,11 +17,18 @@ npm run test:watch # Run unit tests in watch mode
 
 Tests are **mandatory** for this project — we create tests and run testing as part of every change, not as an afterthought.
 
-- The test runner is **Vitest** (`vitest.config.ts`, `happy-dom` environment, `@` alias). Tests live in the top-level **`tests/`** folder, mirroring the source tree: `tests/lib/*.test.ts` for `src/lib/*`, `tests/db/*.test.ts` for `src/db/*`. Import the code under test via the `@` alias (e.g. `@/lib/splits`); import shared test helpers by relative path (e.g. `../helpers/db`).
+- The test runner is **Vitest** (`vitest.config.ts`, `happy-dom` environment, `@` alias). Tests live in the top-level **`tests/`** folder, mirroring the source tree: `tests/lib/*.test.ts` for `src/lib/*`, `tests/db/*.test.ts` for `src/db/*`, `tests/sync/*.test.ts` for `src/sync/*`. Import the code under test via the `@` alias (e.g. `@/lib/splits`); import shared test helpers by relative path (e.g. `../helpers/db`).
 - `tests/setup.ts` (registered as `setupFiles`) imports `fake-indexeddb/auto` so any module that touches `@/db/db` can open the DB. For Dexie-backed functions, use the factories + `resetDb()` in `tests/helpers/db.ts` (call `resetDb()` in `beforeEach`).
-- When adding or changing behavior, add/extend unit tests that cover it. Prefer the pure-logic modules (`src/lib/splits.ts`, `src/lib/utils.ts`, `src/lib/bill-split-form.ts`, etc.). DB-coupled modules (`settlement.ts`, `people.ts`, `personal-bill-status.ts`) are tested against `fake-indexeddb`.
-- Run `npm test` before considering any change complete — it must pass.
-- Existing coverage lives under `tests/lib/`: pure logic (`splits`, `utils`, `amount-input`, `bill-split-form`, `bill-navigation`, `balance-rollups`, `db-query-helpers`, `account-gate-messages`, `export-utils`, `bill-categories`, `auth-session-flags`, `runtime-flags`, `client-metrics`) and DB-backed (`settlement`, `people`, `personal-bill-status`). Expand outward toward `operations.ts` and sync logic.
+- **Mocking Supabase / sync side-effects:** modules that import `@/lib/supabase` or fire sync/notifications (e.g. `operations.ts`, `kwenta-notifications.ts`, `sync-service.ts`) are tested by `vi.mock`-ing the network/side-effect deps and asserting Dexie/localStorage state. Use `vi.hoisted` to share controllable mock state with the hoisted `vi.mock` factory (see `tests/lib/kwenta-notifications.test.ts`, `tests/lib/cloud-first-mutations.test.ts`, `tests/db/operations.test.ts`). A benign `@/lib/supabase` stub (`rpc → {data:null,error:null}`) keeps `fetchRemoteProfileIntoDexie` offline.
+- When adding or changing behavior, add/extend unit tests that cover it. Prefer the pure-logic modules (`src/lib/splits.ts`, `src/lib/utils.ts`, `src/lib/bill-split-form.ts`, etc.). DB-coupled modules (`settlement.ts`, `people.ts`, `personal-bill-status.ts`, `operations.ts`) are tested against `fake-indexeddb`.
+- Run `npm test` before considering any change complete — it must pass (currently **219 tests / 22 files**).
+- Coverage inventory:
+  - `tests/lib/` pure logic: `splits`, `utils` (incl. `roundMoney`/`isEffectivelyZero`/`MONEY_EPSILON`), `amount-input`, `bill-split-form`, `bill-navigation`, `balance-rollups`, `db-query-helpers`, `account-gate-messages`, `export-utils`, `bill-categories`, `auth-session-flags`, `runtime-flags`, `client-metrics`
+  - `tests/lib/` DB-backed: `settlement` (incl. `listSettlementHistoryForBill`), `people`, `personal-bill-status`, `clear-kwenta-local`, `export-csv`
+  - `tests/lib/` with mocked deps: `kwenta-notifications` (outbox/senders/flush/dead-letter), `cloud-first-mutations` (pending-mutation + conflict tracking)
+  - `tests/db/`: `operations` (createBill/updateBill/deleteBill, createGroup, addGroupMember, removeGroupMember split redistribution, createSettlement, linkProfileToRemote id rewrites, deleteGroup cascade, getBillWithDetails)
+  - `tests/sync/`: `sync-service` helpers (`getMillisecondsSinceLastPull`, `hasUnsyncedLocalDataForUser` incl. RLS push-filter)
+  - Remaining gaps (network-orchestration heavy, lower ROI): `sync-service` push/pull/round-trip, `sync-manager` timers, `realtime-events` subscriptions, `export-pdf` (jsPDF rendering), `db/hooks.ts` (React `useLiveQuery`).
 
 After every edit, run `npm run build` to confirm no TypeScript errors. If the build reports `TS1127: Invalid character`, the Edit tool introduced Unicode curly quotes (`'`, `'`, `"`, `"`) into string literals. Fix with:
 
