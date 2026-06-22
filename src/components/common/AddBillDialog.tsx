@@ -11,6 +11,7 @@ import {
 import type { SplitType } from '@/types'
 import {
   applyClearedSplitField,
+  applySplitInputChange,
   buildSplitPayload,
   equalCustomMap,
   equalPercentMap,
@@ -255,26 +256,7 @@ export function AddBillDialog({
     const ids = selectedIdsRef.current
     const st = simpleSplitTypeRef.current
     const amt = parseFloat(simpleAmountStrRef.current) || 0
-    setSimpleSplitMeta((meta) => {
-      const pinned = { ...meta.pinned }
-      if (raw.trim() === '') {
-        const target = st === 'percentage' ? 100 : amt
-        return applyClearedSplitField(ids, meta.values, meta.pinned, uid, st === 'percentage' ? 'percentage' : 'custom', target)
-      }
-      pinned[uid] = true
-      const values = { ...meta.values, [uid]: raw }
-      if (st === 'percentage') {
-        return {
-          pinned,
-          values: redistributeWithPinned(ids, values, pinned, 100),
-        }
-      }
-      if (amt <= 0) return { pinned, values }
-      return {
-        pinned,
-        values: redistributeWithPinned(ids, values, pinned, amt),
-      }
-    })
+    setSimpleSplitMeta((meta) => applySplitInputChange(ids, st, amt, meta.values, meta.pinned, uid, raw))
   }
 
   function toggleSimpleUser(uid: string) {

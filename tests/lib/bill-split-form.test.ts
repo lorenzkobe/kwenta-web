@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   applyClearedSplitField,
+  applySplitInputChange,
   buildSplitPayload,
   equalCustomMap,
   equalPercentMap,
@@ -183,6 +184,79 @@ describe('lineSplitsValid', () => {
     expect(lineSplitsValid('quantity', 10, ['a', 'b'], { a: '1', b: '2' })).toBe(true)
     expect(lineSplitsValid('quantity', 10, ['a', 'b'], { a: '1.5', b: '2' })).toBe(false)
     expect(lineSplitsValid('quantity', 10, ['a', 'b'], { a: '0', b: '2' })).toBe(false)
+  })
+})
+
+describe('applySplitInputChange', () => {
+  it('quantity: stores the typed value on only the edited user, leaving others untouched', () => {
+    const { values, pinned } = applySplitInputChange(
+      ['a', 'b', 'c'],
+      'quantity',
+      30,
+      { a: '1', b: '1', c: '1' },
+      {},
+      'a',
+      '4',
+    )
+    expect(values).toEqual({ a: '4', b: '1', c: '1' })
+    expect(pinned).toEqual({})
+  })
+
+  it('quantity: never redistributes even when a line amount is set', () => {
+    const { values } = applySplitInputChange(
+      ['a', 'b'],
+      'quantity',
+      100,
+      { a: '1', b: '1' },
+      {},
+      'b',
+      '3',
+    )
+    expect(values).toEqual({ a: '1', b: '3' })
+  })
+
+  it('percentage: pins the edited user and redistributes the rest to ~100', () => {
+    const { values, pinned } = applySplitInputChange(
+      ['a', 'b', 'c'],
+      'percentage',
+      0,
+      equalPercentMap(['a', 'b', 'c']),
+      {},
+      'a',
+      '40',
+    )
+    expect(values.a).toBe('40')
+    expect(pinned.a).toBe(true)
+    expect(sum(values)).toBeCloseTo(100, 2)
+  })
+
+  it('custom: pins the edited user and redistributes the rest to the line amount', () => {
+    const { values, pinned } = applySplitInputChange(
+      ['a', 'b'],
+      'custom',
+      100,
+      { a: '50', b: '50' },
+      {},
+      'a',
+      '70',
+    )
+    expect(values.a).toBe('70')
+    expect(pinned.a).toBe(true)
+    expect(sum(values)).toBeCloseTo(100, 2)
+  })
+
+  it('custom: clearing a field delegates to applyClearedSplitField', () => {
+    const { values } = applySplitInputChange(
+      ['a', 'b'],
+      'custom',
+      100,
+      { a: '60', b: '40' },
+      {},
+      'a',
+      '',
+    )
+    expect(values.a).toBe('')
+    expect(values.b).toBe('100')
   })
 })
 

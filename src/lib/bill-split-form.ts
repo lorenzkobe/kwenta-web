@@ -137,6 +137,45 @@ export function applyClearedSplitField(
   return { values: nextValues, pinned }
 }
 
+/**
+ * Applies a single split-value edit for one user, returning the next {values, pinned}.
+ * Quantity inputs are stored verbatim (each person's units are independent — no
+ * redistribution). Percentage/custom edits pin the edited user and rebalance the rest;
+ * clearing a field delegates to `applyClearedSplitField`. Shared by the simple-split
+ * handlers in AddBillPage and AddBillDialog so they cannot drift apart.
+ */
+export function applySplitInputChange(
+  selectedUserIds: string[],
+  splitType: SplitType,
+  lineAmount: number,
+  values: Record<string, string>,
+  pinnedUserIds: PinnedSplits,
+  uid: string,
+  raw: string,
+): { values: Record<string, string>; pinned: PinnedSplits } {
+  if (splitType === 'quantity') {
+    return { values: { ...values, [uid]: raw }, pinned: pinnedUserIds }
+  }
+  if (raw.trim() === '') {
+    const target = splitType === 'percentage' ? 100 : lineAmount
+    return applyClearedSplitField(
+      selectedUserIds,
+      values,
+      pinnedUserIds,
+      uid,
+      splitType === 'percentage' ? 'percentage' : 'custom',
+      target,
+    )
+  }
+  const pinned: PinnedSplits = { ...pinnedUserIds, [uid]: true }
+  const nextValues = { ...values, [uid]: raw }
+  if (splitType === 'percentage') {
+    return { pinned, values: redistributeWithPinned(selectedUserIds, nextValues, pinned, 100) }
+  }
+  if (lineAmount <= 0) return { pinned, values: nextValues }
+  return { pinned, values: redistributeWithPinned(selectedUserIds, nextValues, pinned, lineAmount) }
+}
+
 export function lineSplitsValid(
   splitType: SplitType,
   lineAmount: number,
