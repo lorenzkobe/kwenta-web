@@ -28,7 +28,12 @@ import {
   deleteGroup,
   updateGroup,
   getBillWithDetails,
+  mergeProfileIdentity,
 } from '@/db/operations'
+import {
+  findDuplicateIdentityCandidates,
+  type DuplicateIdentityCandidate,
+} from '@/lib/duplicate-identity'
 import {
   computeGroupBalances,
   type GroupBalanceSummary,
@@ -685,6 +690,9 @@ export function GroupDetailPage() {
   const [detailBillId, setDetailBillId] = useState<string | null>(null)
   const [editBillId, setEditBillId] = useState<string | null>(null)
   const [balanceSummary, setBalanceSummary] = useState<GroupBalanceSummary | null>(null)
+  const [dupCandidates, setDupCandidates] = useState<DuplicateIdentityCandidate[]>([])
+  const [dismissedDupKeys, setDismissedDupKeys] = useState<Set<string>>(new Set())
+  const [mergeTarget, setMergeTarget] = useState<DuplicateIdentityCandidate | null>(null)
   const [editingSettlement, setEditingSettlement] = useState<SettlementHistoryItem | null>(null)
   const [recordSettlement, setRecordSettlement] = useState<{
     fromUserId: string
@@ -796,10 +804,30 @@ export function GroupDetailPage() {
     setBalanceSummary(updated)
   }
 
+  async function refreshDupCandidates() {
+    if (!groupId || !userId) {
+      setDupCandidates([])
+      return
+    }
+    setDupCandidates(await findDuplicateIdentityCandidates(groupId, userId))
+  }
+
   useEffect(() => {
     refreshBalances()
+    refreshDupCandidates()
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [groupId, userId, bills, members])
+
+  const dupKey = (c: DuplicateIdentityCandidate) => `${c.localId}->${c.targetId}`
+  const visibleDupCandidates = dupCandidates.filter((c) => !dismissedDupKeys.has(dupKey(c)))
+
+  async function confirmMerge() {
+    if (!mergeTarget || !userId) return
+    await mergeProfileIdentity(mergeTarget.localId, mergeTarget.targetId, userId)
+    setMergeTarget(null)
+    await refreshDupCandidates()
+    await refreshBalances()
+  }
 
   async function executeDeleteGroup() {
     if (!groupId || !userId || !isGroupCreator) return
@@ -892,6 +920,38 @@ export function GroupDetailPage() {
               : `${members?.length ?? 0} member${(members?.length ?? 0) !== 1 ? 's' : ''}`}
           </p>
         </div>
+
+        {visibleDupCandidates.map((c) => (
+          <div
+            key={dupKey(c)}
+            className="rounded-3xl border border-amber-200 bg-amber-50 p-5 shadow-sm"
+          >
+            <div className="flex items-start gap-3">
+              <UserPlus className="mt-0.5 size-5 shrink-0 text-amber-700" />
+              <div className="min-w-0 flex-1">
+                <h2 className="text-sm font-semibold text-amber-900">Possible duplicate contact</h2>
+                <p className="mt-1 text-sm text-amber-800">
+                  Your contact “{c.localName}” looks like the same person as the group member “
+                  {c.targetName}”. Merging fixes balances and settlement suggestions for everyone.
+                </p>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <Button size="sm" onClick={() => setMergeTarget(c)}>
+                    Merge contacts
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() =>
+                      setDismissedDupKeys((prev) => new Set(prev).add(dupKey(c)))
+                    }
+                  >
+                    Not now
+                  </Button>
+                </div>
+              </div>
+            </div>
+          </div>
+        ))}
 
         <div className="rounded-3xl border border-stone-200 bg-white p-5 shadow-sm">
           <div className="flex items-center gap-2">
@@ -1271,6 +1331,21 @@ export function GroupDetailPage() {
           onRecorded={() => void refreshBalances()}
         />
       )}
+
+      <ConfirmDialog
+        open={mergeTarget !== null}
+        onOpenChange={(o) => {
+          if (!o) setMergeTarget(null)
+        }}
+        title="Merge these contacts?"
+        description={
+          mergeTarget
+            ? `“${mergeTarget.localName}” will be linked to the group member “${mergeTarget.targetName}”. Their bills, splits, and payments will be combined under one person for everyone in the group.`
+            : ''
+        }
+        confirmLabel="Merge"
+        onConfirm={confirmMerge}
+      />
 
       <ConfirmDialog
         open={deleteGroupConfirmOpen}

@@ -437,7 +437,11 @@ export async function addGroupMember(
     .toArray()
   for (const m of existingMembership) {
     const p = await db.profiles.get(m.user_id)
-    if (p && !p.is_deleted && p.display_name.trim().toLowerCase() === normalized) {
+    // A real co-member's profile row may be absent here (pull-bundle privacy
+    // boundary). Fall back to the synced group_members.display_name so we reuse
+    // the existing member instead of minting a duplicate local contact.
+    const memberName = ((p && !p.is_deleted ? p.display_name : m.display_name) || '').trim().toLowerCase()
+    if (memberName === normalized) {
       await notifySyncAfterMutation({
         actorUserId: addedBy,
         operation: 'group_member_exists',
@@ -770,6 +774,48 @@ export async function linkProfileToRemote(
     payload: { remoteProfileId },
     routeHint: `/app/people/${localProfileId}`,
   })
+}
+
+/**
+ * Resolve a duplicate identity by merging a viewer-owned local contact into the
+ * person it actually is. This rewrites the synced rows (the only mechanism that
+ * converges balances/suggestions for every group member — see the comment in
+ * `src/lib/settlement.ts`).
+ *
+ * - Target is a real account (has an email): hard-link via `linkProfileToRemote`,
+ *   which rewrites `group_members.user_id`, `item_splits.user_id`, `bills.paid_by`,
+ *   and `settlements.from/to_user_id` and re-syncs.
+ * - Target is another of the viewer's local contacts: record a manual peer link so
+ *   balance helpers treat them as one person (no remote id to rewrite to).
+ *
+ * The target's profile may not be in Dexie yet (pull-bundle privacy boundary), so
+ * we fetch it first. No-ops if `sourceLocalId` is not a local contact owned by the
+ * actor.
+ */
+export async function mergeProfileIdentity(
+  sourceLocalId: string,
+  targetId: string,
+  actorUserId: string,
+): Promise<void> {
+  if (sourceLocalId === targetId) return
+  const source = await db.profiles.get(sourceLocalId)
+  if (!source || source.is_deleted || !source.is_local || source.owner_id !== actorUserId) return
+  if (source.linked_profile_id) return // already resolved
+
+  let target = await db.profiles.get(targetId)
+  if (!target || target.is_deleted) {
+    await fetchRemoteProfileIntoDexie(targetId)
+    target = await db.profiles.get(targetId)
+  }
+
+  // Real account → hard-link (rewrites + re-syncs the shared rows).
+  if (target && !target.is_deleted && !target.is_local && target.email?.trim()) {
+    await linkProfileToRemote(sourceLocalId, targetId, actorUserId)
+    return
+  }
+
+  // Otherwise treat them as the same person via a manual peer link.
+  await addProfilePeerLink(sourceLocalId, targetId, actorUserId)
 }
 
 /** Link another profile (e.g. group “Sam”) to this local contact; balances aggregate by resolution logic. */

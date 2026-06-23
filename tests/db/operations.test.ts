@@ -221,6 +221,28 @@ describe('addGroupMember', () => {
     // creator + Bob only
     expect(active).toHaveLength(2)
   })
+
+  it('does not duplicate a co-member whose profile row is not held locally', async () => {
+    // Privacy boundary: a real co-member "Jello" exists in group_members (synced
+    // display_name) but the viewer has no profile row for them. Adding "Jello" as
+    // a local contact must reuse the existing member, not mint a duplicate id.
+    await db.profiles.add(makeProfile({ id: 'ME' }))
+    await db.groups.add(makeGroup({ id: 'G', created_by: 'ME' }))
+    await db.group_members.bulkAdd([
+      makeMember({ group_id: 'G', user_id: 'ME', display_name: 'Me' }),
+      makeMember({ group_id: 'G', user_id: 'jello-real', display_name: 'Jello' }),
+    ])
+
+    const id = await addGroupMember('G', 'jello', 'ME') // case-insensitive
+
+    expect(id).toBe('jello-real')
+    const active = (await db.group_members.where('group_id').equals('G').toArray()).filter(
+      (m) => !m.is_deleted,
+    )
+    expect(active).toHaveLength(2) // no new member row
+    // and no stray local contact was created
+    expect(await db.profiles.where('owner_id').equals('ME').count()).toBe(0)
+  })
 })
 
 describe('removeGroupMember', () => {
