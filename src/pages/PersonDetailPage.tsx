@@ -639,7 +639,12 @@ export function PersonDetailPage() {
     if (!userId || !personId) return
     if (remoteId === userId) return
     setLinkByIdError(null)
-    await linkProfileToRemote(personId, remoteId, userId)
+    try {
+      await linkProfileToRemote(personId, remoteId, userId)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Could not link this contact right now.')
+      return
+    }
     const updated = await db.profiles.get(personId)
     if (updated?.linked_profile_id === remoteId) {
       setLinkAccountOpen(false)
@@ -722,8 +727,12 @@ export function PersonDetailPage() {
 
   async function handleDeletePerson() {
     if (!userId || !personId) return
-    await deletePerson(personId, userId)
-    navigate('/app/people', { replace: true })
+    try {
+      await deletePerson(personId, userId)
+      navigate('/app/people', { replace: true })
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Could not remove this contact right now.')
+    }
   }
 
   function openDeleteFromMenu() {

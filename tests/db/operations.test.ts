@@ -3,13 +3,16 @@ import { db } from '@/db/db'
 import {
   addGroupMember,
   createBill,
+  createBundledGroupSettlement,
   createGroup,
   createSettlement,
   deleteBill,
   deleteGroup,
+  deletePerson,
   getBillWithDetails,
   linkProfileToRemote,
   removeGroupMember,
+  resolveGroupMemberUserId,
   updateBill,
 } from '@/db/operations'
 import {
@@ -27,6 +30,7 @@ import {
 // operation is exercised purely against Dexie.
 vi.mock('@/sync/sync-manager', () => ({ requestSyncNow: vi.fn(), triggerSync: vi.fn() }))
 vi.mock('@/sync/cloud-first-mutations', () => ({ finalizeMutationSync: vi.fn(async () => {}) }))
+import { finalizeMutationSync } from '@/sync/cloud-first-mutations'
 vi.mock('@/lib/kwenta-notifications', () => ({
   notifyAddedToGroup: vi.fn(async () => {}),
   notifyBillParticipantsCreated: vi.fn(async () => {}),
@@ -94,6 +98,63 @@ describe('createBill', () => {
     })
     expect((await db.bills.get(billId))?.paid_by).toBe('FR')
   })
+
+  it('rewrites group split user_ids and paid_by to the roster member id', async () => {
+    await db.groups.add(makeGroup({ id: 'G', created_by: 'ME' }))
+    await db.group_members.bulkAdd([
+      makeMember({ group_id: 'G', user_id: 'ME' }),
+      makeMember({ group_id: 'G', user_id: 'REMOTE' }),
+    ])
+    // ME tracks the remote member as a linked local contact.
+    await db.profiles.bulkAdd([
+      makeProfile({ id: 'ME' }),
+      makeProfile({ id: 'REMOTE' }),
+      makeProfile({ id: 'LOCAL', is_local: true, owner_id: 'ME', linked_profile_id: 'REMOTE' }),
+    ])
+
+    const billId = await createBill({
+      title: 'Lunch',
+      currency: 'PHP',
+      groupId: 'G',
+      createdBy: 'ME',
+      paidBy: 'LOCAL', // local contact as payer
+      note: '',
+      items: [
+        {
+          name: 'Pizza',
+          amount: 100,
+          splits: [
+            { userId: 'ME', splitType: 'equal', splitValue: 1 },
+            { userId: 'LOCAL', splitType: 'equal', splitValue: 1 }, // local contact as splittee
+          ],
+        },
+      ],
+    })
+
+    const bill = await db.bills.get(billId)
+    expect(bill?.paid_by).toBe('REMOTE') // rewritten from LOCAL
+
+    const items = await db.bill_items.where('bill_id').equals(billId).toArray()
+    const splits = await db.item_splits.where('item_id').equals(items[0].id).toArray()
+    expect(splits.map((s) => s.user_id).sort()).toEqual(['ME', 'REMOTE']) // LOCAL -> REMOTE
+  })
+
+  it('leaves personal-bill split user_ids untouched (no group)', async () => {
+    await db.profiles.bulkAdd([makeProfile({ id: 'ME' }), makeProfile({ id: 'FR' })])
+    const billId = await createBill({
+      title: 'Solo',
+      currency: 'PHP',
+      groupId: null,
+      createdBy: 'ME',
+      note: '',
+      items: [
+        { name: 'X', amount: 50, splits: [{ userId: 'FR', splitType: 'equal', splitValue: 1 }] },
+      ],
+    })
+    const items = await db.bill_items.where('bill_id').equals(billId).toArray()
+    const splits = await db.item_splits.where('item_id').equals(items[0].id).toArray()
+    expect(splits[0].user_id).toBe('FR')
+  })
 })
 
 describe('updateBill', () => {
@@ -142,6 +203,45 @@ describe('updateBill', () => {
       items: [],
     })
     expect((await db.bills.get(billId))?.title).toBe('Mine')
+  })
+
+  describe('updateBill identity', () => {
+    it('rewrites group split user_ids and paid_by to roster ids on edit', async () => {
+      await db.groups.add(makeGroup({ id: 'G', created_by: 'ME' }))
+      await db.group_members.bulkAdd([
+        makeMember({ group_id: 'G', user_id: 'ME' }),
+        makeMember({ group_id: 'G', user_id: 'REMOTE' }),
+      ])
+      await db.profiles.bulkAdd([
+        makeProfile({ id: 'ME' }),
+        makeProfile({ id: 'REMOTE' }),
+        makeProfile({ id: 'LOCAL', is_local: true, owner_id: 'ME', linked_profile_id: 'REMOTE' }),
+      ])
+      const billId = await createBill({
+        title: 'B',
+        currency: 'PHP',
+        groupId: 'G',
+        createdBy: 'ME',
+        note: '',
+        items: [{ name: 'I', amount: 100, splits: [{ userId: 'ME', splitType: 'equal', splitValue: 1 }] }],
+      })
+
+      await updateBill(billId, 'ME', {
+        title: 'B2',
+        note: '',
+        currency: 'PHP',
+        paidBy: 'LOCAL',
+        items: [
+          { name: 'I2', amount: 80, splits: [{ userId: 'LOCAL', splitType: 'equal', splitValue: 1 }] },
+        ],
+      })
+
+      const bill = await db.bills.get(billId)
+      expect(bill?.paid_by).toBe('REMOTE')
+      const items = (await db.bill_items.where('bill_id').equals(billId).toArray()).filter((i) => !i.is_deleted)
+      const splits = (await db.item_splits.where('item_id').equals(items[0].id).toArray()).filter((s) => !s.is_deleted)
+      expect(splits[0].user_id).toBe('REMOTE')
+    })
   })
 })
 
@@ -300,6 +400,71 @@ describe('createSettlement', () => {
       createSettlement(null, 'B', 'A', 50, 'PHP', 'A', '', 'no-such-bill'),
     ).rejects.toThrow('Bill not found')
   })
+
+  describe('createSettlement identity', () => {
+    it('rewrites group settlement parties to roster ids (by email)', async () => {
+      await db.groups.add(makeGroup({ id: 'G', created_by: 'ME' }))
+      await db.group_members.bulkAdd([
+        makeMember({ group_id: 'G', user_id: 'ME' }),
+        makeMember({ group_id: 'G', user_id: 'REMOTE', display_name: 'Sam' }),
+      ])
+      await db.profiles.bulkAdd([
+        makeProfile({ id: 'ME' }),
+        makeProfile({ id: 'REMOTE', display_name: 'Sam', email: 'sam@x.com' }),
+        makeProfile({ id: 'LOCALSAM', is_local: true, owner_id: 'ME', email: 'SAM@x.com', display_name: 'Sam' }),
+      ])
+
+      const sid = await createSettlement('G', 'LOCALSAM', 'ME', 40, 'PHP', 'ME')
+      const s = await db.settlements.get(sid)
+      expect(s?.from_user_id).toBe('REMOTE') // LOCALSAM -> roster REMOTE by normalized email
+      expect(s?.to_user_id).toBe('ME')
+    })
+
+    it('validates bill participation against the RESOLVED ids, not the raw input ids', async () => {
+      // The bill's split references REMOTE; the caller passes the email-matched local contact.
+      await db.groups.add(makeGroup({ id: 'G', created_by: 'ME' }))
+      await db.group_members.bulkAdd([
+        makeMember({ group_id: 'G', user_id: 'ME' }),
+        makeMember({ group_id: 'G', user_id: 'REMOTE' }),
+      ])
+      await db.profiles.bulkAdd([
+        makeProfile({ id: 'ME' }),
+        makeProfile({ id: 'REMOTE', email: 'sam@x.com' }),
+        makeProfile({ id: 'LOCALSAM', is_local: true, owner_id: 'ME', email: 'sam@x.com' }),
+      ])
+      await db.bills.add(makeBill({ id: 'B', group_id: 'G', created_by: 'ME', paid_by: 'ME' }))
+      await db.bill_items.add(makeItem({ id: 'I', bill_id: 'B', amount: 80 }))
+      await db.item_splits.add(makeSplit({ id: 'SP', item_id: 'I', user_id: 'REMOTE', computed_amount: 80 }))
+
+      // Raw 'LOCALSAM' is not on the bill, but its resolved id REMOTE is. Must NOT throw.
+      const sid = await createSettlement('G', 'ME', 'LOCALSAM', 40, 'PHP', 'ME', undefined, 'B')
+      const s = await db.settlements.get(sid)
+      expect(s?.to_user_id).toBe('REMOTE')
+    })
+
+    it('createBundledGroupSettlement canonicalizes recipients to roster ids (by email)', async () => {
+      await db.groups.add(makeGroup({ id: 'G', created_by: 'ME' }))
+      await db.group_members.bulkAdd([
+        makeMember({ group_id: 'G', user_id: 'ME' }),
+        makeMember({ group_id: 'G', user_id: 'REMOTE' }),
+      ])
+      await db.profiles.bulkAdd([
+        makeProfile({ id: 'ME' }),
+        makeProfile({ id: 'REMOTE', email: 'sam@x.com' }),
+        makeProfile({ id: 'LOCALSAM', is_local: true, owner_id: 'ME', email: 'sam@x.com' }),
+      ])
+
+      const { settlementIds } = await createBundledGroupSettlement({
+        groupId: 'G',
+        fromUserId: 'ME',
+        recipients: [{ toUserId: 'LOCALSAM', amount: 30 }],
+        currency: 'PHP',
+        markedBy: 'ME',
+      })
+      const s = await db.settlements.get(settlementIds[0])
+      expect(s?.to_user_id).toBe('REMOTE') // not the device-private LOCALSAM
+    })
+  })
 })
 
 describe('linkProfileToRemote', () => {
@@ -399,5 +564,84 @@ describe('getBillWithDetails', () => {
 
   it('returns null for a missing or deleted bill', async () => {
     expect(await getBillWithDetails('nope')).toBeNull()
+  })
+})
+
+describe('resolveGroupMemberUserId', () => {
+  it('returns the id unchanged when it is already a member user_id', async () => {
+    await db.groups.add(makeGroup({ id: 'G', created_by: 'ME' }))
+    await db.group_members.add(makeMember({ group_id: 'G', user_id: 'MEMBER1' }))
+    expect(await resolveGroupMemberUserId('G', 'MEMBER1')).toBe('MEMBER1')
+  })
+
+  it('maps a linked local contact to the member it links to', async () => {
+    await db.groups.add(makeGroup({ id: 'G', created_by: 'ME' }))
+    await db.group_members.add(makeMember({ group_id: 'G', user_id: 'REMOTE' }))
+    await db.profiles.add(
+      makeProfile({ id: 'LOCAL', is_local: true, owner_id: 'ME', linked_profile_id: 'REMOTE' }),
+    )
+    expect(await resolveGroupMemberUserId('G', 'LOCAL')).toBe('REMOTE')
+  })
+
+  it('maps via a member whose profile links back to the chosen id', async () => {
+    await db.groups.add(makeGroup({ id: 'G', created_by: 'ME' }))
+    await db.group_members.add(makeMember({ group_id: 'G', user_id: 'LOCALMEMBER' }))
+    await db.profiles.add(
+      makeProfile({ id: 'LOCALMEMBER', is_local: true, owner_id: 'ME', linked_profile_id: 'REMOTE' }),
+    )
+    expect(await resolveGroupMemberUserId('G', 'REMOTE')).toBe('LOCALMEMBER')
+  })
+
+  it('matches by email when no link exists', async () => {
+    await db.groups.add(makeGroup({ id: 'G', created_by: 'ME' }))
+    await db.group_members.add(makeMember({ group_id: 'G', user_id: 'MEMBER' }))
+    await db.profiles.add(makeProfile({ id: 'MEMBER', email: 'sam@x.com' }))
+    await db.profiles.add(
+      makeProfile({ id: 'OTHERLOCAL', is_local: true, owner_id: 'ME', email: 'SAM@x.com' }),
+    )
+    expect(await resolveGroupMemberUserId('G', 'OTHERLOCAL')).toBe('MEMBER')
+  })
+
+  it('does NOT match by display_name alone (two distinct people can share a name)', async () => {
+    await db.groups.add(makeGroup({ id: 'G', created_by: 'ME' }))
+    await db.group_members.add(makeMember({ group_id: 'G', user_id: 'MEMBER', display_name: 'Sam' }))
+    await db.profiles.add(makeProfile({ id: 'MEMBER', email: '', display_name: 'Sam' }))
+    await db.profiles.add(
+      makeProfile({ id: 'LOCALSAM', is_local: true, owner_id: 'ME', email: '', display_name: ' sam ' }),
+    )
+    // Name matching is deliberately not on the live write path: it would mis-attribute money to a
+    // same-named member. Only exact identity (id/link/email) canonicalizes; otherwise unchanged.
+    expect(await resolveGroupMemberUserId('G', 'LOCALSAM')).toBe('LOCALSAM')
+  })
+
+  it('returns the id unchanged when the group has no matching member', async () => {
+    await db.groups.add(makeGroup({ id: 'G', created_by: 'ME' }))
+    await db.group_members.add(makeMember({ group_id: 'G', user_id: 'MEMBER', display_name: 'Sam' }))
+    await db.profiles.add(makeProfile({ id: 'MEMBER', email: '', display_name: 'Sam' }))
+    expect(await resolveGroupMemberUserId('G', 'UNRELATED')).toBe('UNRELATED')
+  })
+})
+
+describe('deletePerson atomic cascade', () => {
+  it('fires exactly one sync for a person spanning a group, a personal bill, and a settlement', async () => {
+    vi.mocked(finalizeMutationSync).mockClear()
+    await db.profiles.bulkAdd([makeProfile({ id: 'ME' }), makeProfile({ id: 'P', is_local: true, owner_id: 'ME' })])
+    await db.groups.add(makeGroup({ id: 'G', created_by: 'ME' }))
+    await db.group_members.bulkAdd([
+      makeMember({ group_id: 'G', user_id: 'ME' }),
+      makeMember({ group_id: 'G', user_id: 'P' }),
+    ])
+    await db.bills.add(makeBill({ id: 'GB', group_id: 'G', created_by: 'ME', paid_by: 'ME', total_amount: 50 }))
+    await db.bill_items.add(makeItem({ id: 'GI', bill_id: 'GB', amount: 50 }))
+    await db.item_splits.add(makeSplit({ id: 'GS', item_id: 'GI', user_id: 'P', computed_amount: 50 }))
+    await db.settlements.add(makeSettlement({ id: 'ST', group_id: 'G', from_user_id: 'P', to_user_id: 'ME', amount: 10 }))
+
+    await deletePerson('P', 'ME')
+
+    expect(vi.mocked(finalizeMutationSync)).toHaveBeenCalledTimes(1)
+    expect((await db.profiles.get('P'))?.is_deleted).toBe(true)
+    const m = await db.group_members.where('[group_id+user_id]').equals(['G', 'P']).first()
+    expect(m?.is_deleted).toBe(true)
+    expect((await db.settlements.get('ST'))?.is_deleted).toBe(true)
   })
 })

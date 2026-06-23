@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react'
 import { Plus, ReceiptText, Share2, Trash2, Users } from 'lucide-react'
 import { Link } from 'react-router-dom'
+import { toast } from 'sonner'
 import { useLiveQuery } from 'dexie-react-hooks'
 import { db } from '@/db/db'
 import { deleteBill } from '@/db/operations'
@@ -178,7 +179,11 @@ export function BillsPage() {
 
   async function executeDeleteBill() {
     if (!userId || !deleteTarget) return
-    await deleteBill(deleteTarget.id, userId)
+    try {
+      await deleteBill(deleteTarget.id, userId)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Could not delete this bill right now.')
+    }
   }
 
   return (

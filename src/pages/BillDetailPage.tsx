@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import { useLiveQuery } from 'dexie-react-hooks'
 import { ArrowLeft, Check, Clock, Loader2, Pencil, ReceiptText, Share2, Trash2, Users } from 'lucide-react'
+import { toast } from 'sonner'
 import {
   CATEGORY_COLORS,
   CATEGORY_ICONS,
@@ -222,8 +223,12 @@ export function BillDetailPage() {
 
   async function executeDeleteBill() {
     if (!billId || !userId) return
-    await deleteBill(billId, userId)
-    navigate(backPath)
+    try {
+      await deleteBill(billId, userId)
+      navigate(backPath)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Could not delete this bill right now.')
+    }
   }
 
   if (loading) {

@@ -17,6 +17,7 @@ import {
   Users,
   X,
 } from 'lucide-react'
+import { toast } from 'sonner'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { useLiveQuery } from 'dexie-react-hooks'
 import { db } from '@/db/db'
@@ -168,6 +169,8 @@ function ManageMembersDialog({
       }
       setSelectedIds([])
       onChanged()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Could not add the selected member(s) right now.')
     } finally {
       setAdding(false)
     }
@@ -181,6 +184,8 @@ function ManageMembersDialog({
     try {
       await removeGroupMember(groupId, memberUserId, currentUserId)
       onChanged()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Could not remove this member right now.')
     } finally {
       setRemoving(null)
     }
@@ -831,8 +836,12 @@ export function GroupDetailPage() {
 
   async function executeDeleteGroup() {
     if (!groupId || !userId || !isGroupCreator) return
-    await deleteGroup(groupId, userId)
-    navigate('/app/groups')
+    try {
+      await deleteGroup(groupId, userId)
+      navigate('/app/groups')
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Could not delete this group right now.')
+    }
   }
 
   function openDeleteFromMenu() {

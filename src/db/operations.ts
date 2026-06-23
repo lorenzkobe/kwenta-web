@@ -7,6 +7,7 @@ import type {
   GroupMember,
   ItemSplit,
   MutationEntityType,
+  Profile,
   ProfilePeerLink,
   SplitType,
 } from '@/types'
@@ -50,6 +51,68 @@ async function notifySyncAfterMutation(meta?: {
 /** Group membership must use the Kwenta account id so Postgres RLS and sync match `auth.uid()`. */
 function membershipUserIdForProfile(p: { id: string; linked_profile_id: string | null }): string {
   return p.linked_profile_id ?? p.id
+}
+
+/**
+ * Resolve a chosen profile id to the canonical group_members.user_id for a group.
+ * The group roster is the single source of identity truth: every shared group row
+ * (item_splits.user_id, bills.paid_by, settlements.from/to_user_id) must reference a
+ * roster user_id, never a device-private local-contact id. Two devices that each track
+ * the same person as their own local contact would otherwise push divergent ids into
+ * the shared dataset, producing different balances/suggestions for the same group.
+ *
+ * Precedence (strongest identity first):
+ *   1. chosenProfileId is already a member user_id
+ *   2. chosen.linked_profile_id is a member user_id
+ *   3. a member whose profile.linked_profile_id === chosenProfileId
+ *   4. a member matched by non-empty normalized email
+ *   5. no match -> chosenProfileId unchanged
+ *
+ * Matching is restricted to EXACT identity signals (id, account link, email). Display-name
+ * matching is deliberately NOT used here: two distinct people can share a name within one
+ * group, and silently rewriting a split/payer/settlement to a same-named member would
+ * mis-attribute money with no way for the user to notice. (The historical data-repair in
+ * migration 043 offers an equivalent name match, but only behind an operator-gated,
+ * reviewable dry-run flag — never on the live write path.)
+ */
+export async function resolveGroupMemberUserId(
+  groupId: string,
+  chosenProfileId: string,
+): Promise<string> {
+  const members = (await db.group_members.where('group_id').equals(groupId).toArray()).filter(
+    (m) => !m.is_deleted,
+  )
+  if (members.length === 0) return chosenProfileId
+
+  const memberIds = new Set(members.map((m) => m.user_id))
+  if (memberIds.has(chosenProfileId)) return chosenProfileId // (1)
+
+  const chosen = await db.profiles.get(chosenProfileId)
+  if (chosen?.linked_profile_id && memberIds.has(chosen.linked_profile_id)) {
+    return chosen.linked_profile_id // (2)
+  }
+
+  // Load member profiles once for the remaining checks.
+  const memberProfiles = new Map<string, Profile | undefined>()
+  for (const m of members) {
+    memberProfiles.set(m.user_id, await db.profiles.get(m.user_id))
+  }
+
+  for (const m of members) {
+    const mp = memberProfiles.get(m.user_id)
+    if (mp && !mp.is_deleted && mp.linked_profile_id === chosenProfileId) return m.user_id // (3)
+  }
+
+  const chosenEmail = (chosen?.email ?? '').trim().toLowerCase()
+  if (chosenEmail) {
+    for (const m of members) {
+      const mp = memberProfiles.get(m.user_id)
+      const memberEmail = (mp?.email ?? '').trim().toLowerCase()
+      if (memberEmail && memberEmail === chosenEmail) return m.user_id // (4)
+    }
+  }
+
+  return chosenProfileId // (5) no exact-identity match
 }
 
 function syncFields(overrides?: Partial<{ id: string }>) {
@@ -98,6 +161,24 @@ export interface CreateBillInput {
 
 export async function createBill(input: CreateBillInput): Promise<string> {
   const billId = generateId()
+
+  // Resolve chosen ids to the canonical group roster member id BEFORE the transaction
+  // (group_members/profiles are out of the transaction scope below). Personal bills
+  // (groupId === null) resolve to no-ops, leaving ids unchanged.
+  const groupId = input.groupId
+  let resolvedPaidBy = input.paidBy ?? input.createdBy
+  const resolvedSplitUserId = new Map<string, string>()
+  if (groupId) {
+    resolvedPaidBy = await resolveGroupMemberUserId(groupId, resolvedPaidBy)
+    const distinctSplitIds = new Set<string>()
+    for (const item of input.items) {
+      for (const sp of item.splits) distinctSplitIds.add(sp.userId)
+    }
+    for (const uid of distinctSplitIds) {
+      resolvedSplitUserId.set(uid, await resolveGroupMemberUserId(groupId, uid))
+    }
+  }
+
   const totalAmount = input.items.reduce((sum, item) => {
     if (item.splits.length > 0 && item.splits[0].splitType === 'quantity') {
       const computed = computeSplits(item.amount, item.splits as SplitInput[])
@@ -113,7 +194,7 @@ export async function createBill(input: CreateBillInput): Promise<string> {
       group_id: input.groupId,
       currency: input.currency,
       created_by: input.createdBy,
-      paid_by: input.paidBy ?? input.createdBy,
+      paid_by: resolvedPaidBy,
       total_amount: totalAmount,
       note: input.note,
       category: input.category ?? null,
@@ -136,7 +217,7 @@ export async function createBill(input: CreateBillInput): Promise<string> {
           const split: ItemSplit = {
             ...syncFields(),
             item_id: itemId,
-            user_id: item.splits[i].userId,
+            user_id: resolvedSplitUserId.get(item.splits[i].userId) ?? item.splits[i].userId,
             split_type: item.splits[i].splitType,
             split_value: item.splits[i].splitValue,
             computed_amount: computed[i].computedAmount,
@@ -212,6 +293,23 @@ export async function updateBill(
   if (!bill || bill.is_deleted) return
   if (bill.created_by !== editorUserId) return
 
+  // Resolve chosen ids to roster member ids before the transaction (see createBill).
+  const groupId = bill.group_id
+  let resolvedPaidBy = patch.paidBy
+  const resolvedSplitUserId = new Map<string, string>()
+  if (groupId) {
+    if (patch.paidBy !== undefined) {
+      resolvedPaidBy = await resolveGroupMemberUserId(groupId, patch.paidBy)
+    }
+    const distinctSplitIds = new Set<string>()
+    for (const item of patch.items) {
+      for (const sp of item.splits) distinctSplitIds.add(sp.userId)
+    }
+    for (const uid of distinctSplitIds) {
+      resolvedSplitUserId.set(uid, await resolveGroupMemberUserId(groupId, uid))
+    }
+  }
+
   const totalAmount = patch.items.reduce((sum, item) => {
     if (item.splits.length > 0 && item.splits[0].splitType === 'quantity') {
       const computed = computeSplits(item.amount, item.splits as SplitInput[])
@@ -238,7 +336,7 @@ export async function updateBill(
       title: patch.title,
       note: patch.note,
       currency: patch.currency,
-      ...(patch.paidBy !== undefined && { paid_by: patch.paidBy }),
+      ...(resolvedPaidBy !== undefined && { paid_by: resolvedPaidBy }),
       category: patch.category ?? null,
       total_amount: totalAmount,
       updated_at: timestamp,
@@ -261,7 +359,7 @@ export async function updateBill(
           await db.item_splits.add({
             ...syncFields(),
             item_id: itemId,
-            user_id: item.splits[i].userId,
+            user_id: resolvedSplitUserId.get(item.splits[i].userId) ?? item.splits[i].userId,
             split_type: item.splits[i].splitType,
             split_value: item.splits[i].splitValue,
             computed_amount: computed[i].computedAmount,
@@ -290,7 +388,11 @@ export async function updateBill(
   })
 }
 
-export async function deleteBill(billId: string, userId: string) {
+export async function deleteBill(
+  billId: string,
+  userId: string,
+  options?: { suppressSync?: boolean },
+) {
   const bill = await db.bills.get(billId)
   if (!bill || bill.is_deleted) return
   if (bill.created_by !== userId) return
@@ -318,14 +420,16 @@ export async function deleteBill(billId: string, userId: string) {
       description: `Deleted bill "${bill.title}"`,
     })
   })
-  await notifySyncAfterMutation({
-    actorUserId: userId,
-    operation: 'delete_bill',
-    entityType: 'bill',
-    entityId: billId,
-    payload: { title: bill.title, groupId: bill.group_id },
-    routeHint: bill.group_id ? `/app/groups/${bill.group_id}` : '/app/bills',
-  })
+  if (!options?.suppressSync) {
+    await notifySyncAfterMutation({
+      actorUserId: userId,
+      operation: 'delete_bill',
+      entityType: 'bill',
+      entityId: billId,
+      payload: { title: bill.title, groupId: bill.group_id },
+      routeHint: bill.group_id ? `/app/groups/${bill.group_id}` : '/app/bills',
+    })
+  }
 }
 
 // ── Groups ───────────────────────────────────────────
@@ -902,6 +1006,7 @@ export async function removeGroupMember(
   groupId: string,
   memberUserId: string,
   removedBy: string,
+  options?: { suppressSync?: boolean },
 ): Promise<void> {
   const timestamp = now()
 
@@ -967,14 +1072,16 @@ export async function removeGroupMember(
       })
     },
   )
-  await notifySyncAfterMutation({
-    actorUserId: removedBy,
-    operation: 'remove_group_member',
-    entityType: 'group_member',
-    entityId: memberUserId,
-    payload: { groupId, memberUserId },
-    routeHint: `/app/groups/${groupId}`,
-  })
+  if (!options?.suppressSync) {
+    await notifySyncAfterMutation({
+      actorUserId: removedBy,
+      operation: 'remove_group_member',
+      entityType: 'group_member',
+      entityId: memberUserId,
+      payload: { groupId, memberUserId },
+      routeHint: `/app/groups/${groupId}`,
+    })
+  }
 }
 
 /**
@@ -982,7 +1089,11 @@ export async function removeGroupMember(
  * - If the bill only involves you and them (no other participants), soft-delete the whole bill.
  * - Otherwise remove their splits and redistribute equal splits among remaining people (same as group removal).
  */
-async function removePersonFromPersonalBills(memberUserId: string, removedBy: string): Promise<void> {
+async function removePersonFromPersonalBills(
+  memberUserId: string,
+  removedBy: string,
+  options?: { suppressSync?: boolean },
+): Promise<void> {
   const actorId = removedBy
   const allPersonal = await db.bills
     .filter((b) => !b.is_deleted && (b.group_id === null || b.group_id === undefined))
@@ -994,7 +1105,7 @@ async function removePersonFromPersonalBills(memberUserId: string, removedBy: st
 
     const othersBesidesYouTwo = [...union].filter((id) => id !== actorId && id !== memberUserId)
     if (othersBesidesYouTwo.length === 0) {
-      await deleteBill(bill.id, actorId)
+      await deleteBill(bill.id, actorId, { suppressSync: options?.suppressSync })
     }
   }
 
@@ -1063,16 +1174,16 @@ export async function deletePerson(personId: string, actorUserId: string): Promi
   const groupIds = [...new Set(memberships.filter((m) => !m.is_deleted).map((m) => m.group_id))]
 
   for (const gid of groupIds) {
-    await removeGroupMember(gid, personId, actorUserId)
+    await removeGroupMember(gid, personId, actorUserId, { suppressSync: true })
   }
 
-  await removePersonFromPersonalBills(personId, actorUserId)
+  await removePersonFromPersonalBills(personId, actorUserId, { suppressSync: true })
 
   const settlements = await db.settlements
     .filter((s) => !s.is_deleted && (s.from_user_id === personId || s.to_user_id === personId))
     .toArray()
   for (const s of settlements) {
-    await deleteSettlement(s.id, actorUserId)
+    await deleteSettlement(s.id, actorUserId, { suppressSync: true })
   }
 
   const timestamp = now()
@@ -1199,10 +1310,16 @@ export async function createSettlement(
 ): Promise<string> {
   const settlementId = generateId()
   const labelTrim = (label ?? '').trim()
-  const [resolvedFromUserId, resolvedToUserId] = await Promise.all([
+  let [resolvedFromUserId, resolvedToUserId] = await Promise.all([
     resolveSettlementPartyId(fromUserId),
     resolveSettlementPartyId(toUserId),
   ])
+  if (groupId) {
+    ;[resolvedFromUserId, resolvedToUserId] = await Promise.all([
+      resolveGroupMemberUserId(groupId, resolvedFromUserId),
+      resolveGroupMemberUserId(groupId, resolvedToUserId),
+    ])
+  }
 
   if (billId) {
     const bill = await db.bills.get(billId)
@@ -1210,7 +1327,10 @@ export async function createSettlement(
     if (bill.group_id !== groupId) throw new Error('Bill does not match this payment context')
     const union = await participantUnionForBill(billId)
     union.add(bill.paid_by)
-    if (!union.has(fromUserId) || !union.has(toUserId)) {
+    // Validate the SAME identities we store (resolved to the group roster), not the raw input
+    // ids — otherwise a linked/email-matched party fails this check while a legitimate payment is
+    // written, or vice versa.
+    if (!union.has(resolvedFromUserId) || !union.has(resolvedToUserId)) {
       throw new Error('Both people must be on this bill')
     }
   }
@@ -1309,11 +1429,19 @@ export async function createBundledGroupSettlement(params: {
 
   const bundleId = generateId()
   const settlementIds = cleanedRecipients.map(() => generateId())
+  // Resolve to the group roster id (not just the linked-account id) so this device stores the
+  // same identity every member's roster uses — without it, balances on a device that tracks a
+  // recipient as its own local contact stay wrong until the server-side 042 backstop runs.
   const [resolvedFromUserId, resolvedRecipients] = await Promise.all([
-    resolveSettlementPartyId(params.fromUserId),
+    resolveSettlementPartyId(params.fromUserId).then((id) =>
+      resolveGroupMemberUserId(params.groupId, id),
+    ),
     Promise.all(
       cleanedRecipients.map(async (recipient) => ({
-        toUserId: await resolveSettlementPartyId(recipient.toUserId),
+        toUserId: await resolveGroupMemberUserId(
+          params.groupId,
+          await resolveSettlementPartyId(recipient.toUserId),
+        ),
         amount: recipient.amount,
       })),
     ),
@@ -1662,6 +1790,16 @@ export async function applyGeneralCreditToSelection(params: {
   ])
   const otherParticipantId =
     params.fromUserId === params.markedBy ? params.toUserId : params.fromUserId
+  // Per-group roster-canonical ids for the group-allocation writes (see createSettlement #9).
+  // Computed before the transaction since resolveGroupMemberUserId reads group_members/profiles.
+  const groupResolvedParties = new Map<string, { from: string; to: string }>()
+  for (const group of params.groupAllocations) {
+    if (group.amount <= 0.005 || groupResolvedParties.has(group.groupId)) continue
+    groupResolvedParties.set(group.groupId, {
+      from: await resolveGroupMemberUserId(group.groupId, resolvedFromUserId),
+      to: await resolveGroupMemberUserId(group.groupId, resolvedToUserId),
+    })
+  }
   const settlementIds: string[] = []
   const createdGroupSettlements: { settlementId: string; groupId: string; amount: number }[] = []
   let personalSettlementId: string | null = null
@@ -1819,13 +1957,14 @@ export async function applyGeneralCreditToSelection(params: {
         const settlementId = generateId()
         const label = `Applied general credit to group balance (from ${originalAmountFormatted} credit)`
         const labelSuffix = ` · ${label}`
+        const groupParties = groupResolvedParties.get(group.groupId)
         await db.settlements.add({
           ...syncFields({ id: settlementId }),
           group_id: group.groupId,
           bill_id: null,
           bundle_id: null,
-          from_user_id: resolvedFromUserId,
-          to_user_id: resolvedToUserId,
+          from_user_id: groupParties?.from ?? resolvedFromUserId,
+          to_user_id: groupParties?.to ?? resolvedToUserId,
           amount: group.amount,
           currency: params.currency,
           label,
@@ -1993,7 +2132,11 @@ export async function updateBundledPaymentLabel(
   })
 }
 
-export async function deleteSettlement(settlementId: string, editorUserId: string): Promise<void> {
+export async function deleteSettlement(
+  settlementId: string,
+  editorUserId: string,
+  options?: { suppressSync?: boolean },
+): Promise<void> {
   const s = await db.settlements.get(settlementId)
   if (!s || s.is_deleted) return
 
@@ -2019,14 +2162,16 @@ export async function deleteSettlement(settlementId: string, editorUserId: strin
       description: `Removed payment ${fromProfile?.display_name ?? '?'} → ${toProfile?.display_name ?? '?'}`,
     })
   })
-  await notifySyncAfterMutation({
-    actorUserId: editorUserId,
-    operation: 'delete_settlement',
-    entityType: 'settlement',
-    entityId: settlementId,
-    payload: { groupId: s.group_id },
-    routeHint: s.group_id ? `/app/groups/${s.group_id}` : '/app/settings',
-  })
+  if (!options?.suppressSync) {
+    await notifySyncAfterMutation({
+      actorUserId: editorUserId,
+      operation: 'delete_settlement',
+      entityType: 'settlement',
+      entityId: settlementId,
+      payload: { groupId: s.group_id },
+      routeHint: s.group_id ? `/app/groups/${s.group_id}` : '/app/settings',
+    })
+  }
 }
 
 export async function deleteBundledPayment(bundleId: string, editorUserId: string): Promise<void> {

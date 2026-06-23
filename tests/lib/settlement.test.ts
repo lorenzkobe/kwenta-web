@@ -8,9 +8,11 @@ import {
 import {
   makeBill,
   makeGroup,
+  makeItem,
   makeMember,
   makeProfile,
   makeSettlement,
+  makeSplit,
   resetDb,
   seedSimpleBill,
 } from '../helpers/db'
@@ -163,6 +165,57 @@ describe('computeGroupBalances', () => {
 
     expect(balanceValues(ownerView)).toEqual(balanceValues(otherView))
     expect(suggestionValues(ownerView)).toEqual(suggestionValues(otherView))
+  })
+
+  describe('two-device convergence (canonical ids)', () => {
+    beforeEach(async () => {
+      await resetDb()
+    })
+
+    async function seedCanonical() {
+      await db.groups.add(makeGroup({ id: 'G', created_by: 'ME', currency: 'PHP' }))
+      await db.group_members.bulkAdd([
+        makeMember({ group_id: 'G', user_id: 'ME', display_name: 'Me' }),
+        makeMember({ group_id: 'G', user_id: 'SAM', display_name: 'Sam' }),
+      ])
+      await db.profiles.bulkAdd([
+        makeProfile({ id: 'ME', display_name: 'Me' }),
+        makeProfile({ id: 'SAM', display_name: 'Sam' }),
+      ])
+      // ME paid 100; SAM owes 50, ME owes 50.
+      await db.bills.add(makeBill({ id: 'B', group_id: 'G', created_by: 'ME', paid_by: 'ME', total_amount: 100, currency: 'PHP' }))
+      await db.bill_items.add(makeItem({ id: 'I', bill_id: 'B', amount: 100 }))
+      await db.item_splits.bulkAdd([
+        makeSplit({ id: 'S1', item_id: 'I', user_id: 'ME', computed_amount: 50 }),
+        makeSplit({ id: 'S2', item_id: 'I', user_id: 'SAM', computed_amount: 50 }),
+      ])
+    }
+
+    it('both members compute identical balances + suggestions when ids are canonical', async () => {
+      await seedCanonical()
+      const asMe = await computeGroupBalances('G', 'ME')
+      const asSam = await computeGroupBalances('G', 'SAM')
+      // Same per-member balances regardless of viewer.
+      const norm = (s: NonNullable<typeof asMe>) =>
+        [...s.balances].sort((a, b) => a.userId.localeCompare(b.userId)).map((b) => [b.userId, b.amount])
+      expect(norm(asMe!)).toEqual(norm(asSam!))
+      // Same single suggestion: SAM pays ME 50.
+      expect(asMe!.suggestions).toEqual(asSam!.suggestions)
+      expect(asMe!.suggestions).toEqual([
+        expect.objectContaining({ fromUserId: 'SAM', toUserId: 'ME', amount: 50 }),
+      ])
+    })
+
+    it('a leaked local id (pre-fix) produces a phantom balance entry — the bug canonicalization removes', async () => {
+      await seedCanonical()
+      // Simulate Device B that wrote SAM's split under a local id instead of the roster id.
+      await db.item_splits.update('S2', { user_id: 'LOCALSAM_B' })
+      const asMe = await computeGroupBalances('G', 'ME')
+      // SAM's debit now lands on a non-member id -> an extra balance bucket appears.
+      const ids = asMe!.balances.map((b) => b.userId).sort()
+      expect(ids).toContain('LOCALSAM_B') // phantom entry (Unknown payer/owe)
+      // After Task 1-8 this row would have been written/repaired as 'SAM' and this entry would not exist.
+    })
   })
 
   it('optimizes a three-way imbalance into minimal transfers', async () => {

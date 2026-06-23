@@ -145,7 +145,7 @@ function rememberEventId(recentOrder: string[], recentSet: Set<string>, eventId:
   if (evicted) recentSet.delete(evicted)
 }
 
-async function processEvent(userId: string, ev: UserEventRow): Promise<void> {
+export async function processEvent(userId: string, ev: UserEventRow): Promise<void> {
   const startedAt = performance.now()
 
   // A profile link event means this user now has access to historical bills and
@@ -217,7 +217,7 @@ async function processEvent(userId: string, ev: UserEventRow): Promise<void> {
       if (error) {
         console.warn('[realtime] bill bundle fetch failed', error.message)
         captureMetric('realtime.event.process', false, performance.now() - startedAt, { entity: ev.entity_type, op: ev.op })
-        return
+        throw new Error(`bill bundle fetch failed: ${error.message}`)
       }
       await applyBillBundle(data)
       captureMetric('realtime.event.process', true, performance.now() - startedAt, { entity: ev.entity_type, op: ev.op })
@@ -233,7 +233,7 @@ async function processEvent(userId: string, ev: UserEventRow): Promise<void> {
       if (error) {
         console.warn('[realtime] group bundle fetch failed', error.message)
         captureMetric('realtime.event.process', false, performance.now() - startedAt, { entity: ev.entity_type, op: ev.op })
-        return
+        throw new Error(`group bundle fetch failed: ${error.message}`)
       }
       await applyGroupBundle(data)
       captureMetric('realtime.event.process', true, performance.now() - startedAt, { entity: ev.entity_type, op: ev.op })
@@ -255,7 +255,7 @@ async function processEvent(userId: string, ev: UserEventRow): Promise<void> {
       if (error) {
         console.warn('[realtime] group bundle fetch failed', error.message)
         captureMetric('realtime.event.process', false, performance.now() - startedAt, { entity: ev.entity_type, op: ev.op })
-        return
+        throw new Error(`group bundle fetch failed: ${error.message}`)
       }
       await applyGroupBundle(data)
       captureMetric('realtime.event.process', true, performance.now() - startedAt, { entity: ev.entity_type, op: ev.op })
@@ -270,7 +270,7 @@ async function processEvent(userId: string, ev: UserEventRow): Promise<void> {
       if (error) {
         console.warn('[realtime] settlement fetch failed', error.message)
         captureMetric('realtime.event.process', false, performance.now() - startedAt, { entity: ev.entity_type, op: ev.op })
-        return
+        throw new Error(`settlement fetch failed: ${error.message}`)
       }
       await applySettlementBundle(data)
       captureMetric('realtime.event.process', true, performance.now() - startedAt, { entity: ev.entity_type, op: ev.op })

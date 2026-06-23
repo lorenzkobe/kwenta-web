@@ -46,7 +46,52 @@ async function resolveSettlementPartyIdForPush(localUserId: string): Promise<str
   return localUserId
 }
 
+/** Prefer linked Kwenta account id for bill payers when available. */
+export async function resolvePaidByForPush(localUserId: string): Promise<string> {
+  const p = await db.profiles.get(localUserId)
+  if (!p || p.is_deleted) {
+    return localUserId
+  }
+  if (p.linked_profile_id) {
+    return p.linked_profile_id
+  }
+  return localUserId
+}
+
 export { KWENTA_LAST_PULL_STORAGE_KEY } from '@/lib/kwenta-storage-keys'
+
+/**
+ * Confirm whether a row was successfully applied by the server in this sync.
+ * Used to stamp synced_at only for rows the server actually stored (per the applied map from migration 044).
+ * BACKWARD-COMPAT: if applied is undefined (older server pre-044), returns false so rows stay unsynced.
+ */
+export function isRowApplied(applied: Record<string, string[]> | undefined, table: string, id: string): boolean {
+  return Array.isArray(applied?.[table]) && applied![table].includes(id)
+}
+
+/**
+ * Decide whether to apply a pulled row over the local row during pull-apply.
+ * Prevents mid-round-trip local edits from being clobbered by the pulled snapshot.
+ *
+ * Returns true (apply) if:
+ * - No local row exists (brand new server row)
+ * - Local row is synced (synced_at is not null and updated_at <= synced_at)
+ * - Local row is unsynced BUT the server row is strictly newer
+ *
+ * Returns false (skip apply) if:
+ * - Local row is unsynced AND the server row is older or same age
+ *   (preserves the in-flight local edit for retry)
+ */
+export function shouldApplyPulledRow(
+  local: { updated_at: string; synced_at: string | null } | undefined,
+  pulledUpdatedAt: string,
+): boolean {
+  if (!local) return true
+  const localUnsynced = local.synced_at === null || local.updated_at > local.synced_at
+  if (!localUnsynced) return true
+  // local has an unsynced edit; only let the server row win if it is strictly newer.
+  return pulledUpdatedAt > local.updated_at
+}
 
 /** Time since we last advanced `KWENTA_LAST_PULL_STORAGE_KEY` after a successful sync. */
 export function getMillisecondsSinceLastPull(): number {
@@ -196,6 +241,58 @@ function filterUnsyncedForPush(
   }
 }
 
+/** True if the specific entity's local rows are still unsynced. Scoped strictly to the rows this
+ *  mutation could have touched — it must NOT conflate an unrelated offline edit elsewhere with this
+ *  mutation, or a change that synced fine gets surfaced as a false "could not be saved" conflict. */
+export async function isEntityUnsyncedForActor(
+  entityType: string,
+  entityId: string | null | undefined,
+  actorUserId: string,
+): Promise<boolean> {
+  const isUnsynced = (r: { synced_at: string | null; updated_at: string } | undefined) =>
+    !!r && (r.synced_at === null || r.updated_at > r.synced_at)
+  // No entity to scope to: the sync already returned no transport error, and the actor-global
+  // check would flag this mutation for any unrelated unsynced row. Treat as not-stuck rather than
+  // raise a false conflict; genuinely dropped writes are still caught by the per-row push retry.
+  if (!entityId) return false
+  switch (entityType) {
+    case 'bill': {
+      if (isUnsynced(await db.bills.get(entityId))) return true
+      const items = await db.bill_items.where('bill_id').equals(entityId).toArray()
+      if (items.some(isUnsynced)) return true
+      for (const it of items) {
+        const splits = await db.item_splits.where('item_id').equals(it.id).toArray()
+        if (splits.some(isUnsynced)) return true
+      }
+      return false
+    }
+    case 'settlement':
+      return isUnsynced(await db.settlements.get(entityId))
+    case 'group':
+      return isUnsynced(await db.groups.get(entityId))
+    case 'profile': {
+      // The profile row itself...
+      if (isUnsynced(await db.profiles.get(entityId))) return true
+      // ...and the deletePerson cascade: a soft-deleted membership / settlement / split that the
+      // server silently dropped would otherwise let the mutation report "applied" while the
+      // person resurfaces with stale balances elsewhere. Scoped to rows referencing this person.
+      const memberships = await db.group_members.where('user_id').equals(entityId).toArray()
+      if (memberships.some(isUnsynced)) return true
+      const settlements = await db.settlements
+        .filter((s) => s.from_user_id === entityId || s.to_user_id === entityId)
+        .toArray()
+      if (settlements.some(isUnsynced)) return true
+      const splits = await db.item_splits.where('user_id').equals(entityId).toArray()
+      if (splits.some(isUnsynced)) return true
+      return false
+    }
+    default:
+      // group_member and others use entityId semantics we can't reliably map to a single row;
+      // fall back to the actor-global check so a genuinely dropped write is still caught.
+      return hasUnsyncedLocalDataForUser(actorUserId)
+  }
+}
+
 /** True if this user has local rows that still need a successful cloud push. */
 export async function hasUnsyncedLocalDataForUser(userId: string): Promise<boolean> {
   const ctx = await buildPushFilterContext(userId)
@@ -274,6 +371,14 @@ export async function pushChanges(): Promise<{ pushed: number; errors: string[] 
           return resolved === gm.user_id ? gm : { ...gm, user_id: resolved }
         }),
       )
+    } else if (tableName === 'bills') {
+      rowsToUpsert = await Promise.all(
+        unsynced.map(async (r) => {
+          const b = r as Bill
+          const resolved = await resolvePaidByForPush(b.paid_by)
+          return resolved === b.paid_by ? b : { ...b, paid_by: resolved }
+        }),
+      )
     }
 
     const { error } = await supabase.from(tableName).upsert(rowsToUpsert, {
@@ -314,6 +419,14 @@ export async function pushChanges(): Promise<{ pushed: number; errors: string[] 
         if (pushed.user_id !== original.user_id) {
           patch.user_id = pushed.user_id
         }
+        await table.update(original.id, patch)
+      }
+    } else if (tableName === 'bills') {
+      for (let i = 0; i < unsynced.length; i++) {
+        const original = unsynced[i] as Bill
+        const pushedRow = rowsToUpsert[i] as Bill
+        const patch: Partial<Bill> & { synced_at: string } = { synced_at: timestamp }
+        if (pushedRow.paid_by !== original.paid_by) patch.paid_by = pushedRow.paid_by
         await table.update(original.id, patch)
       }
     } else {
@@ -370,7 +483,13 @@ export async function pullChanges(userId: string): Promise<{ pulled: number; err
       for (const row of rows) {
         const existing = await table.get(row.id)
         if (existing) {
-          await table.update(row.id, { ...row, synced_at: row.updated_at })
+          // Same guard as syncRoundTrip's pull-apply: never clobber a newer unsynced local edit
+          // with an older server snapshot. pullChanges is the realtime / RPC-missing fallback
+          // path, so without this an in-flight local edit could vanish depending on which sync
+          // path happened to fire.
+          if (shouldApplyPulledRow(existing as { updated_at: string; synced_at: string | null }, row.updated_at)) {
+            await table.update(row.id, { ...row, synced_at: row.updated_at })
+          }
         } else {
           await table.add({ ...row, synced_at: row.updated_at })
         }
@@ -681,6 +800,14 @@ export async function syncRoundTrip(userId: string): Promise<{
           return resolved === gm.user_id ? gm : { ...gm, user_id: resolved }
         }),
       )
+    } else if (tableName === 'bills') {
+      unsynced = await Promise.all(
+        unsynced.map(async (r) => {
+          const b = r as Bill
+          const resolved = await resolvePaidByForPush(b.paid_by)
+          return resolved === b.paid_by ? b : { ...b, paid_by: resolved }
+        }),
+      )
     }
     if (unsynced.length > 0) {
       pPush[tableName] = unsynced
@@ -716,17 +843,24 @@ export async function syncRoundTrip(userId: string): Promise<{
     return { pushed: 0, pulled: 0, errors: ['kwenta_sync: invalid response shape'] }
   }
 
-  // Stamp pushed rows as synced FIRST, then apply the pull bundle. The pull carries
-  // server-authoritative updated_at, so any pushed row echoed back in the bundle ends
-  // up with synced_at = server updated_at. We stamp with the pushed row's own
-  // updated_at (not client now()) so that, for rows NOT echoed in the bundle, the
-  // unsynced predicate (updated_at > synced_at) is false and clock skew can't trigger
-  // an endless re-push of an already-synced row.
+  // Stamp pushed rows as synced ONLY if the server applied them (per the applied map from migration 044).
+  // BACKWARD-COMPAT: if applied is undefined (older server pre-044), stamp all (current behavior).
+  // Rows NOT in applied stay unsynced and will retry on the next sync.
+  // Then apply the pull bundle. The pull carries server-authoritative updated_at.
+  const applied = (bundle as { applied?: Record<string, string[]> }).applied
   for (const tableName of TABLE_NAMES) {
     const pushedRows = pPush[tableName]
     if (!pushedRows?.length) continue
     const table = getLocalTable(tableName)
     for (const r of pushedRows) {
+      const rowId = (r as SyncFields).id
+      // BACKWARD-COMPAT: if applied is undefined, stamp all rows (old server behavior).
+      const shouldStamp = applied === undefined || isRowApplied(applied, tableName, rowId)
+      if (!shouldStamp) {
+        // Row not applied: leave synced_at unchanged so it stays unsynced and retries.
+        // Still preserve canonicalization write-backs for applied rows only.
+        continue
+      }
       const syncedAt = (r as SyncFields).updated_at
       if (tableName === 'item_splits') {
         const s = r as ItemSplit
@@ -741,6 +875,9 @@ export async function syncRoundTrip(userId: string): Promise<{
       } else if (tableName === 'group_members') {
         const gm = r as GroupMember
         await table.update(gm.id, { synced_at: syncedAt, user_id: gm.user_id })
+      } else if (tableName === 'bills') {
+        const b = r as Bill
+        await table.update(b.id, { synced_at: syncedAt, paid_by: b.paid_by })
       } else {
         await table.update((r as SyncFields).id, { synced_at: syncedAt })
       }
@@ -754,7 +891,10 @@ export async function syncRoundTrip(userId: string): Promise<{
     for (const row of rows) {
       const existing = await table.get(row.id)
       if (existing) {
-        await table.update(row.id, { ...row, synced_at: row.updated_at })
+        // Guard: do not clobber a newer unsynced local edit made during the round-trip.
+        if (shouldApplyPulledRow(existing, row.updated_at)) {
+          await table.update(row.id, { ...row, synced_at: row.updated_at })
+        }
       } else {
         await table.add({ ...row, synced_at: row.updated_at })
       }

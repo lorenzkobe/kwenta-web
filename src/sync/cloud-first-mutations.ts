@@ -1,7 +1,7 @@
 import { db } from '@/db/db'
 import type { MutationEntityType, NotAppliedChange, PendingMutation } from '@/types'
 import { generateId, now } from '@/lib/utils'
-import { hasUnsyncedLocalDataForUser, syncRoundTrip } from '@/sync/sync-service'
+import { hasUnsyncedLocalDataForUser, isEntityUnsyncedForActor, syncRoundTrip } from '@/sync/sync-service'
 
 export class CloudFirstMutationError extends Error {
   code: string
@@ -191,6 +191,25 @@ export async function recordNotAppliedChange(input: {
   return id
 }
 
+export async function retryNotAppliedChange(change: NotAppliedChange): Promise<boolean> {
+  const result = await syncRoundTrip(change.actor_user_id)
+  if (result.errors.length === 0 && !(await isEntityUnsyncedForActor(change.entity_type, change.entity_id, change.actor_user_id))) {
+    await markNotAppliedChangeReapplied(change.id)
+    // Also resolve the originating pending_mutation. Left as 'pending', the next sync-error path
+    // (markPendingMutationsConflict) would re-escalate this already-saved change to 'conflict'
+    // and spawn a fresh not_applied_change — a spurious "could not be saved" notice.
+    if (change.pending_mutation_id) {
+      await db.pending_mutations.update(change.pending_mutation_id, {
+        status: 'applied',
+        updated_at: now(),
+        last_error: null,
+      })
+    }
+    return true
+  }
+  return false
+}
+
 export async function finalizeMutationSync(input: FinalizeMutationInput): Promise<void> {
   const isOnline = typeof navigator !== 'undefined' && navigator.onLine
   if (!isOnline) {
@@ -222,6 +241,41 @@ export async function finalizeMutationSync(input: FinalizeMutationInput): Promis
       routeHint: input.routeHint ?? null,
     })
     throw new CloudFirstMutationError('Could not save to cloud. Your change was not applied.', 'SYNC_ERROR')
+  }
+
+  // Sync returned no transport error — but a row silently dropped by server RLS stays
+  // unsynced (synced_at=null). Do not declare success while the actor still has unsynced
+  // data; leave the mutation pending so the next sync retries, and once retries exceed the
+  // threshold, surface it as a not_applied_change instead of a silent forever-pending row.
+  const STUCK_RETRY_THRESHOLD = 3
+  if (await isEntityUnsyncedForActor(input.entityType, input.entityId ?? null, input.actorUserId)) {
+    const current = await db.pending_mutations.get(pendingId)
+    const retryCount = (current?.retry_count ?? 0) + 1
+    await db.pending_mutations.update(pendingId, {
+      status: 'pending',
+      updated_at: now(),
+      retry_count: retryCount,
+      last_error: 'Cloud accepted the sync but did not store this change (possibly filtered).',
+    })
+    if (retryCount >= STUCK_RETRY_THRESHOLD) {
+      const existing = await db.not_applied_changes
+        .where('pending_mutation_id').equals(pendingId)
+        .filter((c) => c.resolution === 'pending').first()
+      if (!existing) {
+        await recordNotAppliedChange({
+          actorUserId: input.actorUserId,
+          pendingMutationId: pendingId,
+          operation: input.operation,
+          entityType: input.entityType,
+          entityId: input.entityId ?? null,
+          reasonCode: 'silently_dropped',
+          reasonMessage: 'This change could not be saved to the cloud after several attempts.',
+          payload: input.payload,
+          routeHint: input.routeHint ?? null,
+        })
+      }
+    }
+    return
   }
 
   await db.pending_mutations.update(pendingId, {

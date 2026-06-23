@@ -1,11 +1,17 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 import { db } from '@/db/db'
 import {
+  computePairwiseNet,
   computePairwiseNetForBill,
   expandProfileIdsForSplitMatching,
   participantUnionForBill,
 } from '@/lib/people'
-import { makeProfile, makeSettlement, resetDb, seedSimpleBill } from '../helpers/db'
+import { makeBill, makeItem, makeProfile, makeSettlement, makeSplit, resetDb, seedSimpleBill } from '../helpers/db'
+
+const ISO = '2026-06-18T00:00:00.000Z'
+function syncFieldsForTest(id: string) {
+  return { id, created_at: ISO, updated_at: ISO, synced_at: ISO, is_deleted: false, device_id: 'test-device' }
+}
 
 beforeEach(async () => {
   await resetDb()
@@ -145,5 +151,46 @@ describe('computePairwiseNetForBill', () => {
       isDeleted: true,
     })
     expect(await computePairwiseNetForBill(billId, 'me', 'other')).toBe(0)
+  })
+})
+
+describe('peer-links fold into viewer-scoped pairwise balances', () => {
+  beforeEach(async () => {
+    await resetDb()
+  })
+
+  it('nets a peer-linked id into the pairwise total so balance matches the deduped display', async () => {
+    // ME paid a 100 personal bill; SAM_A owes 100 on it. A second id SAM_B exists.
+    await db.profiles.bulkAdd([
+      makeProfile({ id: 'ME' }),
+      makeProfile({ id: 'SAM_A', is_local: true, owner_id: 'ME' }),
+      makeProfile({ id: 'SAM_B', is_local: true, owner_id: 'ME' }),
+    ])
+    const bill = makeBill({ id: 'B', group_id: null, created_by: 'ME', paid_by: 'ME', total_amount: 100, currency: 'PHP' })
+    await db.bills.add(bill)
+    await db.bill_items.add(makeItem({ id: 'I', bill_id: 'B', amount: 100 }))
+    await db.item_splits.add(makeSplit({ id: 'S', item_id: 'I', user_id: 'SAM_A', computed_amount: 100 }))
+
+    const before = await computePairwiseNet('ME', 'SAM_A')
+    expect(before.get('PHP')).toBe(100)
+
+    // Viewer manually marks SAM_A and SAM_B as the same person.
+    await db.profile_peer_links.add({
+      ...syncFieldsForTest('PL'),
+      owner_user_id: 'ME',
+      anchor_profile_id: 'SAM_A',
+      peer_profile_id: 'SAM_B',
+    })
+
+    // SAM_B owes 50 on a DIFFERENT bill ME paid. Since the viewer linked the two ids, the
+    // Person detail page dedups them into one row, so the pairwise net must also fold SAM_B's
+    // debt in (-> 150). Leaving balances peer-blind made the displayed amount disagree with the math.
+    const bill2 = makeBill({ id: 'B2', group_id: null, created_by: 'ME', paid_by: 'ME', total_amount: 50, currency: 'PHP' })
+    await db.bills.add(bill2)
+    await db.bill_items.add(makeItem({ id: 'I2', bill_id: 'B2', amount: 50 }))
+    await db.item_splits.add(makeSplit({ id: 'S2', item_id: 'I2', user_id: 'SAM_B', computed_amount: 50 }))
+
+    const after = await computePairwiseNet('ME', 'SAM_A')
+    expect(after.get('PHP')).toBe(150) // SAM_B's debt folds in via the viewer's peer-link
   })
 })

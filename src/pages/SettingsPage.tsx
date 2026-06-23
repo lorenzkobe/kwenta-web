@@ -16,12 +16,13 @@ import {
   X,
 } from 'lucide-react'
 import { db } from '@/db/db'
+import type { NotAppliedChange } from '@/types'
 import { markVoluntarySignOut } from '@/lib/auth-session-flags'
 import { clearKwentaLocalData } from '@/lib/clear-kwenta-local'
 import {
   dismissNotAppliedChange,
   listPendingConflictsForActor,
-  markNotAppliedChangeReapplied,
+  retryNotAppliedChange,
 } from '@/sync/cloud-first-mutations'
 import { useAuth } from '@/hooks/useAuth'
 import { useCurrentUser } from '@/hooks/useCurrentUser'
@@ -31,6 +32,7 @@ import { hasUnsyncedLocalDataForUser, fullSync } from '@/sync/sync-service'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { timeAgo } from '@/lib/utils'
+import { toast } from 'sonner'
 
 export function SettingsPage() {
   const navigate = useNavigate()
@@ -159,12 +161,20 @@ export function SettingsPage() {
   }
 
   async function handleDismissConflict(changeId: string) {
+    if (!window.confirm('Dismiss this change? It will be permanently discarded.')) {
+      return
+    }
     await dismissNotAppliedChange(changeId)
   }
 
-  async function handleApplyAgain(changeId: string, routeHint: string | null, entityType: string, entityId: string | null) {
-    await markNotAppliedChangeReapplied(changeId)
-    navigate(routeHint ?? fallbackRouteForConflict(entityType, entityId))
+  async function handleApplyAgain(change: NotAppliedChange) {
+    const success = await retryNotAppliedChange(change)
+    if (success) {
+      toast.success('Change re-applied')
+      navigate(change.route_hint ?? fallbackRouteForConflict(change.entity_type, change.entity_id))
+    } else {
+      toast.error('Still could not save — try again later')
+    }
   }
 
   return (
@@ -316,7 +326,7 @@ export function SettingsPage() {
                       size="sm"
                       className="rounded-lg"
                       onClick={() =>
-                        handleApplyAgain(change.id, change.route_hint, change.entity_type, change.entity_id)
+                        void handleApplyAgain(change)
                       }
                     >
                       Apply again

@@ -3,9 +3,13 @@ import { db } from '@/db/db'
 import {
   getMillisecondsSinceLastPull,
   hasUnsyncedLocalDataForUser,
+  isEntityUnsyncedForActor,
+  resolvePaidByForPush,
+  isRowApplied,
+  shouldApplyPulledRow,
   KWENTA_LAST_PULL_STORAGE_KEY,
 } from '@/sync/sync-service'
-import { makeBill, makeProfile, resetDb } from '../helpers/db'
+import { makeBill, makeMember, makeProfile, makeSettlement, resetDb } from '../helpers/db'
 
 // sync-service imports the Supabase client at module load; neither function
 // under test makes a network call, so a benign stub is enough.
@@ -87,5 +91,108 @@ describe('hasUnsyncedLocalDataForUser', () => {
       }),
     )
     expect(await hasUnsyncedLocalDataForUser('ME')).toBe(true)
+  })
+})
+
+describe('resolvePaidByForPush', () => {
+  beforeEach(async () => {
+    await resetDb()
+  })
+
+  it('rewrites a linked local-contact payer to the linked profile id', async () => {
+    await db.profiles.add(
+      makeProfile({ id: 'LOCAL', is_local: true, owner_id: 'ME', linked_profile_id: 'REMOTE' }),
+    )
+    expect(await resolvePaidByForPush('LOCAL')).toBe('REMOTE')
+  })
+
+  it('leaves an unlinked id unchanged', async () => {
+    await db.profiles.add(makeProfile({ id: 'PLAIN' }))
+    expect(await resolvePaidByForPush('PLAIN')).toBe('PLAIN')
+  })
+
+  it('leaves an unknown id unchanged', async () => {
+    expect(await resolvePaidByForPush('GHOST')).toBe('GHOST')
+  })
+})
+
+describe('isRowApplied', () => {
+  it('returns true only when the id is in the applied list for that table', () => {
+    const applied = { item_splits: ['a', 'b'], bills: ['x'] }
+    expect(isRowApplied(applied as Record<string, string[]>, 'item_splits', 'a')).toBe(true)
+    expect(isRowApplied(applied as Record<string, string[]>, 'item_splits', 'z')).toBe(false)
+    expect(isRowApplied(applied as Record<string, string[]>, 'bills', 'x')).toBe(true)
+    expect(isRowApplied(undefined, 'bills', 'x')).toBe(false)
+  })
+})
+
+describe('shouldApplyPulledRow', () => {
+  it('applies when no local row', () => {
+    expect(
+      shouldApplyPulledRow(undefined, '2026-06-23T12:00:00.000Z'),
+    ).toBe(true)
+  })
+
+  it('applies over a synced local row', () => {
+    expect(
+      shouldApplyPulledRow(
+        { updated_at: '2026-06-23T11:00:00.000Z', synced_at: '2026-06-23T11:00:00.000Z' },
+        '2026-06-23T12:00:00.000Z',
+      ),
+    ).toBe(true)
+  })
+
+  it('does NOT clobber a newer unsynced local edit', () => {
+    expect(
+      shouldApplyPulledRow(
+        { updated_at: '2026-06-23T13:00:00.000Z', synced_at: null },
+        '2026-06-23T12:00:00.000Z',
+      ),
+    ).toBe(false)
+  })
+
+  it('applies a strictly newer server row over an older unsynced edit', () => {
+    expect(
+      shouldApplyPulledRow(
+        { updated_at: '2026-06-23T11:00:00.000Z', synced_at: null },
+        '2026-06-23T12:00:00.000Z',
+      ),
+    ).toBe(true)
+  })
+})
+
+describe('isEntityUnsyncedForActor', () => {
+  const SYNCED = '2026-06-23T10:00:00.000Z'
+
+  it('returns false for a null entityId even when the actor has unrelated unsynced rows', async () => {
+    // Unrelated unsynced bill owned by ME.
+    await db.profiles.add(makeProfile({ id: 'ME' }))
+    await db.bills.add(makeBill({ id: 'B', created_by: 'ME', synced_at: null }))
+    // A mutation with no entity to scope to must not be flagged stuck by unrelated state.
+    expect(await isEntityUnsyncedForActor('settlement', null, 'ME')).toBe(false)
+  })
+
+  it('flags a profile mutation when a cascade-deleted membership stayed unsynced (deletePerson)', async () => {
+    await db.profiles.add(makeProfile({ id: 'PERSON', synced_at: SYNCED }))
+    await db.group_members.add(
+      makeMember({ group_id: 'G', user_id: 'PERSON', is_deleted: true, synced_at: null }),
+    )
+    expect(await isEntityUnsyncedForActor('profile', 'PERSON', 'ME')).toBe(true)
+  })
+
+  it('flags a profile mutation when a cascade-deleted settlement stayed unsynced', async () => {
+    await db.profiles.add(makeProfile({ id: 'PERSON', synced_at: SYNCED }))
+    await db.settlements.add(
+      makeSettlement({ id: 'S', from_user_id: 'PERSON', to_user_id: 'ME', is_deleted: true, synced_at: null }),
+    )
+    expect(await isEntityUnsyncedForActor('profile', 'PERSON', 'ME')).toBe(true)
+  })
+
+  it('returns false for a profile mutation whose row and cascade all synced', async () => {
+    await db.profiles.add(makeProfile({ id: 'PERSON', synced_at: SYNCED }))
+    await db.group_members.add(
+      makeMember({ group_id: 'G', user_id: 'PERSON', is_deleted: true, synced_at: SYNCED }),
+    )
+    expect(await isEntityUnsyncedForActor('profile', 'PERSON', 'ME')).toBe(false)
   })
 })

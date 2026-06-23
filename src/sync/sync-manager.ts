@@ -68,6 +68,11 @@ function onBrowserOnline() {
   void runSync('online')
 }
 
+function onVisibilityActive() {
+  if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return
+  void runSync('online')
+}
+
 async function resolveSessionWithRetry() {
   let {
     data: { session },
@@ -120,6 +125,7 @@ async function runSync(reason: SyncRunReason) {
       if (initialResult.errors.length > 0) {
         console.warn('[sync] initial sync round-trip failed:', initialResult.errors)
         useAppStore.getState().setSyncStatus('error')
+        useAppStore.getState().setPullStale(true)
         useAppStore.getState().setInitialCloudHydration('failed')
         scheduleRetry()
         return
@@ -129,6 +135,7 @@ async function runSync(reason: SyncRunReason) {
       if (!stillUnsynced) {
         resetBackoff()
         useAppStore.getState().setSyncStatus('idle')
+        useAppStore.getState().setPullStale(false)
         await flushQueuedKwentaNotifications({ assumeCloudAck: true })
         return
       }
@@ -139,6 +146,7 @@ async function runSync(reason: SyncRunReason) {
       console.warn('[sync] errors:', result.errors)
       await markPendingMutationsConflict(userId, 'replay_sync_error', result.errors.join(' | '))
       useAppStore.getState().setSyncStatus('error')
+      useAppStore.getState().setPullStale(true)
       if (!localStorage.getItem(KWENTA_LAST_PULL_STORAGE_KEY)) {
         useAppStore.getState().setInitialCloudHydration('failed')
       }
@@ -147,6 +155,7 @@ async function runSync(reason: SyncRunReason) {
       await markPendingMutationsApplied(userId)
       resetBackoff()
       useAppStore.getState().setSyncStatus('idle')
+      useAppStore.getState().setPullStale(false)
       await flushQueuedKwentaNotifications({ assumeCloudAck: true })
       await hydrateLinkedRemoteProfilesForActor(userId)
     }
@@ -158,6 +167,7 @@ async function runSync(reason: SyncRunReason) {
     }
     console.warn('[sync] failed:', err)
     useAppStore.getState().setSyncStatus('error')
+    useAppStore.getState().setPullStale(true)
     if (!localStorage.getItem(KWENTA_LAST_PULL_STORAGE_KEY)) {
       useAppStore.getState().setInitialCloudHydration('failed')
     }
@@ -178,6 +188,8 @@ export function startSyncManager() {
   backupTimer = setInterval(() => void runSync('backup'), SYNC_BACKUP_INTERVAL_MS)
 
   window.addEventListener('online', onBrowserOnline)
+  window.addEventListener('visibilitychange', onVisibilityActive)
+  window.addEventListener('focus', onVisibilityActive)
 
   return () => {
     if (backupTimer) {
@@ -190,6 +202,8 @@ export function startSyncManager() {
       debounceTimer = null
     }
     window.removeEventListener('online', onBrowserOnline)
+    window.removeEventListener('visibilitychange', onVisibilityActive)
+    window.removeEventListener('focus', onVisibilityActive)
   }
 }
 

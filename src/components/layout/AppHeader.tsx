@@ -39,6 +39,7 @@ export function AppHeader() {
   const isOnline = useAppStore((s) => s.isOnline)
   const syncStatus = useAppStore((s) => s.syncStatus)
   const syncRetryAt = useAppStore((s) => s.syncRetryAt)
+  const pullStale = useAppStore((s) => s.pullStale)
   const { userId } = useCurrentUser()
   const [nowMs, setNowMs] = useState(() => Date.now())
   const waitingToSync = useLiveQuery(
@@ -116,7 +117,11 @@ export function AppHeader() {
                     ? retryLabel
                       ? `Sync failed — ${retryLabel.toLowerCase()} (tap to retry now)`
                       : 'Sync failed — tap to retry'
-                    : 'Tap to sync now'
+                    : waitingToSync === true
+                      ? 'Waiting to sync — tap to sync now'
+                      : pullStale
+                        ? 'Some data may be out of date — tap to refresh'
+                        : 'Tap to sync now'
             }
             className="h-auto max-w-44 gap-0 rounded-full border-stone-200/80 bg-stone-50 px-3 py-2 text-xs font-medium text-stone-600 hover:bg-stone-100 disabled:opacity-90 sm:max-w-none"
           >
@@ -139,6 +144,11 @@ export function AppHeader() {
               <>
                 <CloudUpload className="mr-1 size-3 shrink-0 text-amber-700" />
                 <span className="truncate">Waiting to sync</span>
+              </>
+            ) : pullStale ? (
+              <>
+                <Wifi className="mr-1 size-3 shrink-0 text-amber-600" />
+                <span className="truncate">Data may be behind</span>
               </>
             ) : (
               <>

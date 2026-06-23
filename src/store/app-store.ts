@@ -26,6 +26,7 @@ interface AppState {
   realtimeNotice: { message: string; at: number } | null
   runtimeFlags: RuntimeFlags
   initialCloudHydration: InitialCloudHydration
+  pullStale: boolean
 
   setOnline: (online: boolean) => void
   setSyncStatus: (status: SyncStatus) => void
@@ -34,6 +35,7 @@ interface AppState {
   setRealtimeNotice: (message: string | null) => void
   setRuntimeFlag: (key: RuntimeFlagKey, enabled: boolean) => void
   setInitialCloudHydration: (state: InitialCloudHydration) => void
+  setPullStale: (stale: boolean) => void
 }
 
 export const useAppStore = create<AppState>((set) => ({
@@ -43,6 +45,7 @@ export const useAppStore = create<AppState>((set) => ({
   currentUserId: null,
   realtimeNotice: null,
   initialCloudHydration: initialCloudHydrationFromStorage(),
+  pullStale: false,
   runtimeFlags: {
     dedupeSyncEnabled: true,
     realtimeCatchupSingleRun: true,
@@ -59,4 +62,5 @@ export const useAppStore = create<AppState>((set) => ({
   setRuntimeFlag: (key, enabled) =>
     set((state) => ({ runtimeFlags: { ...state.runtimeFlags, [key]: enabled } })),
   setInitialCloudHydration: (initialCloudHydration) => set({ initialCloudHydration }),
+  setPullStale: (pullStale) => set({ pullStale }),
 }))

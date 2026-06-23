@@ -958,6 +958,7 @@ export function formatPairwiseSummary(byCurrency: Map<string, number>): {
 /** Profile ids you share expenses with (groups, bills, settlements). */
 export async function collectRelatedProfileIds(meId: string): Promise<Set<string>> {
   const ids = new Set<string>()
+  // DISPLAY/DEDUP: meIds here filters out the viewer's own ids from the contact list, not used for money math.
   const meIds = await expandProfileIdsForSplitMatching(meId, meId)
 
   const memberships = await db.group_members.where('user_id').equals(meId).toArray()
@@ -1116,6 +1117,7 @@ export async function dedupeParticipantIds(
   const reps: string[] = []
   for (const id of input) {
     if (assigned.has(id)) continue
+    // DISPLAY/DEDUP: cluster groups ids that represent the same person for UI deduplication, not for money math.
     const cluster = await expandProfileIdsForSplitMatching(id, viewerUserId)
     const members = input.filter((x) => cluster.has(x))
     for (const m of members) assigned.add(m)
