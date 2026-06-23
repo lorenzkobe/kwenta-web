@@ -126,12 +126,26 @@ export function BillDetailPage() {
       .filter((s) => !s.is_deleted && s.is_settled)
       .toArray()
     rows.sort((a, b) => b.created_at.localeCompare(a.created_at))
+    // Local contacts owned by another user aren't synced into this viewer's
+    // profiles table; fall back to the synced group_members.display_name.
+    const resolveName = async (uid: string): Promise<string> => {
+      const profile = await db.profiles.get(uid)
+      if (profile?.display_name?.trim()) return profile.display_name.trim()
+      if (groupId) {
+        const member = await db.group_members
+          .where('[group_id+user_id]')
+          .equals([groupId, uid])
+          .first()
+        if (member?.display_name?.trim()) return member.display_name.trim()
+      }
+      return 'Someone'
+    }
     return Promise.all(
       rows.map(async (s) => {
-        const [fromP, toP] = await Promise.all([db.profiles.get(s.from_user_id), db.profiles.get(s.to_user_id)])
+        const [fromName, toName] = await Promise.all([resolveName(s.from_user_id), resolveName(s.to_user_id)])
         return {
-          fromName: fromP?.display_name ?? 'Someone',
-          toName: toP?.display_name ?? 'Someone',
+          fromName,
+          toName,
           amount: s.amount,
           currency: s.currency,
           createdAt: s.created_at,

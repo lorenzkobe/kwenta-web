@@ -376,6 +376,56 @@ function EditGroupDialog({
   )
 }
 
+function PaymentHistoryTotals({
+  items,
+  currentUserId,
+}: {
+  items: SettlementHistoryItem[]
+  currentUserId: string | null | undefined
+}) {
+  // Sum total amount paid by each payer, keyed by user + currency.
+  const totals = new Map<string, { userId: string; name: string; currency: string; amount: number }>()
+  for (const item of items) {
+    const key = `${item.fromUserId}::${item.currency}`
+    const existing = totals.get(key)
+    if (existing) {
+      existing.amount += item.amount
+    } else {
+      totals.set(key, {
+        userId: item.fromUserId,
+        name: item.fromName,
+        currency: item.currency,
+        amount: item.amount,
+      })
+    }
+  }
+  const rows = Array.from(totals.values()).sort((a, b) => b.amount - a.amount)
+  if (rows.length === 0) return null
+
+  return (
+    <div className="mb-4 rounded-2xl border border-stone-200 bg-stone-100/60 px-4 py-3">
+      <p className="mb-2 text-[0.65rem] font-medium uppercase tracking-wide text-stone-400">
+        Total paid
+      </p>
+      <ul className="space-y-1.5">
+        {rows.map((row) => (
+          <li
+            key={`${row.userId}::${row.currency}`}
+            className="flex items-center justify-between text-sm"
+          >
+            <span className="font-medium text-stone-700">
+              {currentUserId && row.userId === currentUserId ? 'You' : row.name}
+            </span>
+            <span className="font-semibold text-emerald-700">
+              {formatCurrency(row.amount, row.currency)}
+            </span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  )
+}
+
 function PaymentHistoryDialog({
   items,
   loading = false,
@@ -411,6 +461,7 @@ function PaymentHistoryDialog({
             <p className="py-8 text-center text-sm text-stone-400">No recorded payments yet</p>
           ) : (
             <>
+              <PaymentHistoryTotals items={items} currentUserId={currentUserId} />
               <p className="mb-3 text-xs text-stone-500">
                 Payments recorded with Pay are already reflected in member balances.
               </p>

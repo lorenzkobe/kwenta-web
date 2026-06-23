@@ -1275,9 +1275,24 @@ export async function listPairwiseSettlementsBetween(
     } else {
       groupName = 'Personal'
     }
-    const [fromP, toP] = await Promise.all([
-      db.profiles.get(s.from_user_id),
-      db.profiles.get(s.to_user_id),
+    // Local contacts owned by another user aren't synced into this viewer's
+    // profiles table; fall back to the synced group_members.display_name so the
+    // payment history shows a real name instead of "Someone".
+    const resolveName = async (userId: string): Promise<string> => {
+      const profile = await db.profiles.get(userId)
+      if (profile?.display_name?.trim()) return profile.display_name.trim()
+      if (s.group_id) {
+        const member = await db.group_members
+          .where('[group_id+user_id]')
+          .equals([s.group_id, userId])
+          .first()
+        if (member?.display_name?.trim()) return member.display_name.trim()
+      }
+      return 'Someone'
+    }
+    const [fromName, toName] = await Promise.all([
+      resolveName(s.from_user_id),
+      resolveName(s.to_user_id),
     ])
     items.push({
       id: s.id,
@@ -1288,8 +1303,8 @@ export async function listPairwiseSettlementsBetween(
       groupName,
       fromUserId: s.from_user_id,
       toUserId: s.to_user_id,
-      fromName: fromP?.display_name ?? 'Someone',
-      toName: toP?.display_name ?? 'Someone',
+      fromName,
+      toName,
       amount: s.amount,
       currency: s.currency,
       label: s.label ?? '',
@@ -1297,7 +1312,7 @@ export async function listPairwiseSettlementsBetween(
       recipients: [
         {
           toUserId: s.to_user_id,
-          toName: toP?.display_name ?? 'Someone',
+          toName,
           amount: s.amount,
         },
       ],

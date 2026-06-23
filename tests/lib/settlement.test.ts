@@ -121,19 +121,48 @@ describe('computeGroupBalances', () => {
     expect(byId.B).toBe(0)
   })
 
-  it('canonicalizes a linked local contact onto its remote member id', async () => {
+  it('credits the linked member once splits carry the remote id', async () => {
     await seedGroupWithTwoMembers()
-    // Local contact "Lc" links to remote member B; a split references the local id.
+    // After linkProfileToRemote rewrites the rows, the split references the remote
+    // member id B directly — the shared, synced, canonical state.
+    await seedSimpleBill({ groupId: 'G', paidBy: 'A', shares: { A: 50, B: 50 } })
+    const summary = await computeGroupBalances('G', 'A')
+    const byId = Object.fromEntries(summary!.balances.map((b) => [b.userId, b.amount]))
+    expect(byId.B).toBe(-50)
+    expect(byId.A).toBe(50)
+  })
+
+  it('produces identical balances and suggestions regardless of viewer-private contacts', async () => {
+    // A stale split references a local-contact id "Lc" that only the contact's owner (A)
+    // can resolve to member B. Another member never receives that local contact (privacy
+    // boundary). Balances/suggestions must NOT depend on whether the viewer holds the
+    // private Lc->B link, otherwise different members see different suggested payments.
+    await seedGroupWithTwoMembers()
     await db.profiles.add(
       makeProfile({ id: 'Lc', is_local: true, owner_id: 'A', linked_profile_id: 'B' }),
     )
     await seedSimpleBill({ groupId: 'G', paidBy: 'A', shares: { A: 50, Lc: 50 } })
-    const summary = await computeGroupBalances('G', 'A')
-    const byId = Object.fromEntries(summary!.balances.map((b) => [b.userId, b.amount]))
-    // The Lc debit collapses onto B — no separate "Lc" entry, B owes 50.
-    expect(byId.Lc).toBeUndefined()
-    expect(byId.B).toBe(-50)
-    expect(byId.A).toBe(50)
+
+    // Owner A's device: holds the Lc->B link profile.
+    const ownerView = await computeGroupBalances('G', 'A')
+
+    // Another member's device: the private local contact is not present.
+    await db.profiles.delete('Lc')
+    const otherView = await computeGroupBalances('G', 'A')
+
+    // Compare the value-bearing fields (ids + amounts). Display names of an unresolved
+    // stale id are best-effort and not part of the settlement math.
+    const balanceValues = (s: typeof ownerView) =>
+      [...s!.balances]
+        .map((b) => ({ userId: b.userId, amount: b.amount }))
+        .sort((a, b) => a.userId.localeCompare(b.userId))
+    const suggestionValues = (s: typeof ownerView) =>
+      s!.suggestions
+        .map((x) => ({ fromUserId: x.fromUserId, toUserId: x.toUserId, amount: x.amount }))
+        .sort((a, b) => a.fromUserId.localeCompare(b.fromUserId))
+
+    expect(balanceValues(ownerView)).toEqual(balanceValues(otherView))
+    expect(suggestionValues(ownerView)).toEqual(suggestionValues(otherView))
   })
 
   it('optimizes a three-way imbalance into minimal transfers', async () => {
@@ -226,5 +255,36 @@ describe('listSettlementHistoryForBill', () => {
       makeSettlement({ id: 'S1', bill_id: 'OTHER', amount: 10 }),
     )
     expect(await listSettlementHistoryForBill('BILL')).toEqual([])
+  })
+
+  it('falls back to group_members.display_name when the profile is not visible (privacy boundary)', async () => {
+    // Bob's profile row is a local contact owned by another user, so it is NOT
+    // synced into this viewer's Dexie (kwenta_build_pull_bundle scoping). Only
+    // the group_members row carries his display_name for this viewer.
+    await db.profiles.add(makeProfile({ id: 'A', display_name: 'Alice' }))
+    const group = makeGroup({ id: 'G', created_by: 'A' })
+    await db.groups.add(group)
+    await db.group_members.bulkAdd([
+      makeMember({ group_id: 'G', user_id: 'A', display_name: 'Alice' }),
+      makeMember({ group_id: 'G', user_id: 'B', display_name: 'Bob' }),
+    ])
+    await db.bills.add(makeBill({ id: 'BILL', group_id: 'G', title: 'Dinner', paid_by: 'A' }))
+    await db.settlements.add(
+      makeSettlement({
+        id: 'S1',
+        group_id: 'G',
+        bill_id: 'BILL',
+        from_user_id: 'B',
+        to_user_id: 'A',
+        amount: 25,
+        is_settled: true,
+      }),
+    )
+
+    const history = await listSettlementHistoryForBill('BILL')
+    expect(history).toHaveLength(1)
+    expect(history[0].fromName).toBe('Bob')
+    expect(history[0].toName).toBe('Alice')
+    expect(history[0].recipients[0].toName).toBe('Alice')
   })
 })

@@ -65,24 +65,18 @@ export async function computeGroupBalances(
     profileMap.set(m.user_id, profile?.display_name ?? m.display_name)
   }
 
-  // Canonicalize identities so a person who exists as both a local-contact id and a
-  // linked remote account id collapses to a single balance entry. Without this, the
-  // payer credit and the split debit for the same human can land on different ids
-  // (during/after linking), so the group never balances and the person shows twice.
-  // Members are keyed by their (possibly remote) membership id; map every local
-  // contact that links to a member id onto that member id.
-  const canonicalId = new Map<string, string>()
-  for (const m of activeMembers) canonicalId.set(m.user_id, m.user_id)
-  const linkedProfiles = await db.profiles
-    .filter((p) => Boolean(p.linked_profile_id) && !p.is_deleted)
-    .toArray()
-  for (const p of linkedProfiles) {
-    if (p.linked_profile_id && canonicalId.has(p.linked_profile_id)) {
-      canonicalId.set(p.id, p.linked_profile_id)
-    }
-  }
-  const canon = (id: string) => canonicalId.get(id) ?? id
-
+  // Identity canonicalization is intentionally NOT derived from the viewer's local
+  // profiles here. `linked_profile_id` lives only on the linking user's own local
+  // contacts and is never shared across the group (pull-bundle privacy boundary). A
+  // viewer-local canon map would collapse a stale local-contact id onto its member id
+  // ONLY for the contact's owner, so the same group would produce different balances —
+  // and therefore different settlement suggestions — for different members. That cross-
+  // member divergence is the bug this avoids.
+  //
+  // The synced rows are already canonical for everyone: `linkProfileToRemote` rewrites
+  // `item_splits.user_id`, `bills.paid_by`, and `settlements.from/to_user_id` from the
+  // local contact id to the remote member id and re-syncs them. By keying balances on
+  // those shared rows directly, every member computes identical balances and suggestions.
   const bills = await db.bills.where('group_id').equals(groupId).toArray()
   const activeBills = bills.filter((b) => !b.is_deleted)
   const billIds = activeBills.map((bill) => bill.id)
@@ -125,11 +119,10 @@ export async function computeGroupBalances(
       if (!payer) continue
       const totalSplitAmount = activeSplits.reduce((sum, s) => sum + s.computed_amount, 0)
 
-      const payerId = canon(payer)
-      netBalance.set(payerId, (netBalance.get(payerId) ?? 0) + totalSplitAmount)
+      netBalance.set(payer, (netBalance.get(payer) ?? 0) + totalSplitAmount)
 
       for (const split of activeSplits) {
-        const uid = canon(split.user_id)
+        const uid = split.user_id
         netBalance.set(uid, (netBalance.get(uid) ?? 0) - split.computed_amount)
       }
     }
@@ -140,10 +133,8 @@ export async function computeGroupBalances(
     (s) => !s.is_deleted && s.is_settled && (!s.currency || s.currency === group.currency),
   )
   for (const s of activeSettlements) {
-    const fromId = canon(s.from_user_id)
-    const toId = canon(s.to_user_id)
-    netBalance.set(fromId, (netBalance.get(fromId) ?? 0) + s.amount)
-    netBalance.set(toId, (netBalance.get(toId) ?? 0) - s.amount)
+    netBalance.set(s.from_user_id, (netBalance.get(s.from_user_id) ?? 0) + s.amount)
+    netBalance.set(s.to_user_id, (netBalance.get(s.to_user_id) ?? 0) - s.amount)
   }
 
   // Resolve display names for any userId that appeared in splits/settlements
@@ -326,7 +317,28 @@ async function buildSettlementHistoryItem(
 
   const sortedRows = [...activeRows].sort((a, b) => b.created_at.localeCompare(a.created_at))
   const primary = sortedRows[0]
-  const fromProfile = await db.profiles.get(primary.from_user_id)
+
+  // A settlement's participants may be local contacts owned by another user, so
+  // their profile row is never synced into this viewer's Dexie (pull-bundle
+  // privacy scoping). group_members.display_name IS synced to every member, so
+  // fall back to it before showing the generic "Someone". Use the settlement's
+  // own group_id so this works even when callers pass groupId = null (e.g. bill
+  // history). Mirrors the name resolution in computeGroupBalances.
+  const effectiveGroupId = groupId ?? primary.group_id
+  const memberNames = new Map<string, string>()
+  if (effectiveGroupId) {
+    const members = await db.group_members.where('group_id').equals(effectiveGroupId).toArray()
+    for (const m of members) {
+      if (m.display_name.trim()) memberNames.set(m.user_id, m.display_name.trim())
+    }
+  }
+  const resolveName = async (userId: string): Promise<string | null> => {
+    const profile = await db.profiles.get(userId)
+    if (profile?.display_name?.trim()) return profile.display_name.trim()
+    return memberNames.get(userId) ?? null
+  }
+
+  const fromName = await resolveName(primary.from_user_id)
 
   const recipientMap = new Map<string, BundledSuggestionRecipient>()
   for (const row of sortedRows) {
@@ -335,10 +347,9 @@ async function buildSettlementHistoryItem(
       existing.amount = Math.round((existing.amount + row.amount) * 100) / 100
       continue
     }
-    const toProfile = await db.profiles.get(row.to_user_id)
     recipientMap.set(row.to_user_id, {
       toUserId: row.to_user_id,
-      toName: toProfile?.display_name ?? 'Someone',
+      toName: (await resolveName(row.to_user_id)) ?? 'Someone',
       amount: row.amount,
     })
   }
@@ -354,8 +365,7 @@ async function buildSettlementHistoryItem(
     .filter((a) => !a.is_deleted && a.entity_type === 'settlement' && a.action === 'settled')
     .first()
   const recordedByUserId = activityEntry?.user_id ?? null
-  const recordedByProfile = recordedByUserId ? await db.profiles.get(recordedByUserId) : null
-  const recordedByName = recordedByProfile?.display_name ?? null
+  const recordedByName = recordedByUserId ? await resolveName(recordedByUserId) : null
 
   return {
     id: isBundled ? (primary.bundle_id ?? primary.id) : primary.id,
@@ -368,7 +378,7 @@ async function buildSettlementHistoryItem(
     billTitle: billRow && !billRow.is_deleted ? billRow.title : null,
     fromUserId: primary.from_user_id,
     toUserId: recipients[0]?.toUserId ?? primary.to_user_id,
-    fromName: fromProfile?.display_name ?? 'Someone',
+    fromName: fromName ?? 'Someone',
     toName: recipients[0]?.toName ?? 'Someone',
     amount: Math.round(recipients.reduce((sum, recipient) => sum + recipient.amount, 0) * 100) / 100,
     currency: primary.currency,
