@@ -14,3 +14,18 @@ export function makeExportFilename(prefix: string, ext: 'csv' | 'pdf' | 'png'): 
   const safe = prefix.replace(/[/\\?%*:|"<>]/g, '-').trim()
   return `${safe} ${formatExportDatetime()}.${ext}`
 }
+
+/**
+ * Convert a viewer-perspective group balance into the member's own perspective
+ * for the member-share export card.
+ *
+ * Group balances (`computeGroupPairwiseBalances`) are stored from the viewer's
+ * side: positive = the member owes you, negative = you owe the member. The
+ * export card frames the same relationship from the MEMBER's side: positive =
+ * they receive, negative = they pay. The two are negations of each other, so a
+ * member you owe must render as "Receives", not "Pays".
+ */
+export function memberShareNetFromViewerNet(viewerNet: number): number {
+  // Avoid returning -0 for a settled balance.
+  return viewerNet === 0 ? 0 : -viewerNet
+}

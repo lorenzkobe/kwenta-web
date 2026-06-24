@@ -50,7 +50,7 @@ import {
 } from '@/lib/bill-categories'
 import { exportGroupToCSV } from '@/lib/export-csv'
 import { generateGroupPDF } from '@/lib/export-pdf'
-import { makeExportFilename } from '@/lib/export-utils'
+import { makeExportFilename, memberShareNetFromViewerNet } from '@/lib/export-utils'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Input } from '@/components/ui/input'
@@ -733,7 +733,11 @@ export function GroupDetailPage() {
 
   async function handleMemberShare(member: { userId: string; profileName: string }) {
     if (!group) return
-    const net = Math.round((balanceByUser.get(member.userId) ?? 0) * 100) / 100
+    // balanceByUser is viewer-perspective (positive = they owe you). The member
+    // share card is framed from the member's own side (positive = they receive),
+    // so flip the sign before handing it to the export card.
+    const viewerNet = Math.round((balanceByUser.get(member.userId) ?? 0) * 100) / 100
+    const net = memberShareNetFromViewerNet(viewerNet)
     const memberBills: GroupMemberBillEntry[] = []
     for (const bill of bills ?? []) {
       const details = await getBillWithDetails(bill.id)
