@@ -39,3 +39,6 @@ coverage
 
 # Cursor
 .cursor
+
+# Graphify knowledge graph artifacts (generated, not committed)
+graphify-out/*
