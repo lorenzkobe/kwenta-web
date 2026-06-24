@@ -939,13 +939,28 @@ export function GroupDetailPage() {
         </div>
 
         <div className="rounded-3xl border border-stone-200 bg-white p-5 shadow-sm">
-          <h1 className="text-2xl font-semibold tracking-tight text-stone-900">{group.name}</h1>
-          <p className="mt-1 text-sm text-stone-500">
-            {group.currency} ·{' '}
-            {membersLoading
-              ? 'Loading members…'
-              : `${members?.length ?? 0} member${(members?.length ?? 0) !== 1 ? 's' : ''}`}
-          </p>
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              <h1 className="text-2xl font-semibold tracking-tight text-stone-900">{group.name}</h1>
+              <p className="mt-1 text-sm text-stone-500">
+                {group.currency} ·{' '}
+                {membersLoading
+                  ? 'Loading members…'
+                  : `${members?.length ?? 0} member${(members?.length ?? 0) !== 1 ? 's' : ''}`}
+              </p>
+            </div>
+            <Button
+              size="sm"
+              className="h-10 shrink-0 rounded-full px-4"
+              onClick={() => {
+                setEditBillId(null)
+                setShowAddBill(true)
+              }}
+            >
+              <Plus className="size-3.5" />
+              Add bill
+            </Button>
+          </div>
         </div>
 
         {visibleDupCandidates.map((c) => (
@@ -1091,22 +1106,9 @@ export function GroupDetailPage() {
         </div>
 
         <div className="rounded-3xl border border-stone-200 bg-white p-5 shadow-sm">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <ReceiptText className="size-4 text-teal-800" />
-              <h2 className="text-lg font-semibold">Group bills</h2>
-            </div>
-            <Button
-              size="sm"
-              className="h-10 rounded-full px-4"
-              onClick={() => {
-                setEditBillId(null)
-                setShowAddBill(true)
-              }}
-            >
-              <Plus className="size-3.5" />
-              Add bill
-            </Button>
+          <div className="flex items-center gap-2">
+            <ReceiptText className="size-4 text-teal-800" />
+            <h2 className="text-lg font-semibold">Group bills</h2>
           </div>
 
           {!billsLoading && bills && bills.length > 0 && members && members.length > 1 && (() => {
@@ -1289,17 +1291,18 @@ export function GroupDetailPage() {
         />
       )}
 
-      {balanceSummary && userId && (
+      {userId && (
         <PayIntoGroupDialog
           open={payIntoGroupOpen}
           onOpenChange={setPayIntoGroupOpen}
           groupId={groupId!}
           currency={group.currency}
-          fromUserId={userId}
-          markedBy={userId}
-          owed={balanceSummary.entries
-            .filter((e) => e.net < -0.005)
-            .map((e) => ({ userId: e.memberUserId, name: e.displayName, owed: Math.abs(e.net) }))}
+          currentUserId={userId}
+          members={(members ?? []).map((m) => ({
+            userId: m.userId,
+            name: m.profileName,
+            isCurrentUser: m.isCurrentUser,
+          }))}
           onRecorded={() => void refreshBalances()}
         />
       )}

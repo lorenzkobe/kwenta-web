@@ -484,6 +484,64 @@ describe('createSettlement', () => {
       const s = await db.settlements.get(settlementIds[0])
       expect(s?.to_user_id).toBe('REMOTE') // not the device-private LOCALSAM
     })
+
+    it('records a payment for a non-viewer payer: from_user_id is the payer, activity actor is markedBy', async () => {
+      await db.groups.add(makeGroup({ id: 'G', created_by: 'ME' }))
+      await db.group_members.bulkAdd([
+        makeMember({ group_id: 'G', user_id: 'ME' }),
+        makeMember({ group_id: 'G', user_id: 'ALICE' }),
+        makeMember({ group_id: 'G', user_id: 'BOB' }),
+      ])
+      await db.profiles.bulkAdd([
+        makeProfile({ id: 'ME' }),
+        makeProfile({ id: 'ALICE' }),
+        makeProfile({ id: 'BOB' }),
+      ])
+
+      // ME (the recorder) records that ALICE paid BOB — ME is neither payer nor recipient.
+      const { bundleId, settlementIds } = await createBundledGroupSettlement({
+        groupId: 'G',
+        fromUserId: 'ALICE',
+        recipients: [{ toUserId: 'BOB', amount: 25 }],
+        currency: 'PHP',
+        markedBy: 'ME',
+      })
+
+      const s = await db.settlements.get(settlementIds[0])
+      expect(s?.from_user_id).toBe('ALICE')
+      expect(s?.to_user_id).toBe('BOB')
+      expect(s?.is_settled).toBe(true)
+
+      const log = await db.activity_log.where('entity_id').equals(bundleId).first()
+      expect(log?.user_id).toBe('ME') // recorder, independent of the payer
+    })
+
+    it('persists the note as the settlement label and appends it to the activity description', async () => {
+      await db.groups.add(makeGroup({ id: 'G', created_by: 'ME' }))
+      await db.group_members.bulkAdd([
+        makeMember({ group_id: 'G', user_id: 'ME' }),
+        makeMember({ group_id: 'G', user_id: 'BOB', display_name: 'Bob' }),
+      ])
+      await db.profiles.bulkAdd([
+        makeProfile({ id: 'ME', display_name: 'Me' }),
+        makeProfile({ id: 'BOB', display_name: 'Bob' }),
+      ])
+
+      const { bundleId, settlementIds } = await createBundledGroupSettlement({
+        groupId: 'G',
+        fromUserId: 'ME',
+        recipients: [{ toUserId: 'BOB', amount: 25 }],
+        currency: 'PHP',
+        markedBy: 'ME',
+        label: 'GCash ref 12345',
+      })
+
+      const s = await db.settlements.get(settlementIds[0])
+      expect(s?.label).toBe('GCash ref 12345')
+
+      const log = await db.activity_log.where('entity_id').equals(bundleId).first()
+      expect(log?.description).toContain('GCash ref 12345')
+    })
   })
 })
 

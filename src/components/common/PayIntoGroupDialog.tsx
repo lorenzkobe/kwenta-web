@@ -1,36 +1,151 @@
-import { useMemo, useState } from 'react'
-import { X } from 'lucide-react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { Lock, X } from 'lucide-react'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import { allocateLumpSum, type LumpSumMode, type OwedParty } from '@/lib/group-payments'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
+import {
+  allocateLumpSum,
+  clampPercentageEntry,
+  clampToOwed,
+  owedPartiesFromBreakdown,
+  redistributePercentages,
+  type LumpSumMode,
+  type OwedParty,
+} from '@/lib/group-payments'
 import { createBundledGroupSettlement } from '@/db/operations'
+import { computeMemberPaymentBreakdown } from '@/lib/settlement'
 import { formatCurrency } from '@/lib/utils'
+
+export interface PayIntoGroupMember {
+  userId: string
+  name: string
+  isCurrentUser: boolean
+}
 
 export function PayIntoGroupDialog({
   open,
   onOpenChange,
   groupId,
   currency,
-  fromUserId,
-  markedBy,
-  owed,
+  currentUserId,
+  members,
   onRecorded,
 }: {
   open: boolean
   onOpenChange: (open: boolean) => void
   groupId: string
   currency: string
-  fromUserId: string
-  markedBy: string
-  owed: OwedParty[]
+  /** The signed-in user — defaults as payer and is always recorded as `markedBy`. */
+  currentUserId: string
+  members: PayIntoGroupMember[]
   onRecorded: () => void
 }) {
+  const [payerId, setPayerId] = useState(currentUserId)
+  const [owed, setOwed] = useState<OwedParty[]>([])
+  const [loadingOwed, setLoadingOwed] = useState(false)
   const [mode, setMode] = useState<LumpSumMode>('equal')
   const [total, setTotal] = useState('')
+  const [note, setNote] = useState('')
   const [percentages, setPercentages] = useState<Record<string, string>>({})
+  // Percentage fields the user has explicitly edited — held fixed while unlocked fields absorb changes.
+  const [lockedPct, setLockedPct] = useState<Set<string>>(new Set())
   const [customAmounts, setCustomAmounts] = useState<Record<string, string>>({})
   const [saving, setSaving] = useState(false)
+  const recomputeToken = useRef(0)
+
+  // Payer picker: current user pinned first (with a "You" marker), then everyone else.
+  const payerOptions = useMemo(() => {
+    const me = members.filter((m) => m.isCurrentUser)
+    const others = members.filter((m) => !m.isCurrentUser)
+    return [...me, ...others]
+  }, [members])
+  const payerName = members.find((m) => m.userId === payerId)?.name ?? 'this member'
+  const isPayerMe = payerId === currentUserId
+
+  // Reset the payer to the signed-in user each time the dialog opens.
+  useEffect(() => {
+    if (open) setPayerId(currentUserId)
+  }, [open, currentUserId])
+
+  // Recompute who the selected payer owes whenever the payer (or dialog visibility) changes.
+  // The owed list is the payer's pairwise "pays" slice; switching payers clears stale inputs.
+  useEffect(() => {
+    if (!open) return
+    const token = ++recomputeToken.current
+    setLoadingOwed(true)
+    setMode('equal')
+    setTotal('')
+    setNote('')
+    setPercentages({})
+    setLockedPct(new Set())
+    setCustomAmounts({})
+    void (async () => {
+      const breakdown = await computeMemberPaymentBreakdown(groupId, payerId)
+      if (token !== recomputeToken.current) return
+      setOwed(owedPartiesFromBreakdown(breakdown))
+      setLoadingOwed(false)
+    })()
+  }, [open, payerId, groupId])
+
+  const owedIds = useMemo(() => owed.map((p) => p.userId), [owed])
+
+  // Default the percentage fields to an equal split (and clear locks) when entering percentage mode.
+  useEffect(() => {
+    if (mode !== 'percentage' || owedIds.length === 0) return
+    const next = redistributePercentages(owedIds, {})
+    setPercentages(Object.fromEntries(owedIds.map((id) => [id, String(next[id])])))
+    setLockedPct(new Set())
+  }, [mode, owedIds])
+
+  // Editing a percentage locks that field; the remaining percent is redistributed across the
+  // still-unlocked fields. The edit is clamped so the locked fields can never sum past 100.
+  function handlePercentageChange(id: string, raw: string) {
+    const parsed = parseFloat(raw.replace(',', '.')) || 0
+    const otherLockedSum = [...lockedPct]
+      .filter((x) => x !== id)
+      .reduce((s, x) => s + (parseFloat(percentages[x] ?? '') || 0), 0)
+    const clamped = clampPercentageEntry(parsed, otherLockedSum)
+    const nextLocked = new Set(lockedPct).add(id)
+    const lockedValues: Record<string, number> = {}
+    nextLocked.forEach((lid) => {
+      lockedValues[lid] = lid === id ? clamped : parseFloat(percentages[lid] ?? '') || 0
+    })
+    const next = redistributePercentages(owedIds, lockedValues)
+    setPercentages(Object.fromEntries(owedIds.map((pid) => [pid, String(next[pid])])))
+    setLockedPct(nextLocked)
+  }
+
+  // Unlock a field so it rejoins the auto-distributed pool.
+  function handleUnlockPercentage(id: string) {
+    const nextLocked = new Set(lockedPct)
+    nextLocked.delete(id)
+    const lockedValues: Record<string, number> = {}
+    nextLocked.forEach((lid) => {
+      lockedValues[lid] = parseFloat(percentages[lid] ?? '') || 0
+    })
+    const next = redistributePercentages(owedIds, lockedValues)
+    setPercentages(Object.fromEntries(owedIds.map((pid) => [pid, String(next[pid])])))
+    setLockedPct(nextLocked)
+  }
+
+  // Custom amounts are clamped to what the payer owes that person, so they can't overpay.
+  function handleCustomChange(id: string, raw: string) {
+    const parsed = parseFloat(raw.replace(',', '.'))
+    if (Number.isNaN(parsed)) {
+      setCustomAmounts((s) => ({ ...s, [id]: raw }))
+      return
+    }
+    const owedAmt = owed.find((p) => p.userId === id)?.owed ?? 0
+    const clamped = clampToOwed(parsed, owedAmt)
+    setCustomAmounts((s) => ({ ...s, [id]: clamped < parsed ? String(clamped) : raw }))
+  }
 
   const totalNum = parseFloat(total.replace(',', '.')) || 0
   const pctNum = useMemo(
@@ -63,10 +178,11 @@ export function PayIntoGroupDialog({
     try {
       await createBundledGroupSettlement({
         groupId,
-        fromUserId,
+        fromUserId: payerId,
         recipients: result.allocations.map((a) => ({ toUserId: a.userId, amount: a.amount })),
         currency,
-        markedBy,
+        markedBy: currentUserId,
+        label: note.trim(),
         enforceCap: true,
       })
       if (result.unallocated > 0.005) {
@@ -107,6 +223,34 @@ export function PayIntoGroupDialog({
         </div>
 
         <div className="space-y-4 px-5 py-4">
+          <div className="space-y-1.5">
+            <label className="text-xs font-medium text-stone-500">Who&apos;s paying?</label>
+            <Select value={payerId} onValueChange={setPayerId} disabled={saving}>
+              <SelectTrigger className="rounded-xl">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent className="z-70">
+                {payerOptions.map((m) => (
+                  <SelectItem key={m.userId} value={m.userId}>
+                    {m.name}
+                    {m.isCurrentUser ? ' (You)' : ''}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+
+          {loadingOwed ? (
+            <div className="space-y-2 py-2">
+              <div className="h-9 animate-pulse rounded-lg bg-stone-100" />
+              <div className="h-9 animate-pulse rounded-lg bg-stone-100" />
+            </div>
+          ) : owed.length === 0 ? (
+            <p className="py-4 text-center text-sm text-stone-400">
+              {isPayerMe ? 'You don’t' : `${payerName} doesn’t`} owe anyone in this group.
+            </p>
+          ) : (
+            <>
           <div className="flex gap-2">
             {(['equal', 'percentage', 'custom'] as LumpSumMode[]).map((m) => (
               <Button
@@ -133,12 +277,7 @@ export function PayIntoGroupDialog({
             />
           )}
 
-          {owed.length === 0 ? (
-            <p className="py-4 text-center text-sm text-stone-400">
-              You don&apos;t owe anyone in this group.
-            </p>
-          ) : (
-            <ul className="space-y-2">
+          <ul className="space-y-2">
               {owed.map((p) => {
                 const alloc = result.allocations.find((a) => a.userId === p.userId)?.amount ?? 0
                 return (
@@ -146,20 +285,31 @@ export function PayIntoGroupDialog({
                     <div className="min-w-0">
                       <p className="truncate text-sm font-medium text-stone-800">{p.name}</p>
                       <p className="text-xs text-stone-500">
-                        You owe {formatCurrency(p.owed, currency)}
+                        {isPayerMe ? 'You owe' : 'Owes'} {formatCurrency(p.owed, currency)}
                       </p>
                     </div>
                     {mode === 'percentage' && (
-                      <Input
-                        className="w-20 rounded-lg"
-                        inputMode="decimal"
-                        placeholder="%"
-                        value={percentages[p.userId] ?? ''}
-                        onChange={(e) =>
-                          setPercentages((s) => ({ ...s, [p.userId]: e.target.value }))
-                        }
-                        disabled={saving}
-                      />
+                      <div className="flex items-center gap-1">
+                        {lockedPct.has(p.userId) && (
+                          <button
+                            type="button"
+                            onClick={() => handleUnlockPercentage(p.userId)}
+                            disabled={saving}
+                            className="text-stone-400 transition-colors hover:text-stone-600"
+                            title="Locked — tap to let this adjust automatically"
+                          >
+                            <Lock className="size-3.5" />
+                          </button>
+                        )}
+                        <Input
+                          className="w-20 rounded-lg"
+                          inputMode="decimal"
+                          placeholder="%"
+                          value={percentages[p.userId] ?? ''}
+                          onChange={(e) => handlePercentageChange(p.userId, e.target.value)}
+                          disabled={saving}
+                        />
+                      </div>
                     )}
                     {mode === 'custom' && (
                       <Input
@@ -167,9 +317,7 @@ export function PayIntoGroupDialog({
                         inputMode="decimal"
                         placeholder="0.00"
                         value={customAmounts[p.userId] ?? ''}
-                        onChange={(e) =>
-                          setCustomAmounts((s) => ({ ...s, [p.userId]: e.target.value }))
-                        }
+                        onChange={(e) => handleCustomChange(p.userId, e.target.value)}
                         disabled={saving}
                       />
                     )}
@@ -182,13 +330,26 @@ export function PayIntoGroupDialog({
                 )
               })}
             </ul>
-          )}
 
           <p className="text-xs text-stone-500">
             Applying {formatCurrency(result.allocatedTotal, currency)}
             {result.unallocated > 0.005 &&
               ` · ${formatCurrency(result.unallocated, currency)} can't be applied (would overpay)`}
           </p>
+
+          <div className="space-y-1.5">
+            <label className="text-xs font-medium text-stone-500">Note (optional)</label>
+            <Input
+              placeholder="e.g. GCash reference, what it's for"
+              value={note}
+              onChange={(e) => setNote(e.target.value)}
+              className="rounded-lg"
+              disabled={saving}
+              maxLength={140}
+            />
+          </div>
+            </>
+          )}
 
           <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
             <Button
