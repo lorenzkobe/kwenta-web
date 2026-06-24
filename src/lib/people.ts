@@ -546,6 +546,178 @@ export async function buildPersonalBillAllocationPlan(params: {
   }
 }
 
+export type ReconcileDirection = 'other_to_me' | 'me_to_other'
+
+export interface PersonalReconcileSlice {
+  billId: string
+  billTitle: string
+  amount: number
+  currency: string
+  createdAt: string
+  direction: ReconcileDirection
+  source: 'offset' | 'credit'
+}
+
+export interface PersonalReconcilePlan {
+  currency: string
+  theyOweMeTotal: number
+  iOweThemTotal: number
+  offsetCap: number
+  creditCap: number
+  availableCreditOtherToMe: number
+  availableCreditMeToOther: number
+  maxApplicable: number
+  appliedAmount: number
+  offsetSlices: PersonalReconcileSlice[]
+  creditSlices: PersonalReconcileSlice[]
+  fullySettled: boolean
+  residualRemaining: number
+  residualDirection: ReconcileDirection | null
+}
+
+/**
+ * Two-sided "Settle up" plan for personal bills between two people.
+ *
+ * Reconciles outstanding personal bills in BOTH directions at once:
+ *  - the mutual offset (their debt cancels yours) is free — no cash credit consumed;
+ *  - any remaining net on the larger side is covered by available general credit.
+ *
+ * Each outstanding bill becomes a slice so the write path can record a settlement
+ * (with an explanatory note) against it, marking it individually settled.
+ * `amountToApply` defaults to the full reconcilable amount; lowering it peels the
+ * cash-credit portion off first, keeping the free offset as long as possible.
+ */
+export async function buildPersonalReconcilePlan(params: {
+  meId: string
+  otherId: string
+  currency: string
+  amountToApply?: number
+}): Promise<PersonalReconcilePlan> {
+  const round2 = (n: number) => Math.round(n * 100) / 100
+
+  const bills = await listBillsInvolvingPair(params.meId, params.otherId)
+  const personal = bills
+    .filter((b) => b.group_id === null && b.currency === params.currency)
+    .sort((a, b) => a.created_at.localeCompare(b.created_at))
+
+  type Row = { billId: string; billTitle: string; createdAt: string; amount: number; remaining: number }
+  const theyOweMe: Row[] = []
+  const iOweThem: Row[] = []
+  for (const bill of personal) {
+    const net = await computePairwiseNetForBill(bill.id, params.meId, params.otherId)
+    if (net > MONEY_EPSILON) {
+      const amount = round2(net)
+      theyOweMe.push({ billId: bill.id, billTitle: bill.title, createdAt: bill.created_at, amount, remaining: amount })
+    } else if (net < -MONEY_EPSILON) {
+      const amount = round2(Math.abs(net))
+      iOweThem.push({ billId: bill.id, billTitle: bill.title, createdAt: bill.created_at, amount, remaining: amount })
+    }
+  }
+
+  const theyOweMeTotal = round2(theyOweMe.reduce((n, r) => n + r.amount, 0))
+  const iOweThemTotal = round2(iOweThem.reduce((n, r) => n + r.amount, 0))
+  const offsetCap = round2(Math.min(theyOweMeTotal, iOweThemTotal))
+
+  const [availableCreditOtherToMe, availableCreditMeToOther] = await Promise.all([
+    computeAvailableGeneralCredit({
+      meId: params.meId,
+      otherId: params.otherId,
+      fromUserId: params.otherId,
+      toUserId: params.meId,
+      currency: params.currency,
+    }),
+    computeAvailableGeneralCredit({
+      meId: params.meId,
+      otherId: params.otherId,
+      fromUserId: params.meId,
+      toUserId: params.otherId,
+      currency: params.currency,
+    }),
+  ])
+
+  // Residual side = the direction with outstanding net after the offset cancels.
+  let residualDirection: ReconcileDirection | null = null
+  let residualSide: Row[] = []
+  let residualNet = 0
+  let availableCreditOnResidual = 0
+  if (theyOweMeTotal - iOweThemTotal > MONEY_EPSILON) {
+    residualDirection = 'other_to_me'
+    residualSide = theyOweMe
+    residualNet = round2(theyOweMeTotal - iOweThemTotal)
+    availableCreditOnResidual = availableCreditOtherToMe
+  } else if (iOweThemTotal - theyOweMeTotal > MONEY_EPSILON) {
+    residualDirection = 'me_to_other'
+    residualSide = iOweThem
+    residualNet = round2(iOweThemTotal - theyOweMeTotal)
+    availableCreditOnResidual = availableCreditMeToOther
+  }
+
+  const creditCap = round2(Math.min(residualNet, availableCreditOnResidual))
+  const maxApplicable = round2(offsetCap + creditCap)
+  const requested = params.amountToApply === undefined ? maxApplicable : Math.max(0, params.amountToApply)
+  const appliedAmount = round2(Math.min(requested, maxApplicable))
+
+  // Offset first (free), then credit on the residual side.
+  const offsetApplied = round2(Math.min(appliedAmount, offsetCap))
+  const creditApplied = round2(Math.max(0, appliedAmount - offsetApplied))
+
+  const take = (
+    rows: Row[],
+    want: number,
+    direction: ReconcileDirection,
+    source: 'offset' | 'credit',
+  ): PersonalReconcileSlice[] => {
+    const slices: PersonalReconcileSlice[] = []
+    let remaining = want
+    for (const row of rows) {
+      if (remaining <= MONEY_EPSILON) break
+      if (row.remaining <= MONEY_EPSILON) continue
+      const use = round2(Math.min(remaining, row.remaining))
+      slices.push({
+        billId: row.billId,
+        billTitle: row.billTitle,
+        amount: use,
+        currency: params.currency,
+        createdAt: row.createdAt,
+        direction,
+        source,
+      })
+      row.remaining = round2(row.remaining - use)
+      remaining = round2(remaining - use)
+    }
+    return slices
+  }
+
+  const offsetSlices = [
+    ...take(theyOweMe, offsetApplied, 'other_to_me', 'offset'),
+    ...take(iOweThem, offsetApplied, 'me_to_other', 'offset'),
+  ]
+  const creditSlices =
+    residualDirection && creditApplied > MONEY_EPSILON
+      ? take(residualSide, creditApplied, residualDirection, 'credit')
+      : []
+
+  const residualRemaining = round2(Math.max(0, residualNet - creditApplied))
+  const fullySettled = appliedAmount >= maxApplicable - MONEY_EPSILON && residualRemaining <= MONEY_EPSILON
+
+  return {
+    currency: params.currency,
+    theyOweMeTotal,
+    iOweThemTotal,
+    offsetCap,
+    creditCap,
+    availableCreditOtherToMe: round2(availableCreditOtherToMe),
+    availableCreditMeToOther: round2(availableCreditMeToOther),
+    maxApplicable,
+    appliedAmount,
+    offsetSlices,
+    creditSlices,
+    fullySettled,
+    residualRemaining,
+    residualDirection: residualRemaining > MONEY_EPSILON ? residualDirection : null,
+  }
+}
+
 export async function computeAvailableGeneralCredit(params: {
   meId: string
   otherId: string

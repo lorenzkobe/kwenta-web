@@ -18,6 +18,7 @@ import { db } from '@/db/db'
 import {
   buildManualGeneralCreditSelectionPlan,
   buildPersonalBillAllocationPlan,
+  buildPersonalReconcilePlan,
   computePairwiseNetForBill,
   computePairwiseNet,
   fetchRemoteProfileIntoDexie,
@@ -38,6 +39,7 @@ import {
   getBillWithDetails,
   linkProfileToRemote,
   removeProfilePeerLink,
+  settleUpPersonalBills,
 } from '@/db/operations'
 import { ConfirmDialog } from '@/components/common/ConfirmDialog'
 import { useConfirmDialog } from '@/hooks/useConfirmDialog'
@@ -50,6 +52,7 @@ import { SettlementHistoryList } from '@/components/common/SettlementHistoryList
 import { EditSettlementDialog } from '@/components/common/EditSettlementDialog'
 import { RecordSettlementDialog } from '@/components/common/RecordSettlementDialog'
 import { ApplyGeneralCreditDialog } from '@/components/common/ApplyGeneralCreditDialog'
+import { SettleUpDialog } from '@/components/common/SettleUpDialog'
 import { ExportImageDialog } from '@/components/export/ExportImageDialog'
 import { PersonExportCard, type PersonBillEntry } from '@/components/export/PersonExportCard'
 import { exportPersonToCSV } from '@/lib/export-csv'
@@ -336,6 +339,8 @@ export function PersonDetailPage() {
   const [paymentMode, setPaymentMode] = useState<'general' | 'distributed'>('general')
   const [applyingGeneralCredit, setApplyingGeneralCredit] = useState(false)
   const [applyCreditOpen, setApplyCreditOpen] = useState(false)
+  const [settleUpOpen, setSettleUpOpen] = useState(false)
+  const [settlingUp, setSettlingUp] = useState(false)
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false)
   const [showOptionsMenu, setShowOptionsMenu] = useState(false)
   const [linkByIdInput, setLinkByIdInput] = useState('')
@@ -548,6 +553,24 @@ export function PersonDetailPage() {
       .filter((plan): plan is NonNullable<typeof plan> => Boolean(plan))
       .sort((a, b) => b.maxApplicableAmount - a.maxApplicableAmount)[0] ?? null
   }, [userId, personId, defaultCurrency, bills, settlements, sharedGroups, personalBills, personalBillDirection])
+
+  // Two-sided "Settle up" plan for personal bills (both directions, offset + credit).
+  const personalReconcilePlan = useLiveQuery(async () => {
+    if (!userId || !personId) return null
+    const candidateCurrencies = [
+      ...new Set(
+        [
+          ...personalBills.map((bill) => bill.currency),
+          ...(settlements ?? []).map((settlement) => settlement.currency),
+        ].filter(Boolean),
+      ),
+    ]
+    const currencies = candidateCurrencies.length > 0 ? candidateCurrencies : [defaultCurrency]
+    const plans = await Promise.all(
+      currencies.map((currency) => buildPersonalReconcilePlan({ meId: userId, otherId: personId, currency })),
+    )
+    return plans.filter((plan) => plan.maxApplicable > 0.005).sort((a, b) => b.maxApplicable - a.maxApplicable)[0] ?? null
+  }, [userId, personId, defaultCurrency, personalBills, settlements])
 
   const settlementParties = useMemo((): { id: string; label: string }[] | undefined => {
     if (!userId || !personId) return undefined
@@ -811,6 +834,39 @@ export function PersonDetailPage() {
     return true
   }
 
+  async function handleSettleUpSubmit(amount: number) {
+    if (!personalReconcilePlan || !userId || !personId) return
+    setSettlingUp(true)
+    try {
+      // Re-derive against current balances for the chosen amount before writing.
+      const fresh = await buildPersonalReconcilePlan({
+        meId: userId,
+        otherId: personId,
+        currency: personalReconcilePlan.currency,
+        amountToApply: amount,
+      })
+      if (fresh.appliedAmount <= 0.005) {
+        throw new Error('Nothing left to settle. Refresh and try again.')
+      }
+      await settleUpPersonalBills({
+        meId: userId,
+        otherId: personId,
+        currency: fresh.currency,
+        markedBy: userId,
+        offsetSlices: fresh.offsetSlices.map((s) => ({ billId: s.billId, amount: s.amount, direction: s.direction })),
+        creditSlices: fresh.creditSlices.map((s) => ({ billId: s.billId, amount: s.amount, direction: s.direction })),
+        routeHint: `/app/people/${personId}`,
+      })
+      setSettleUpOpen(false)
+      toast.success(fresh.fullySettled ? 'Settled up.' : 'Recorded your settle up.')
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Could not settle up right now.'
+      toast.error(message)
+    } finally {
+      setSettlingUp(false)
+    }
+  }
+
   async function handleApplyGeneralCredit() {
     if (!manualGeneralCreditPlan || !userId || !personId) return
     if (manualGeneralCreditPlan.maxApplicableAmount <= 0.005) {
@@ -1033,19 +1089,28 @@ export function PersonDetailPage() {
               variant="outline"
               className="rounded-full"
               type="button"
-              disabled={
-                applyingGeneralCredit ||
-                !manualGeneralCreditPlan ||
-                manualGeneralCreditPlan.maxApplicableAmount <= 0.005
-              }
-              onClick={() => void handleApplyGeneralCredit()}
+              disabled={settlingUp || !personalReconcilePlan || personalReconcilePlan.maxApplicable <= 0.005}
+              onClick={() => setSettleUpOpen(true)}
             >
-              {applyingGeneralCredit ? 'Applying…' : 'Apply available general credit'}
+              {settlingUp ? 'Settling…' : 'Settle up'}
             </Button>
+            {manualGeneralCreditPlan && manualGeneralCreditPlan.groupAllocatableAmount > 0.005 && (
+              <Button
+                size="sm"
+                variant="outline"
+                className="rounded-full"
+                type="button"
+                disabled={applyingGeneralCredit}
+                onClick={() => void handleApplyGeneralCredit()}
+              >
+                {applyingGeneralCredit ? 'Applying…' : 'Apply credit to groups'}
+              </Button>
+            )}
           </div>
           <p className="mt-2 text-xs text-stone-500">
-            General payments reduce your total balance only. Distributed payments are split to your oldest
-            unpaid bills. Applied credit can go to personal bills, selected groups, or both.
+            Settle up reconciles your personal bills both ways — what you each owe cancels out, and any
+            leftover is covered by available credit, recording a payment on every covered bill. General
+            payments reduce your total balance only.
           </p>
           {manualGeneralCreditPlan && manualGeneralCreditPlan.maxApplicableAmount > 0.005 && (
             <p className="mt-1 text-xs text-stone-500">
@@ -1392,6 +1457,17 @@ export function PersonDetailPage() {
           plan={manualGeneralCreditPlan}
           saving={applyingGeneralCredit}
           onSubmit={handleApplyGeneralCreditSubmit}
+        />
+      )}
+
+      {settleUpOpen && personalReconcilePlan && (
+        <SettleUpDialog
+          open
+          onOpenChange={setSettleUpOpen}
+          plan={personalReconcilePlan}
+          personName={settlementParties?.[1]?.label ?? 'them'}
+          saving={settlingUp}
+          onSubmit={handleSettleUpSubmit}
         />
       )}
 

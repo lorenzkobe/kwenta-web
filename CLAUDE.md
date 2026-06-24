@@ -13,6 +13,10 @@ npm test           # Run unit tests once (Vitest)
 npm run test:watch # Run unit tests in watch mode
 ```
 
+## Plans & Specs (do not commit)
+
+Design specs and implementation plans (e.g. files under `docs/superpowers/specs/`) are **not** saved in the repo. Write them to disk for review, but **never `git add`/`git commit` them** — leave them untracked. If a skill instructs you to commit the design doc, skip that step for this project.
+
 ## Testing Policy (required)
 
 Tests are **mandatory** for this project — we create tests and run testing as part of every change, not as an afterthought.

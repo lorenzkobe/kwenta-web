@@ -27,6 +27,7 @@ import {
   fetchRemoteProfileIntoDexie,
   listEligibleSharedGroupsForGeneralCredit,
   participantUnionForBill,
+  type ReconcileDirection,
 } from '@/lib/people'
 
 async function notifySyncAfterMutation(meta?: {
@@ -2029,6 +2030,201 @@ export async function applyGeneralCreditToSelection(params: {
   })
 
   return { settlementIds }
+}
+
+export interface ReconcileSliceInput {
+  billId: string
+  amount: number
+  direction: ReconcileDirection
+}
+
+/**
+ * "Settle up" — record per-bill settlements that reconcile personal bills in
+ * BOTH directions between two people.
+ *
+ * Offset slices (mutual cancellation) consume NO general credit; credit slices
+ * consume available general credit in their single direction. Every slice writes
+ * a bill-tagged settlement carrying a general-reason note in `label`, so each
+ * covered bill shows individually settled with its reason. All settlements share
+ * one `bundle_id` and produce a single bundled notification.
+ *
+ * Build the slices with `buildPersonalReconcilePlan` (src/lib/people.ts).
+ */
+export async function settleUpPersonalBills(params: {
+  meId: string
+  otherId: string
+  currency: string
+  markedBy: string
+  offsetSlices: ReconcileSliceInput[]
+  creditSlices: ReconcileSliceInput[]
+  routeHint?: string
+}): Promise<{ settlementIds: string[]; bundleId: string }> {
+  const round2 = (n: number) => Math.round(n * 100) / 100
+  const allSlices = [
+    ...params.offsetSlices.map((s) => ({ ...s, source: 'offset' as const })),
+    ...params.creditSlices.map((s) => ({ ...s, source: 'credit' as const })),
+  ].filter((s) => s.amount > 0.005)
+  if (allSlices.length === 0) {
+    return { settlementIds: [], bundleId: '' }
+  }
+
+  const [meResolved, otherResolved] = await Promise.all([
+    resolveSettlementPartyId(params.meId),
+    resolveSettlementPartyId(params.otherId),
+  ])
+  const partiesFor = (direction: ReconcileDirection) =>
+    direction === 'other_to_me'
+      ? { from: otherResolved, to: meResolved }
+      : { from: meResolved, to: otherResolved }
+
+  const [meProfile, otherProfile] = await Promise.all([
+    db.profiles.get(meResolved),
+    db.profiles.get(otherResolved),
+  ])
+  const otherName = otherProfile?.display_name?.trim() || 'them'
+
+  const noteFor = (direction: ReconcileDirection, source: 'offset' | 'credit'): string => {
+    if (source === 'offset') {
+      return direction === 'other_to_me'
+        ? `Settled by offset — covers what ${otherName} owed you`
+        : `Settled by offset against bills ${otherName} paid`
+    }
+    return direction === 'other_to_me'
+      ? `Paid from ${otherName}'s available credit`
+      : `Paid from your available credit with ${otherName}`
+  }
+
+  // Credit slices all flow in one direction; consume that much from general credit.
+  const creditTotal = round2(params.creditSlices.reduce((sum, s) => sum + Math.max(0, s.amount), 0))
+  const creditDirection: ReconcileDirection | null = params.creditSlices[0]?.direction ?? null
+
+  const settlementIds: string[] = []
+  const bundleId = generateId()
+  const timestamp = now()
+
+  await db.transaction(
+    'rw',
+    [db.settlements, db.activity_log, db.profiles, db.profile_peer_links, db.bills, db.bill_items, db.item_splits],
+    async () => {
+      // 1. Validate every slice against the bill's current net (aggregated per bill+direction).
+      const wantByKey = new Map<string, number>()
+      for (const s of allSlices) {
+        const key = `${s.billId}|${s.direction}`
+        wantByKey.set(key, round2((wantByKey.get(key) ?? 0) + s.amount))
+      }
+      for (const [key, want] of wantByKey) {
+        const sep = key.lastIndexOf('|')
+        const billId = key.slice(0, sep)
+        const direction = key.slice(sep + 1) as ReconcileDirection
+        const net = await computePairwiseNetForBill(billId, params.meId, params.otherId)
+        const allocatable =
+          direction === 'other_to_me'
+            ? net > 0.005 ? net : 0
+            : net < -0.005 ? Math.abs(net) : 0
+        if (want > allocatable + 0.005) {
+          throw new Error('A bill balance changed. Refresh and try again.')
+        }
+      }
+
+      // 2. Consume available general credit for the credit portion (offset is free).
+      if (creditTotal > 0.005 && creditDirection) {
+        const parties = partiesFor(creditDirection)
+        const [sourceFromIds, sourceToIds] = await Promise.all([
+          expandProfileIdsForSplitMatching(parties.from, params.markedBy),
+          expandProfileIdsForSplitMatching(parties.to, params.markedBy),
+        ])
+        const sourceGeneral = (
+          await db.settlements
+            .filter(
+              (s) =>
+                !s.is_deleted &&
+                s.is_settled &&
+                s.group_id === null &&
+                s.bill_id === null &&
+                s.currency === params.currency &&
+                sourceFromIds.has(s.from_user_id) &&
+                sourceToIds.has(s.to_user_id),
+            )
+            .toArray()
+        ).sort((a, b) => a.created_at.localeCompare(b.created_at))
+        const totalAvailable = sourceGeneral.reduce((sum, row) => sum + row.amount, 0)
+        if (totalAvailable + 0.005 < creditTotal) {
+          throw new Error('Available credit changed. Refresh and try again.')
+        }
+        let remainingToConsume = creditTotal
+        for (const row of sourceGeneral) {
+          if (remainingToConsume <= 0.005) break
+          const consume = Math.min(row.amount, remainingToConsume)
+          const nextAmount = round2(row.amount - consume)
+          if (nextAmount <= 0.005) {
+            await db.settlements.update(row.id, { amount: 0, is_deleted: true, updated_at: timestamp, synced_at: null })
+          } else {
+            await db.settlements.update(row.id, { amount: nextAmount, updated_at: timestamp, synced_at: null })
+          }
+          remainingToConsume = round2(remainingToConsume - consume)
+        }
+      }
+
+      // 3. Write a bill-tagged settlement per slice, each with an explanatory note.
+      for (const slice of allSlices) {
+        const parties = partiesFor(slice.direction)
+        const settlementId = generateId()
+        const label = noteFor(slice.direction, slice.source)
+        await db.settlements.add({
+          ...syncFields({ id: settlementId }),
+          group_id: null,
+          bill_id: slice.billId,
+          bundle_id: bundleId,
+          from_user_id: parties.from,
+          to_user_id: parties.to,
+          amount: round2(slice.amount),
+          currency: params.currency,
+          label,
+          is_settled: true,
+        })
+        await db.activity_log.add({
+          ...syncFields(),
+          group_id: null,
+          user_id: params.markedBy,
+          action: 'settled',
+          entity_type: 'settlement',
+          entity_id: settlementId,
+          description: `${meProfile?.display_name ?? 'Someone'} settled up with ${otherName} · ${label}`,
+        })
+        settlementIds.push(settlementId)
+      }
+    },
+  )
+
+  // One bundled "settled up" notification to the other person.
+  const totalApplied = round2(allSlices.reduce((sum, s) => sum + s.amount, 0))
+  if (settlementIds.length > 0 && totalApplied > 0.005) {
+    await emitSinglePaymentNotification({
+      markedBy: params.markedBy,
+      fromUserId: params.meId,
+      toUserId: params.otherId,
+      amount: totalApplied,
+      currency: params.currency,
+      groupId: null,
+      settlementId: settlementIds[0],
+    })
+  }
+
+  await notifySyncAfterMutation({
+    actorUserId: params.markedBy,
+    operation: 'settle_up_personal_bills',
+    entityType: 'settlement',
+    entityId: settlementIds[0] ?? null,
+    payload: {
+      offset: params.offsetSlices.length,
+      credit: params.creditSlices.length,
+      amount: totalApplied,
+      currency: params.currency,
+    },
+    routeHint: params.routeHint ?? '/app/people',
+  })
+
+  return { settlementIds, bundleId }
 }
 
 export async function updateSettlement(
