@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { db } from '@/db/db'
 import {
+  addExistingGroupMember,
   addGroupMember,
   createBill,
   createBundledGroupSettlement,
@@ -346,41 +347,60 @@ describe('addGroupMember', () => {
 })
 
 describe('removeGroupMember', () => {
-  it('soft-deletes membership and redistributes equal splits', async () => {
-    await db.profiles.bulkAdd([
-      makeProfile({ id: 'A' }),
-      makeProfile({ id: 'B' }),
-      makeProfile({ id: 'C' }),
-    ])
-    // Seed a group with three equal members and one 90.00 bill split equally.
+  async function seed3MemberGroup() {
+    await db.profiles.bulkAdd([makeProfile({ id: 'A' }), makeProfile({ id: 'B' }), makeProfile({ id: 'C' })])
     await db.groups.add(makeGroup({ id: 'G', created_by: 'A' }))
     await db.group_members.bulkAdd([
-      makeMember({ group_id: 'G', user_id: 'A' }),
-      makeMember({ group_id: 'G', user_id: 'B' }),
-      makeMember({ group_id: 'G', user_id: 'C' }),
+      makeMember({ group_id: 'G', user_id: 'A', display_name: 'Alice' }),
+      makeMember({ group_id: 'G', user_id: 'B', display_name: 'Bob' }),
+      makeMember({ group_id: 'G', user_id: 'C', display_name: 'Cara' }),
     ])
+  }
+
+  it('rejects a non-creator', async () => {
+    await seed3MemberGroup()
+    await expect(removeGroupMember('G', 'C', 'B')).rejects.toThrow(/only the group creator/i)
+  })
+
+  it('blocks removal while the member has an outstanding balance', async () => {
+    await seed3MemberGroup()
+    // Alice paid 90, split 30/30/30 → Cara owes 30.
     await db.bills.add(makeBill({ id: 'BILL', group_id: 'G', paid_by: 'A', total_amount: 90 }))
     await db.bill_items.add(makeItem({ id: 'IT', bill_id: 'BILL', amount: 90 }))
     await db.item_splits.bulkAdd([
-      makeSplit({ id: 's1', item_id: 'IT', user_id: 'A', computed_amount: 30 }),
-      makeSplit({ id: 's2', item_id: 'IT', user_id: 'B', computed_amount: 30 }),
-      makeSplit({ id: 's3', item_id: 'IT', user_id: 'C', computed_amount: 30 }),
+      makeSplit({ item_id: 'IT', user_id: 'A', computed_amount: 30 }),
+      makeSplit({ item_id: 'IT', user_id: 'B', computed_amount: 30 }),
+      makeSplit({ item_id: 'IT', user_id: 'C', computed_amount: 30 }),
     ])
+    await expect(removeGroupMember('G', 'C', 'A')).rejects.toThrow(/outstanding balance/i)
+    const m = await db.group_members.where('[group_id+user_id]').equals(['G', 'C']).first()
+    expect(m?.is_deleted).toBe(false) // not removed
+  })
+
+  it('removes a settled member without redistributing splits (history preserved)', async () => {
+    await seed3MemberGroup()
+    // Cara owes 30 then pays it back → settled.
+    await db.bills.add(makeBill({ id: 'BILL', group_id: 'G', paid_by: 'A', total_amount: 90 }))
+    await db.bill_items.add(makeItem({ id: 'IT', bill_id: 'BILL', amount: 90 }))
+    await db.item_splits.bulkAdd([
+      makeSplit({ id: 's-a', item_id: 'IT', user_id: 'A', computed_amount: 30 }),
+      makeSplit({ id: 's-b', item_id: 'IT', user_id: 'B', computed_amount: 30 }),
+      makeSplit({ id: 's-c', item_id: 'IT', user_id: 'C', computed_amount: 30 }),
+    ])
+    await db.settlements.add(
+      makeSettlement({ group_id: 'G', from_user_id: 'C', to_user_id: 'A', amount: 30 }),
+    )
 
     await removeGroupMember('G', 'C', 'A')
 
-    const member = await db.group_members
-      .where('[group_id+user_id]')
-      .equals(['G', 'C'])
-      .first()
-    expect(member?.is_deleted).toBe(true)
-
-    const splits = (await db.item_splits.where('item_id').equals('IT').toArray()).filter(
-      (s) => !s.is_deleted,
-    )
-    expect(splits).toHaveLength(2)
-    // 90 split across 2 remaining → 45 each.
-    expect(splits.map((s) => s.computed_amount).sort()).toEqual([45, 45])
+    const m = await db.group_members.where('[group_id+user_id]').equals(['G', 'C']).first()
+    expect(m?.is_deleted).toBe(true)
+    // Cara's split is untouched (no redistribution); other splits unchanged.
+    const caraSplit = await db.item_splits.get('s-c')
+    expect(caraSplit?.is_deleted).toBe(false)
+    expect(caraSplit?.computed_amount).toBe(30)
+    const bobSplit = await db.item_splits.get('s-b')
+    expect(bobSplit?.computed_amount).toBe(30)
   })
 })
 
@@ -643,5 +663,78 @@ describe('deletePerson atomic cascade', () => {
     const m = await db.group_members.where('[group_id+user_id]').equals(['G', 'P']).first()
     expect(m?.is_deleted).toBe(true)
     expect((await db.settlements.get('ST'))?.is_deleted).toBe(true)
+  })
+})
+
+describe('member management permissions', () => {
+  async function seedGroupOwnedBy(creator: string) {
+    await db.profiles.bulkAdd([
+      makeProfile({ id: creator }),
+      makeProfile({ id: 'OUTSIDER' }),
+      makeProfile({ id: 'NEW' }),
+    ])
+    await db.groups.add(makeGroup({ id: 'G', created_by: creator }))
+    await db.group_members.add(makeMember({ group_id: 'G', user_id: creator }))
+  }
+
+  it('addExistingGroupMember rejects a non-creator', async () => {
+    await seedGroupOwnedBy('OWNER')
+    await expect(addExistingGroupMember('G', 'NEW', 'OUTSIDER')).rejects.toThrow(
+      /only the group creator/i,
+    )
+  })
+
+  it('addExistingGroupMember allows the creator', async () => {
+    await seedGroupOwnedBy('OWNER')
+    await addExistingGroupMember('G', 'NEW', 'OWNER')
+    const m = await db.group_members.where('[group_id+user_id]').equals(['G', 'NEW']).first()
+    expect(m?.is_deleted).toBe(false)
+  })
+})
+
+describe('payment caps', () => {
+  async function seedDebt() {
+    await db.profiles.bulkAdd([makeProfile({ id: 'A' }), makeProfile({ id: 'B' })])
+    await db.groups.add(makeGroup({ id: 'G', created_by: 'A' }))
+    await db.group_members.bulkAdd([
+      makeMember({ group_id: 'G', user_id: 'A', display_name: 'Alice' }),
+      makeMember({ group_id: 'G', user_id: 'B', display_name: 'Bob' }),
+    ])
+    // Alice paid 100, split 50/50 → Bob owes Alice 50.
+    await db.bills.add(makeBill({ id: 'BILL', group_id: 'G', paid_by: 'A', total_amount: 100 }))
+    await db.bill_items.add(makeItem({ id: 'IT', bill_id: 'BILL', amount: 100 }))
+    await db.item_splits.bulkAdd([
+      makeSplit({ item_id: 'IT', user_id: 'A', computed_amount: 50 }),
+      makeSplit({ item_id: 'IT', user_id: 'B', computed_amount: 50 }),
+    ])
+  }
+
+  it('createSettlement with enforceCap rejects overpaying', async () => {
+    await seedDebt()
+    await expect(
+      createSettlement('G', 'B', 'A', 80, 'PHP', 'B', undefined, null, { enforceCap: true }),
+    ).rejects.toThrow(/can only pay up to/i)
+  })
+
+  it('createSettlement with enforceCap allows paying up to what is owed', async () => {
+    await seedDebt()
+    const id = await createSettlement('G', 'B', 'A', 50, 'PHP', 'B', undefined, null, {
+      enforceCap: true,
+    })
+    expect(await db.settlements.get(id)).toBeTruthy()
+  })
+
+  it('createBundledGroupSettlement with enforceCap rejects an over-cap recipient', async () => {
+    await seedDebt()
+    await expect(
+      createBundledGroupSettlement({
+        groupId: 'G',
+        fromUserId: 'B',
+        recipients: [{ toUserId: 'A', amount: 80 }],
+        currency: 'PHP',
+        markedBy: 'B',
+        enforceCap: true,
+      }),
+    ).rejects.toThrow(/can only pay up to/i)
   })
 })

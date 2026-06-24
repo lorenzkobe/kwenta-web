@@ -1,5 +1,3 @@
-import type { GroupBalanceSummary } from '@/lib/settlement'
-
 export function mergeCurrencyTotals(
   a: Map<string, number>,
   b: Map<string, number>,
@@ -12,7 +10,9 @@ export function mergeCurrencyTotals(
 }
 
 /** Roll up per-currency group to-receive / to-pay from group balance summaries (matches Balances page). */
-export function groupReceivePayMapsFromSummaries(summaries: GroupBalanceSummary[]): {
+export function groupReceivePayMapsFromSummaries(
+  summaries: { currency: string; totalToReceive: number; totalToPay: number }[],
+): {
   groupReceive: Map<string, number>
   groupPay: Map<string, number>
 } {

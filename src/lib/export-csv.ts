@@ -7,7 +7,7 @@ import {
   listBillsInvolvingPair,
   listPairwiseSettlementsBetween,
 } from '@/lib/people'
-import { computeGroupBalances } from '@/lib/settlement'
+import { computeGroupBalances, computeGroupPairwiseBalances } from '@/lib/settlement'
 import { makeExportFilename } from '@/lib/export-utils'
 
 function escapeCsv(value: string | number | null | undefined): string {
@@ -107,6 +107,7 @@ export async function exportGroupToCSV(groupId: string, currentUserId: string): 
   bills.sort((a, b) => a.created_at.localeCompare(b.created_at))
 
   const balanceSummary = await computeGroupBalances(groupId, currentUserId)
+  const pairwise = await computeGroupPairwiseBalances(groupId, currentUserId)
 
   const lines: string[] = [
     csvRow('Group', group.name),
@@ -125,16 +126,13 @@ export async function exportGroupToCSV(groupId: string, currentUserId: string): 
       lines.push(csvRow(name, Math.abs(amt), group.currency, status))
     }
 
-    if (balanceSummary.groupedSuggestions.length > 0) {
-      lines.push(...section('Suggested Payments'))
-      lines.push(csvRow('From', 'To', 'Amount', 'Currency'))
-      for (const s of balanceSummary.groupedSuggestions) {
-        if (s.recipients.length === 1) {
-          lines.push(csvRow(s.fromName, s.recipients[0].toName, s.totalAmount, group.currency))
-        } else {
-          lines.push(csvRow(s.fromName, `${s.recipients.length} people`, s.totalAmount, group.currency))
-          for (const r of s.recipients) lines.push(csvRow('', r.toName, r.amount, group.currency))
-        }
+    if (pairwise && pairwise.entries.some((e) => Math.abs(e.net) > 0.005)) {
+      lines.push(...section('Your Balances'))
+      lines.push(csvRow('Person', 'Status', 'Amount', 'Currency'))
+      for (const entry of pairwise.entries) {
+        if (Math.abs(entry.net) <= 0.005) continue
+        const name = memberNames[entry.memberUserId] ?? entry.displayName
+        lines.push(csvRow(name, entry.net > 0 ? 'Owes you' : 'You owe', Math.abs(entry.net), group.currency))
       }
     }
   }

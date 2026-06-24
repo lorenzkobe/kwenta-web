@@ -31,8 +31,6 @@ const summary = (over: Partial<GroupBalanceSummary>): GroupBalanceSummary => ({
   groupName: 'G',
   currency: 'PHP',
   balances: [],
-  suggestions: [],
-  groupedSuggestions: [],
   totalToReceive: 0,
   totalToPay: 0,
   ...over,

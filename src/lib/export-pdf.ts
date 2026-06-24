@@ -7,7 +7,7 @@ import {
   listBillsInvolvingPair,
   listPairwiseSettlementsBetween,
 } from '@/lib/people'
-import { computeGroupBalances } from '@/lib/settlement'
+import { computeGroupBalances, computeGroupPairwiseBalances } from '@/lib/settlement'
 import { getBillWithDetails } from '@/db/operations'
 import { makeExportFilename } from '@/lib/export-utils'
 
@@ -368,6 +368,7 @@ export async function generateGroupPDF(groupId: string, currentUserId: string): 
   }
 
   const balanceSummary = await computeGroupBalances(groupId, currentUserId)
+  const pairwise = await computeGroupPairwiseBalances(groupId, currentUserId)
   const bills = (await db.bills.where('group_id').equals(groupId).toArray()).filter((b) => !b.is_deleted)
   bills.sort((a, b) => a.created_at.localeCompare(b.created_at))
   const settlements = (await db.settlements.where('group_id').equals(groupId).toArray()).filter((s) => !s.is_deleted)
@@ -393,22 +394,20 @@ export async function generateGroupPDF(groupId: string, currentUserId: string): 
     })
     y = drawTable(doc, balCols, balRows, y)
 
-    if (balanceSummary.groupedSuggestions.length > 0) {
-      // Suggested payments — 78+78+26 = 182
-      y = drawSectionTitle(doc, 'Suggested Payments', y)
-      const sugCols: ColDef[] = [
-        { label: 'From', w: 78 },
-        { label: 'To', w: 78 },
+    if (pairwise && pairwise.entries.some((e) => Math.abs(e.net) > 0.005)) {
+      // Your Balances — 104+52+26 = 182
+      y = drawSectionTitle(doc, 'Your Balances', y)
+      const balCols: ColDef[] = [
+        { label: 'Person', w: 104 },
+        { label: 'Status', w: 52 },
         { label: 'Amount', w: 26, align: 'right' },
       ]
-      const sugRows: (string | number | null | undefined)[][] = []
-      for (const s of balanceSummary.groupedSuggestions) {
-        const toLabel = s.recipients.length === 1
-          ? s.recipients[0].toName
-          : s.recipients.map((r) => r.toName).join(', ')
-        sugRows.push([s.fromName, toLabel, fmt(s.totalAmount, group.currency)])
+      const balRows: (string | number | null | undefined)[][] = []
+      for (const e of pairwise.entries) {
+        if (Math.abs(e.net) <= 0.005) continue
+        balRows.push([e.displayName, e.net > 0 ? 'Owes you' : 'You owe', fmt(Math.abs(e.net), group.currency)])
       }
-      y = drawTable(doc, sugCols, sugRows, y)
+      y = drawTable(doc, balCols, balRows, y)
     }
   }
 

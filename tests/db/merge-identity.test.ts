@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { db } from '@/db/db'
 import { mergeProfileIdentity } from '@/db/operations'
-import { computeGroupBalances } from '@/lib/settlement'
+import { computeGroupPairwiseBalances } from '@/lib/settlement'
 import { findDuplicateIdentityCandidates } from '@/lib/duplicate-identity'
 import { makeGroup, makeMember, makeProfile, resetDb, seedSimpleBill } from '../helpers/db'
 
@@ -50,33 +50,25 @@ describe('mergeProfileIdentity', () => {
     await resetDb()
   })
 
-  it('collapses the duplicate so no self-payment suggestion remains', async () => {
+  it('collapses the duplicate and preserves the net', async () => {
     await seedJelloDuplicate()
 
-    // Before: the duplicate is detected and the optimizer pays "Jello" -> "Jello".
+    // Before: the duplicate is detected.
     expect(await findDuplicateIdentityCandidates('g1', ME)).toHaveLength(1)
-    const before = await computeGroupBalances('g1', ME)
-    const selfPayBefore = before!.groupedSuggestions.some((s) =>
-      s.recipients.some((r) => r.toName === s.fromName),
-    )
-    expect(selfPayBefore).toBe(true)
 
     await mergeProfileIdentity('jello-local', 'jello-real', ME)
 
-    // After: rows rewritten, contact linked, duplicate gone, no self-payment.
+    // After: rows rewritten, contact linked, duplicate gone.
     expect((await db.profiles.get('jello-local'))?.linked_profile_id).toBe('jello-real')
     expect((await db.item_splits.where('user_id').equals('jello-local').count())).toBe(0)
     expect(await findDuplicateIdentityCandidates('g1', ME)).toHaveLength(0)
 
-    const after = await computeGroupBalances('g1', ME)
-    const selfPayAfter = after!.groupedSuggestions.some((s) =>
-      s.recipients.some((r) => r.toName === s.fromName),
-    )
-    expect(selfPayAfter).toBe(false)
-    // Net is preserved: ME owes 30 to the single Jello.
-    expect(after!.suggestions).toEqual([
-      expect.objectContaining({ fromUserId: ME, toUserId: 'jello-real', amount: 30 }),
-    ])
+    // Net is preserved: ME owes 30 to the single (merged) Jello.
+    const after = await computeGroupPairwiseBalances('g1', ME)
+    const jelloEntry = after!.entries.find((e) => e.memberUserId === 'jello-real')
+    expect(jelloEntry?.net).toBe(-30) // ME owes 30 to the single Jello
+    // No leftover entry under the old local id:
+    expect(after!.entries.some((e) => e.memberUserId === 'jello-local')).toBe(false)
   })
 
   it('refuses when the source is not a viewer-owned local contact', async () => {

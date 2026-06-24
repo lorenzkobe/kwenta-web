@@ -8,26 +8,10 @@ export interface BalanceEntry {
   amount: number
 }
 
-/** One suggested transfer: payer → receiver for `amount`. */
-export interface SettlementSuggestion {
-  fromUserId: string
-  fromName: string
-  toUserId: string
-  toName: string
-  amount: number
-}
-
 export interface BundledSuggestionRecipient {
   toUserId: string
   toName: string
   amount: number
-}
-
-export interface BundledSettlementSuggestion {
-  fromUserId: string
-  fromName: string
-  totalAmount: number
-  recipients: BundledSuggestionRecipient[]
 }
 
 export interface GroupBalanceSummary {
@@ -35,12 +19,147 @@ export interface GroupBalanceSummary {
   groupName: string
   currency: string
   balances: BalanceEntry[]
-  suggestions: SettlementSuggestion[]
-  groupedSuggestions: BundledSettlementSuggestion[]
   /** Positive net for you in this group: amount you should receive */
   totalToReceive: number
   /** Magnitude of negative net for you in this group: amount you should pay */
   totalToPay: number
+}
+
+export interface GroupPairwiseEntry {
+  /** The other member's canonical roster user id */
+  memberUserId: string
+  displayName: string
+  /** Net from the viewer's perspective: positive = they owe you, negative = you owe them */
+  net: number
+}
+
+export interface GroupPairwiseSummary {
+  groupId: string
+  groupName: string
+  currency: string
+  /** One entry per other member (and any non-member id still present in rows). Excludes the viewer. */
+  entries: GroupPairwiseEntry[]
+  /** Sum of positive nets: total others owe you in this group */
+  totalToReceive: number
+  /** Sum of |negative nets|: total you owe others in this group */
+  totalToPay: number
+}
+
+/**
+ * Pairwise net balances for one viewer in a group. Computed from the shared/canonical
+ * synced rows (paid_by, item_splits.user_id, settlements.from/to_user_id), so every member
+ * computes identical numbers — only which row is "yours" differs. No optimization, no
+ * phantom third-party transfers: each number traces to bills you actually shared with that
+ * member, plus settled payments between the two of you.
+ */
+export async function computeGroupPairwiseBalances(
+  groupId: string,
+  viewerUserId: string,
+): Promise<GroupPairwiseSummary | null> {
+  const group = await db.groups.get(groupId)
+  if (!group || group.is_deleted) return null
+
+  const members = await db.group_members.where('group_id').equals(groupId).toArray()
+
+  // Roster-first names (incl. soft-deleted rows) so removed members never render "Unknown".
+  const nameByUser = new Map<string, string>()
+  for (const m of members) {
+    if (m.display_name.trim()) nameByUser.set(m.user_id, m.display_name.trim())
+  }
+
+  const bills = (await db.bills.where('group_id').equals(groupId).toArray()).filter(
+    (b) => !b.is_deleted && (!b.currency || b.currency === group.currency),
+  )
+  const billIds = bills.map((b) => b.id)
+  const items = (
+    billIds.length > 0 ? await db.bill_items.where('bill_id').anyOf(billIds).toArray() : []
+  ).filter((i) => !i.is_deleted)
+  const itemsByBill = new Map<string, typeof items>()
+  for (const it of items) {
+    const arr = itemsByBill.get(it.bill_id) ?? []
+    arr.push(it)
+    itemsByBill.set(it.bill_id, arr)
+  }
+  const itemIds = items.map((i) => i.id)
+  const splits = (
+    itemIds.length > 0 ? await db.item_splits.where('item_id').anyOf(itemIds).toArray() : []
+  ).filter((s) => !s.is_deleted)
+  const splitsByItem = new Map<string, typeof splits>()
+  for (const sp of splits) {
+    const arr = splitsByItem.get(sp.item_id) ?? []
+    arr.push(sp)
+    splitsByItem.set(sp.item_id, arr)
+  }
+
+  // net[otherUserId] from the viewer's perspective.
+  const net = new Map<string, number>()
+  const bump = (uid: string, delta: number) => net.set(uid, (net.get(uid) ?? 0) + delta)
+
+  for (const bill of bills) {
+    const payer = bill.paid_by
+    if (!payer) continue
+    for (const it of itemsByBill.get(bill.id) ?? []) {
+      for (const sp of splitsByItem.get(it.id) ?? []) {
+        const uid = sp.user_id
+        const amt = sp.computed_amount
+        if (payer === viewerUserId && uid !== viewerUserId) {
+          bump(uid, amt) // you paid; their share → they owe you
+        } else if (uid === viewerUserId && payer !== viewerUserId) {
+          bump(payer, -amt) // they paid; your share → you owe them
+        }
+      }
+    }
+  }
+
+  const settlements = (await db.settlements.where('group_id').equals(groupId).toArray()).filter(
+    (s) => !s.is_deleted && s.is_settled && (!s.currency || s.currency === group.currency),
+  )
+  for (const s of settlements) {
+    if (s.from_user_id === viewerUserId && s.to_user_id !== viewerUserId) {
+      bump(s.to_user_id, s.amount) // you paid them → you owe them less
+    } else if (s.to_user_id === viewerUserId && s.from_user_id !== viewerUserId) {
+      bump(s.from_user_id, -s.amount) // they paid you → they owe you less
+    }
+  }
+
+  // Surface every active member (other than the viewer), even at net 0 ("settled").
+  for (const m of members) {
+    if (m.is_deleted || m.user_id === viewerUserId) continue
+    if (!net.has(m.user_id)) net.set(m.user_id, 0)
+  }
+
+  // Profile enrichment fallback for any orphaned id not on the roster.
+  for (const uid of net.keys()) {
+    if (!nameByUser.has(uid)) {
+      const profile = await db.profiles.get(uid)
+      if (profile?.display_name?.trim()) nameByUser.set(uid, profile.display_name.trim())
+    }
+  }
+
+  let totalToReceive = 0
+  let totalToPay = 0
+  const entries: GroupPairwiseEntry[] = []
+  for (const [memberUserId, raw] of net) {
+    if (memberUserId === viewerUserId) continue
+    const rounded = Math.round(raw * 100) / 100
+    entries.push({
+      memberUserId,
+      displayName: nameByUser.get(memberUserId) ?? 'Unknown',
+      net: rounded,
+    })
+    if (rounded > 0) totalToReceive += rounded
+    else if (rounded < 0) totalToPay += Math.abs(rounded)
+  }
+  entries.sort((a, b) => a.displayName.localeCompare(b.displayName))
+
+  return {
+    groupId,
+    groupName: group.name,
+    currency: group.currency,
+    entries,
+    totalToReceive: Math.round(totalToReceive * 100) / 100,
+    totalToPay: Math.round(totalToPay * 100) / 100,
+  }
 }
 
 /**
@@ -168,98 +287,14 @@ export async function computeGroupBalances(
     }
   }
 
-  const suggestions = optimizeSettlements(balances, profileMap)
-  const groupedSuggestions = groupSuggestionsByPayer(suggestions, profileMap)
-
   return {
     groupId,
     groupName: group.name,
     currency: group.currency,
     balances,
-    suggestions,
-    groupedSuggestions,
     totalToReceive,
     totalToPay,
   }
-}
-
-/**
- * Greedy settlement optimization: match who should pay with who should receive
- * to minimize number of suggested transfers.
- */
-function optimizeSettlements(
-  balances: BalanceEntry[],
-  nameMap: Map<string, string>,
-): SettlementSuggestion[] {
-  // Work in integer cents so min()/subtraction are exact: the previous float version
-  // could leave sub-cent residuals that prevented the suggestions from fully settling.
-  const receiveSide: { userId: string; cents: number }[] = []
-  const paySide: { userId: string; cents: number }[] = []
-
-  for (const b of balances) {
-    const cents = Math.round(b.amount * 100)
-    if (cents > 0) {
-      receiveSide.push({ userId: b.userId, cents })
-    } else if (cents < 0) {
-      paySide.push({ userId: b.userId, cents: -cents })
-    }
-  }
-
-  receiveSide.sort((a, b) => b.cents - a.cents)
-  paySide.sort((a, b) => b.cents - a.cents)
-
-  const suggestions: SettlementSuggestion[] = []
-  let ri = 0
-  let pi = 0
-
-  while (ri < receiveSide.length && pi < paySide.length) {
-    const receiver = receiveSide[ri]
-    const payer = paySide[pi]
-    const cents = Math.min(receiver.cents, payer.cents)
-
-    if (cents > 0) {
-      suggestions.push({
-        fromUserId: payer.userId,
-        fromName: nameMap.get(payer.userId) ?? 'Unknown',
-        toUserId: receiver.userId,
-        toName: nameMap.get(receiver.userId) ?? 'Unknown',
-        amount: cents / 100,
-      })
-    }
-
-    receiver.cents -= cents
-    payer.cents -= cents
-
-    if (receiver.cents === 0) ri++
-    if (payer.cents === 0) pi++
-  }
-
-  return suggestions
-}
-
-function groupSuggestionsByPayer(
-  suggestions: SettlementSuggestion[],
-  nameMap: Map<string, string>,
-): BundledSettlementSuggestion[] {
-  const grouped = new Map<string, BundledSettlementSuggestion>()
-  for (const s of suggestions) {
-    const existing = grouped.get(s.fromUserId)
-    if (!existing) {
-      grouped.set(s.fromUserId, {
-        fromUserId: s.fromUserId,
-        fromName: nameMap.get(s.fromUserId) ?? s.fromName,
-        totalAmount: s.amount,
-        recipients: [{ toUserId: s.toUserId, toName: s.toName, amount: s.amount }],
-      })
-      continue
-    }
-    existing.totalAmount = Math.round((existing.totalAmount + s.amount) * 100) / 100
-    existing.recipients.push({ toUserId: s.toUserId, toName: s.toName, amount: s.amount })
-  }
-  for (const value of grouped.values()) {
-    value.recipients.sort((a, b) => b.amount - a.amount)
-  }
-  return [...grouped.values()].sort((a, b) => b.totalAmount - a.totalAmount)
 }
 
 export async function computeAllGroupBalances(
@@ -461,4 +496,41 @@ export async function listSettlementHistoryForUser(
 
   out.sort((a, b) => b.createdAt.localeCompare(a.createdAt))
   return out
+}
+
+export async function computeAllGroupPairwiseBalances(
+  userId: string,
+): Promise<GroupPairwiseSummary[]> {
+  const memberships = await db.group_members.where('user_id').equals(userId).toArray()
+  const activeMemberships = memberships.filter((m) => !m.is_deleted)
+  const summaries: GroupPairwiseSummary[] = []
+  for (const m of activeMemberships) {
+    const summary = await computeGroupPairwiseBalances(m.group_id, userId)
+    if (summary) summaries.push(summary)
+  }
+  return summaries
+}
+
+/** Viewer-perspective pairwise net between two members in a group (+ = other owes me). */
+export async function computeGroupPairwiseNet(
+  groupId: string,
+  meId: string,
+  otherId: string,
+): Promise<number> {
+  const summary = await computeGroupPairwiseBalances(groupId, meId)
+  if (!summary) return 0
+  return summary.entries.find((e) => e.memberUserId === otherId)?.net ?? 0
+}
+
+/**
+ * The most `from` can pay `to` in this group right now: exactly what `from` owes `to`.
+ * Returns 0 when there is no debt (you cannot pay down a debt you do not have).
+ */
+export async function owedInGroup(
+  groupId: string,
+  fromUserId: string,
+  toUserId: string,
+): Promise<number> {
+  const net = await computeGroupPairwiseNet(groupId, fromUserId, toUserId)
+  return net < 0 ? Math.round(-net * 100) / 100 : 0
 }

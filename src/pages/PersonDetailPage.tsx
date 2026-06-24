@@ -21,6 +21,7 @@ import {
   buildPersonalReconcilePlan,
   computePairwiseNetForBill,
   computePairwiseNet,
+  computePairwiseNetPersonalOnly,
   fetchRemoteProfileIntoDexie,
   findRemoteProfileIdForLinking,
   formatPairwiseSummary,
@@ -31,6 +32,7 @@ import {
   listSharedGroupsWithBalance,
   resolveProfileDisplay,
 } from '@/lib/people'
+import { computeGroupPairwiseNet } from '@/lib/settlement'
 import {
   addProfilePeerLink,
   applyGeneralCreditToSelection,
@@ -39,6 +41,7 @@ import {
   getBillWithDetails,
   linkProfileToRemote,
   removeProfilePeerLink,
+  resolveGroupMemberUserId,
   settleUpPersonalBills,
 } from '@/db/operations'
 import { ConfirmDialog } from '@/components/common/ConfirmDialog'
@@ -395,6 +398,46 @@ export function PersonDetailPage() {
     return listSharedGroupsWithBalance(userId, personId)
   }, [userId, personId])
 
+  const breakdown = useLiveQuery(async () => {
+    if (!userId || !personId) return null
+    // Personal-only pairwise (personal bills + personal settlements), per currency.
+    const personalMap = await computePairwiseNetPersonalOnly(userId, personId)
+
+    // Pairwise net with this person in every shared group (incl. 3+ member groups).
+    const memberships = await db.group_members.where('user_id').equals(userId).toArray()
+    const myGroupIds = [...new Set(memberships.filter((m) => !m.is_deleted).map((m) => m.group_id))]
+    const groupNetById = new Map<string, number>()
+    const sources: { key: string; label: string; net: number; currency: string }[] = []
+
+    for (const [currency, net] of personalMap) {
+      if (Math.abs(net) > 0.005) {
+        sources.push({ key: `personal-${currency}`, label: 'Personal', net, currency })
+      }
+    }
+
+    for (const gid of myGroupIds) {
+      const group = await db.groups.get(gid)
+      if (!group || group.is_deleted) continue
+      // Is the person actually in this group? Resolve to the group's roster id.
+      const rosterPersonId = await resolveGroupMemberUserId(gid, personId)
+      const member = await db.group_members
+        .where('[group_id+user_id]')
+        .equals([gid, rosterPersonId])
+        .first()
+      if (!member) continue // not a shared group with this person
+      const net = await computeGroupPairwiseNet(gid, userId, rosterPersonId)
+      groupNetById.set(gid, net)
+      if (Math.abs(net) > 0.005) {
+        sources.push({ key: `group-${gid}`, label: group.name, net, currency: group.currency })
+      }
+    }
+
+    const overall = new Map<string, number>()
+    for (const s of sources) overall.set(s.currency, (overall.get(s.currency) ?? 0) + s.net)
+
+    return { sources, overall, groupNetById }
+  }, [userId, personId])
+
   const settlements = useLiveQuery(async () => {
     if (!userId || !personId) return []
     return listPairwiseSettlementsBetween(userId, personId)
@@ -475,9 +518,9 @@ export function PersonDetailPage() {
   }, [userId, personId])
 
   const summary = useMemo(() => {
-    if (!netByCurrency) return null
-    return formatPairwiseSummary(netByCurrency)
-  }, [netByCurrency])
+    if (!breakdown) return null
+    return formatPairwiseSummary(breakdown.overall)
+  }, [breakdown])
 
   const personalBills = useMemo(
     () => (bills ?? []).filter((b) => !b.group_id),
@@ -1013,6 +1056,27 @@ export function PersonDetailPage() {
             {summary.lines.length > 0 ? summary.lines.join(' · ') : summary.primaryLabel}
           </p>
         )}
+        {breakdown && breakdown.sources.length > 0 && (
+          <div className="mt-4 rounded-2xl border border-stone-200 bg-stone-50/60 p-4">
+            <p className="text-xs font-medium uppercase tracking-wide text-stone-400">Where this stands</p>
+            <ul className="mt-2 space-y-1.5">
+              {breakdown.sources.map((s) => (
+                <li key={s.key} className="flex items-center justify-between text-sm">
+                  <span className="text-stone-600">{s.label}</span>
+                  <span
+                    className={cn(
+                      'font-medium tabular-nums',
+                      s.net > 0 ? 'text-emerald-600' : 'text-amber-600',
+                    )}
+                  >
+                    {s.net > 0 ? 'owes you ' : 'you owe '}
+                    {formatCurrency(Math.abs(s.net), s.currency)}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
         <p className="mt-2 text-xs text-stone-500">
           Totals include bills where one of you paid or the other paid (not when a third person paid for
           both). All recorded payments with this person are included.
@@ -1270,7 +1334,8 @@ export function PersonDetailPage() {
             ) : (
               <ul className="mt-3 space-y-2">
                 {sharedGroups.map((g) => {
-                  const settled = Math.abs(g.theirNet) < 0.005
+                  const net = breakdown?.groupNetById.get(g.groupId) ?? 0
+                  const settled = Math.abs(net) < 0.005
                   return (
                     <li key={g.groupId}>
                       <Link
@@ -1282,15 +1347,13 @@ export function PersonDetailPage() {
                           <p className="mt-0.5 text-xs text-stone-500">
                             {settled ? (
                               <span className="text-stone-400">Even in this group</span>
-                            ) : g.theirNet > 0 ? (
+                            ) : net > 0 ? (
                               <span className="font-medium text-emerald-700">
-                                {resolvedDisplayName} gets {formatCurrency(g.theirNet, g.currency)} in this
-                                group
+                                {resolvedDisplayName} owes you {formatCurrency(net, g.currency)} in this group
                               </span>
                             ) : (
                               <span className="font-medium text-amber-700">
-                                {resolvedDisplayName} needs to pay{' '}
-                                {formatCurrency(Math.abs(g.theirNet), g.currency)} in this group
+                                You owe {resolvedDisplayName} {formatCurrency(Math.abs(net), g.currency)} in this group
                               </span>
                             )}
                           </p>
@@ -1300,17 +1363,15 @@ export function PersonDetailPage() {
                             <span
                               className={cn(
                                 'rounded-full px-2 py-0.5 text-[0.65rem] font-semibold uppercase tracking-wide',
-                                g.theirNet > 0
-                                  ? 'bg-emerald-100 text-emerald-800'
-                                  : 'bg-amber-100 text-amber-800',
+                                net > 0 ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-800',
                               )}
                               title={
-                                g.theirNet > 0
-                                  ? 'On net, the group should pay them this much'
-                                  : 'On net, they should pay into the group this much'
+                                net > 0
+                                  ? 'On net, they owe you this much in this group'
+                                  : 'On net, you owe them this much in this group'
                               }
                             >
-                              {g.theirNet > 0 ? 'Gets' : 'Needs to pay'}
+                              {net > 0 ? 'Owes you' : 'You owe'}
                             </span>
                           )}
                           <ChevronRight className="size-4 text-stone-400" />
@@ -1322,7 +1383,7 @@ export function PersonDetailPage() {
               </ul>
             )}
             <p className="mt-3 text-xs text-stone-400">
-              Their net in that group from bills and settlements—not only your balance with them.
+              Your pairwise balance with this person in each group, from bills and settlements.
             </p>
           </>
         )}

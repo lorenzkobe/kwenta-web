@@ -5,7 +5,7 @@ import { useCurrentUser } from '@/hooks/useCurrentUser'
 import { addExistingGroupMember, createGroup } from '@/db/operations'
 import { useLiveQuery } from 'dexie-react-hooks'
 import { db } from '@/db/db'
-import { computeAllGroupBalances, type GroupBalanceSummary } from '@/lib/settlement'
+import { computeAllGroupPairwiseBalances, type GroupPairwiseSummary } from '@/lib/settlement'
 import { listCanonicalRelatedProfileIds, resolveProfileDisplay } from '@/lib/people'
 import { formatCurrency, cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
@@ -16,12 +16,20 @@ import { MemberMultiPicker } from '@/components/common/MemberMultiPicker'
 type GroupFilter = 'all' | 'has_balance' | 'balanced'
 type GroupSort = 'name_asc' | 'name_desc' | 'updated_desc' | 'updated_asc'
 
-function myBalanceLine(summary: GroupBalanceSummary) {
+function myBalanceLine(summary: GroupPairwiseSummary) {
   const { totalToReceive, totalToPay, currency } = summary
-  if (totalToReceive < 0.01 && totalToPay < 0.01) {
+  const hasReceive = totalToReceive >= 0.01
+  const hasPay = totalToPay >= 0.01
+  if (!hasReceive && !hasPay) {
     return { text: 'Balanced', className: 'text-stone-500' }
   }
-  if (totalToReceive >= 0.01) {
+  if (hasReceive && hasPay) {
+    return {
+      text: `Owed ${formatCurrency(totalToReceive, currency)} · You owe ${formatCurrency(totalToPay, currency)}`,
+      className: 'text-stone-700',
+    }
+  }
+  if (hasReceive) {
     return {
       text: `Receive ${formatCurrency(totalToReceive, currency)}`,
       className: 'text-emerald-600',
@@ -67,14 +75,14 @@ export function GroupsPage() {
 
   const groupsWithBalances = useLiveQuery(async () => {
     if (!userId) return []
-    const summaries = await computeAllGroupBalances(userId)
+    const summaries = await computeAllGroupPairwiseBalances(userId)
     const rows: Array<{
       id: string
       name: string
       currency: string
       memberCount: number
       updated_at: string
-      summary: GroupBalanceSummary
+      summary: GroupPairwiseSummary
     }> = []
     for (const s of summaries) {
       const g = await db.groups.get(s.groupId)

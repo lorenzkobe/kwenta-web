@@ -2,8 +2,12 @@ import { beforeEach, describe, expect, it } from 'vitest'
 import { db } from '@/db/db'
 import {
   computeAllGroupBalances,
+  computeAllGroupPairwiseBalances,
   computeGroupBalances,
+  computeGroupPairwiseBalances,
+  computeGroupPairwiseNet,
   listSettlementHistoryForBill,
+  owedInGroup,
 } from '@/lib/settlement'
 import {
   makeBill,
@@ -77,7 +81,6 @@ describe('computeGroupBalances', () => {
     const byId = Object.fromEntries(summary!.balances.map((b) => [b.userId, b.amount]))
     expect(byId.A).toBe(0)
     expect(byId.B).toBe(0)
-    expect(summary!.suggestions).toEqual([])
   })
 
   it('ignores unsettled settlements', async () => {
@@ -95,18 +98,6 @@ describe('computeGroupBalances', () => {
     const summary = await computeGroupBalances('G', 'A')
     const byId = Object.fromEntries(summary!.balances.map((b) => [b.userId, b.amount]))
     expect(byId.A).toBe(50)
-  })
-
-  it('produces a settlement suggestion from payer to receiver', async () => {
-    await seedGroupWithTwoMembers()
-    await seedSimpleBill({ groupId: 'G', paidBy: 'A', shares: { A: 50, B: 50 } })
-    const summary = await computeGroupBalances('G', 'A')
-    expect(summary!.suggestions).toHaveLength(1)
-    expect(summary!.suggestions[0]).toMatchObject({
-      fromUserId: 'B',
-      toUserId: 'A',
-      amount: 50,
-    })
   })
 
   it('skips bills whose currency differs from the group', async () => {
@@ -158,13 +149,8 @@ describe('computeGroupBalances', () => {
       [...s!.balances]
         .map((b) => ({ userId: b.userId, amount: b.amount }))
         .sort((a, b) => a.userId.localeCompare(b.userId))
-    const suggestionValues = (s: typeof ownerView) =>
-      s!.suggestions
-        .map((x) => ({ fromUserId: x.fromUserId, toUserId: x.toUserId, amount: x.amount }))
-        .sort((a, b) => a.fromUserId.localeCompare(b.fromUserId))
 
     expect(balanceValues(ownerView)).toEqual(balanceValues(otherView))
-    expect(suggestionValues(ownerView)).toEqual(suggestionValues(otherView))
   })
 
   describe('two-device convergence (canonical ids)', () => {
@@ -191,7 +177,7 @@ describe('computeGroupBalances', () => {
       ])
     }
 
-    it('both members compute identical balances + suggestions when ids are canonical', async () => {
+    it('both members compute identical balances when ids are canonical', async () => {
       await seedCanonical()
       const asMe = await computeGroupBalances('G', 'ME')
       const asSam = await computeGroupBalances('G', 'SAM')
@@ -199,11 +185,6 @@ describe('computeGroupBalances', () => {
       const norm = (s: NonNullable<typeof asMe>) =>
         [...s.balances].sort((a, b) => a.userId.localeCompare(b.userId)).map((b) => [b.userId, b.amount])
       expect(norm(asMe!)).toEqual(norm(asSam!))
-      // Same single suggestion: SAM pays ME 50.
-      expect(asMe!.suggestions).toEqual(asSam!.suggestions)
-      expect(asMe!.suggestions).toEqual([
-        expect.objectContaining({ fromUserId: 'SAM', toUserId: 'ME', amount: 50 }),
-      ])
     })
 
     it('a leaked local id (pre-fix) produces a phantom balance entry — the bug canonicalization removes', async () => {
@@ -218,30 +199,6 @@ describe('computeGroupBalances', () => {
     })
   })
 
-  it('optimizes a three-way imbalance into minimal transfers', async () => {
-    const group = makeGroup({ id: 'G', created_by: 'A', currency: 'PHP' })
-    await db.groups.add(group)
-    await db.profiles.bulkAdd([
-      makeProfile({ id: 'A', display_name: 'Alice' }),
-      makeProfile({ id: 'B', display_name: 'Bob' }),
-      makeProfile({ id: 'C', display_name: 'Cara' }),
-    ])
-    await db.group_members.bulkAdd([
-      makeMember({ group_id: 'G', user_id: 'A' }),
-      makeMember({ group_id: 'G', user_id: 'B' }),
-      makeMember({ group_id: 'G', user_id: 'C' }),
-    ])
-    // Alice paid 90, split three ways: B and C each owe 30.
-    await seedSimpleBill({ groupId: 'G', paidBy: 'A', shares: { A: 30, B: 30, C: 30 } })
-    const summary = await computeGroupBalances('G', 'A')
-    expect(summary!.suggestions).toHaveLength(2)
-    for (const s of summary!.suggestions) {
-      expect(s.toUserId).toBe('A')
-      expect(s.amount).toBe(30)
-    }
-    // Both payers bundle under no single payer; grouped by payer => 2 bundles.
-    expect(summary!.groupedSuggestions).toHaveLength(2)
-  })
 })
 
 describe('computeAllGroupBalances', () => {
@@ -339,5 +296,155 @@ describe('listSettlementHistoryForBill', () => {
     expect(history[0].fromName).toBe('Bob')
     expect(history[0].toName).toBe('Alice')
     expect(history[0].recipients[0].toName).toBe('Alice')
+  })
+})
+
+describe('computeGroupPairwiseBalances', () => {
+  async function seedGroup3(creator = 'A') {
+    await db.groups.add(makeGroup({ id: 'G', created_by: creator }))
+    await db.group_members.bulkAdd([
+      makeMember({ group_id: 'G', user_id: 'A', display_name: 'Alice' }),
+      makeMember({ group_id: 'G', user_id: 'B', display_name: 'Bob' }),
+      makeMember({ group_id: 'G', user_id: 'C', display_name: 'Cara' }),
+    ])
+  }
+
+  it('shows each member the viewer-perspective pairwise net', async () => {
+    await seedGroup3()
+    // Alice paid 90, split 30/30/30 → Bob owes Alice 30, Cara owes Alice 30.
+    await seedSimpleBill({ groupId: 'G', paidBy: 'A', shares: { A: 30, B: 30, C: 30 } })
+
+    const summary = await computeGroupPairwiseBalances('G', 'A')
+    expect(summary).not.toBeNull()
+    const byId = Object.fromEntries(summary!.entries.map((e) => [e.memberUserId, e.net]))
+    expect(byId.B).toBe(30)
+    expect(byId.C).toBe(30)
+    expect(summary!.totalToReceive).toBe(60)
+    expect(summary!.totalToPay).toBe(0)
+    // The viewer never appears in their own entries.
+    expect(summary!.entries.some((e) => e.memberUserId === 'A')).toBe(false)
+  })
+
+  it('is symmetric: Bob sees he owes Alice', async () => {
+    await seedGroup3()
+    await seedSimpleBill({ groupId: 'G', paidBy: 'A', shares: { A: 30, B: 30, C: 30 } })
+
+    const summary = await computeGroupPairwiseBalances('G', 'B')
+    const byId = Object.fromEntries(summary!.entries.map((e) => [e.memberUserId, e.net]))
+    expect(byId.A).toBe(-30) // Bob owes Alice
+    expect(byId.C).toBe(0) // Bob and Cara never transacted
+    expect(summary!.totalToPay).toBe(30)
+    expect(summary!.totalToReceive).toBe(0)
+  })
+
+  it('applies settled payments to the pairwise net', async () => {
+    await seedGroup3()
+    await seedSimpleBill({ groupId: 'G', paidBy: 'A', shares: { A: 30, B: 30, C: 30 } })
+    // Bob pays Alice the 30 he owes.
+    await db.settlements.add(
+      makeSettlement({ group_id: 'G', from_user_id: 'B', to_user_id: 'A', amount: 30 }),
+    )
+    const summary = await computeGroupPairwiseBalances('G', 'A')
+    const byId = Object.fromEntries(summary!.entries.map((e) => [e.memberUserId, e.net]))
+    expect(byId.B).toBe(0)
+    expect(byId.C).toBe(30)
+    expect(summary!.totalToReceive).toBe(30)
+  })
+
+  it('resolves names from the roster, never "Unknown", incl. removed members', async () => {
+    await seedGroup3()
+    await seedSimpleBill({ groupId: 'G', paidBy: 'A', shares: { A: 30, B: 30, C: 30 } })
+    // Cara is removed (soft-deleted) but still appears in the historical bill.
+    const cara = await db.group_members.where('[group_id+user_id]').equals(['G', 'C']).first()
+    await db.group_members.update(cara!.id, { is_deleted: true })
+
+    const summary = await computeGroupPairwiseBalances('G', 'A')
+    const cEntry = summary!.entries.find((e) => e.memberUserId === 'C')
+    expect(cEntry?.displayName).toBe('Cara')
+    expect(summary!.entries.some((e) => e.displayName === 'Unknown')).toBe(false)
+  })
+})
+
+describe('computeGroupPairwiseNet / owedInGroup', () => {
+  async function seed() {
+    await db.groups.add(makeGroup({ id: 'G', created_by: 'A' }))
+    await db.group_members.bulkAdd([
+      makeMember({ group_id: 'G', user_id: 'A', display_name: 'Alice' }),
+      makeMember({ group_id: 'G', user_id: 'B', display_name: 'Bob' }),
+    ])
+    // Alice paid 100, split 50/50 → Bob owes Alice 50.
+    await seedSimpleBill({ groupId: 'G', paidBy: 'A', shares: { A: 50, B: 50 } })
+  }
+
+  it('returns the viewer-perspective net', async () => {
+    await seed()
+    expect(await computeGroupPairwiseNet('G', 'A', 'B')).toBe(50) // Bob owes Alice
+    expect(await computeGroupPairwiseNet('G', 'B', 'A')).toBe(-50) // Bob owes Alice
+  })
+
+  it('owedInGroup is what the payer owes, else 0', async () => {
+    await seed()
+    expect(await owedInGroup('G', 'B', 'A')).toBe(50) // Bob owes Alice 50
+    expect(await owedInGroup('G', 'A', 'B')).toBe(0) // Alice owes Bob nothing
+  })
+})
+
+describe('computeAllGroupPairwiseBalances', () => {
+  it('returns BOTH nonzero totalToReceive and totalToPay when viewer owes one member and is owed by another', async () => {
+    // Seed a 3-member group: Alice (viewer), Bob, Cara.
+    // Bill 1: Bob paid 60, only Alice is split (Alice=60) → Alice owes Bob 60.
+    // Bill 2: Alice paid 30, only Cara is split (Cara=30) → Cara owes Alice 30.
+    // Result for ALICE: totalToReceive=30 (from Cara) AND totalToPay=60 (to Bob) — BOTH nonzero.
+    // This is exactly the case the single-net model (computeAllGroupBalances) got wrong — it collapses
+    // both directions into one net scalar per group and can only show one nonzero total.
+    await db.profiles.bulkAdd([
+      makeProfile({ id: 'ALICE', display_name: 'Alice' }),
+      makeProfile({ id: 'BOB', display_name: 'Bob' }),
+      makeProfile({ id: 'CARA', display_name: 'Cara' }),
+    ])
+    await db.groups.add(makeGroup({ id: 'GG', created_by: 'ALICE' }))
+    await db.group_members.bulkAdd([
+      makeMember({ group_id: 'GG', user_id: 'ALICE', display_name: 'Alice' }),
+      makeMember({ group_id: 'GG', user_id: 'BOB', display_name: 'Bob' }),
+      makeMember({ group_id: 'GG', user_id: 'CARA', display_name: 'Cara' }),
+    ])
+    // Bill 1: Bob paid 60; only Alice is on the split — Alice owes Bob 60.
+    await seedSimpleBill({ groupId: 'GG', paidBy: 'BOB', shares: { ALICE: 60 } })
+    // Bill 2: Alice paid 30; only Cara is on the split — Cara owes Alice 30.
+    await seedSimpleBill({ groupId: 'GG', paidBy: 'ALICE', shares: { CARA: 30 } })
+
+    const summaries = await computeAllGroupPairwiseBalances('ALICE')
+    expect(summaries).toHaveLength(1)
+    const s = summaries[0]
+    expect(s.groupId).toBe('GG')
+    // Alice is owed by Cara (30) — totalToReceive must be nonzero.
+    expect(s.totalToReceive).toBeGreaterThan(0.005)
+    // Alice owes Bob (60) — totalToPay must be nonzero.
+    expect(s.totalToPay).toBeGreaterThan(0.005)
+    expect(s.totalToReceive).toBeCloseTo(30, 2)
+    expect(s.totalToPay).toBeCloseTo(60, 2)
+  })
+
+  it('returns one summary per active membership', async () => {
+    await db.profiles.add(makeProfile({ id: 'A' }))
+    await db.groups.bulkAdd([
+      makeGroup({ id: 'G1', created_by: 'A' }),
+      makeGroup({ id: 'G2', created_by: 'A' }),
+    ])
+    await db.group_members.bulkAdd([
+      makeMember({ group_id: 'G1', user_id: 'A' }),
+      makeMember({ group_id: 'G2', user_id: 'A' }),
+    ])
+    const summaries = await computeAllGroupPairwiseBalances('A')
+    expect(summaries.map((s) => s.groupId).sort()).toEqual(['G1', 'G2'])
+  })
+
+  it('excludes groups where the membership is soft-deleted', async () => {
+    await db.profiles.add(makeProfile({ id: 'A' }))
+    await db.groups.add(makeGroup({ id: 'G1', created_by: 'A' }))
+    await db.group_members.add(
+      makeMember({ group_id: 'G1', user_id: 'A', is_deleted: true }),
+    )
+    expect(await computeAllGroupPairwiseBalances('A')).toEqual([])
   })
 })

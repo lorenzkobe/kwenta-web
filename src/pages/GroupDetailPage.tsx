@@ -1,7 +1,6 @@
 import { useState, useEffect } from 'react'
 import {
   ArrowLeft,
-  ArrowRight,
   Check,
   History,
   Loader2,
@@ -23,7 +22,6 @@ import { useLiveQuery } from 'dexie-react-hooks'
 import { db } from '@/db/db'
 import {
   addExistingGroupMember,
-  createBundledGroupSettlement,
   createSettlement,
   removeGroupMember,
   deleteGroup,
@@ -38,6 +36,8 @@ import {
 import {
   computeGroupBalances,
   type GroupBalanceSummary,
+  computeGroupPairwiseBalances,
+  type GroupPairwiseSummary,
   type SettlementHistoryItem,
 } from '@/lib/settlement'
 import { useCurrentUser } from '@/hooks/useCurrentUser'
@@ -67,6 +67,7 @@ import { GroupMemberExportCard, type GroupMemberBillEntry } from '@/components/e
 import { useGroupSettlementHistory } from '@/db/hooks'
 import { listCanonicalRelatedProfileIds, resolveProfileDisplay } from '@/lib/people'
 import { MemberMultiPicker } from '@/components/common/MemberMultiPicker'
+import { PayIntoGroupDialog } from '@/components/common/PayIntoGroupDialog'
 
 const CURRENCY_OPTIONS = [
   ['PHP', 'PHP — Philippine Peso'],
@@ -183,6 +184,7 @@ function ManageMembersDialog({
     setRemoving(memberUserId)
     try {
       await removeGroupMember(groupId, memberUserId, currentUserId)
+      toast.success('Member removed')
       onChanged()
     } catch (error) {
       toast.error(error instanceof Error ? error.message : 'Could not remove this member right now.')
@@ -552,7 +554,20 @@ function TotalSpendingDialog({
           }
         }
       }
-      const nameMap = new Map(members.map((m) => [m.userId, m.profileName]))
+      const rosterRows = await db.group_members.where('group_id').equals(groupId).toArray()
+      const nameMap = new Map<string, string>()
+      for (const m of members) nameMap.set(m.userId, m.profileName)
+      for (const r of rosterRows) {
+        if (!nameMap.has(r.user_id) && r.display_name.trim()) {
+          nameMap.set(r.user_id, r.display_name.trim())
+        }
+      }
+      for (const userId of spendingByUser.keys()) {
+        if (!nameMap.has(userId)) {
+          const profile = await db.profiles.get(userId)
+          if (profile?.display_name?.trim()) nameMap.set(userId, profile.display_name.trim())
+        }
+      }
       const sorted = [...spendingByUser.entries()]
         .map(([userId, amount]) => ({ userId, amount: Math.round(amount * 100) / 100 }))
         .filter((r) => r.amount > 0)
@@ -694,17 +709,14 @@ export function GroupDetailPage() {
   const [showAddBill, setShowAddBill] = useState(false)
   const [detailBillId, setDetailBillId] = useState<string | null>(null)
   const [editBillId, setEditBillId] = useState<string | null>(null)
-  const [balanceSummary, setBalanceSummary] = useState<GroupBalanceSummary | null>(null)
+  const [balanceSummary, setBalanceSummary] = useState<GroupPairwiseSummary | null>(null)
+  const [exportBalanceSummary, setExportBalanceSummary] = useState<GroupBalanceSummary | null>(null)
   const [dupCandidates, setDupCandidates] = useState<DuplicateIdentityCandidate[]>([])
   const [dismissedDupKeys, setDismissedDupKeys] = useState<Set<string>>(new Set())
   const [mergeTarget, setMergeTarget] = useState<DuplicateIdentityCandidate | null>(null)
   const [editingSettlement, setEditingSettlement] = useState<SettlementHistoryItem | null>(null)
-  const [recordSettlement, setRecordSettlement] = useState<{
-    fromUserId: string
-    totalAmount: number
-    fromName: string
-    recipients: { toUserId: string; toName: string; amount: number }[]
-  } | null>(null)
+  const [payIntoGroupOpen, setPayIntoGroupOpen] = useState(false)
+  const [payPerson, setPayPerson] = useState<{ memberUserId: string; name: string; owed: number } | null>(null)
   const [deleteGroupConfirmOpen, setDeleteGroupConfirmOpen] = useState(false)
   const [showTotalSpending, setShowTotalSpending] = useState(false)
   const [exportOpen, setExportOpen] = useState(false)
@@ -805,8 +817,10 @@ export function GroupDetailPage() {
 
   async function refreshBalances() {
     if (!groupId || !userId) return
-    const updated = await computeGroupBalances(groupId, userId)
+    const updated = await computeGroupPairwiseBalances(groupId, userId)
     setBalanceSummary(updated)
+    const exportUpdated = await computeGroupBalances(groupId, userId)
+    setExportBalanceSummary(exportUpdated)
   }
 
   async function refreshDupCandidates() {
@@ -875,10 +889,8 @@ export function GroupDetailPage() {
   }
 
   const balanceByUser = new Map<string, number>()
-  if (balanceSummary) {
-    for (const b of balanceSummary.balances) {
-      balanceByUser.set(b.userId, b.amount)
-    }
+  for (const e of balanceSummary?.entries ?? []) {
+    balanceByUser.set(e.memberUserId, e.net)
   }
 
   const filteredBills = billPayorFilter && bills
@@ -1007,9 +1019,32 @@ export function GroupDetailPage() {
                     </div>
                   </div>
                   <div className="flex shrink-0 items-center gap-2">
-                    <p className={cn('text-right text-sm font-semibold tabular-nums', amountClass)}>
-                      {formatCurrency(amount, group.currency)}
-                    </p>
+                    <div className="text-right">
+                      <p className={cn('text-sm font-semibold tabular-nums', amountClass)}>
+                        {formatCurrency(Math.abs(amount), group.currency)}
+                      </p>
+                      <p className="text-[0.65rem] font-medium uppercase tracking-wide text-stone-400">
+                        {amount === 0 ? 'Settled' : amount > 0 ? 'owes you' : 'you owe'}
+                      </p>
+                    </div>
+                    {!m.isCurrentUser && amount < 0 && (
+                      <Button
+                        variant="success"
+                        size="xs"
+                        className="rounded-lg"
+                        type="button"
+                        onClick={() =>
+                          setPayPerson({
+                            memberUserId: m.userId,
+                            name: m.profileName,
+                            owed: Math.abs(amount),
+                          })
+                        }
+                      >
+                        <Check className="size-3" />
+                        Pay
+                      </Button>
+                    )}
                     <Button
                       variant="ghost"
                       size="icon-xs"
@@ -1025,63 +1060,17 @@ export function GroupDetailPage() {
             })}
           </ul>
 
-          {balanceSummary && balanceSummary.groupedSuggestions.length > 0 && (
-            <div className="mt-5 border-t border-stone-100 pt-5">
-              <p className="text-xs font-medium text-stone-500">Suggested payments</p>
-              <div className="mt-2 space-y-2">
-                {balanceSummary.groupedSuggestions.map((suggestion) => {
-                  const key = `${suggestion.fromUserId}-${suggestion.recipients.map((r) => r.toUserId).join('-')}`
-                  return (
-                    <div
-                      key={key}
-                      className="flex flex-col gap-2 rounded-xl border border-stone-200 bg-white px-4 py-3 sm:flex-row sm:items-center sm:justify-between"
-                    >
-                      <div className="space-y-1 text-sm">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <span className="font-medium text-stone-800">{suggestion.fromName}</span>
-                          <ArrowRight className="size-3.5 text-stone-400" />
-                          <span className="font-medium text-stone-800">
-                            {suggestion.recipients.length === 1
-                              ? suggestion.recipients[0].toName
-                              : `${suggestion.recipients.length} people`}
-                          </span>
-                          <span className="font-semibold text-teal-800">
-                            {formatCurrency(suggestion.totalAmount, balanceSummary.currency)}
-                          </span>
-                        </div>
-                        {suggestion.recipients.length > 1 && (
-                          <div className="space-y-0.5 pl-0.5">
-                            {suggestion.recipients.map((recipient) => (
-                              <p key={recipient.toUserId} className="text-xs text-stone-500">
-                                • {recipient.toName} {formatCurrency(recipient.amount, balanceSummary.currency)}
-                              </p>
-                            ))}
-                          </div>
-                        )}
-                      </div>
-                      <Button
-                        variant="success"
-                        size="xs"
-                        className="w-full shrink-0 rounded-lg sm:w-auto"
-                        type="button"
-                        onClick={() =>
-                          setRecordSettlement({
-                            fromUserId: suggestion.fromUserId,
-                            totalAmount: suggestion.totalAmount,
-                            fromName: suggestion.fromName,
-                            recipients: suggestion.recipients,
-                          })
-                        }
-                      >
-                        <Check className="size-3" />
-                        Pay
-                      </Button>
-                    </div>
-                  )
-                })}
-              </div>
-            </div>
-          )}
+          <div className="mt-5 border-t border-stone-100 pt-5">
+            <Button
+              variant="outline"
+              size="sm"
+              type="button"
+              className="w-full rounded-xl"
+              onClick={() => setPayIntoGroupOpen(true)}
+            >
+              Pay into group
+            </Button>
+          </div>
         </div>
 
         <div className="rounded-3xl border border-stone-200 bg-white p-5 shadow-sm">
@@ -1283,61 +1272,53 @@ export function GroupDetailPage() {
         />
       )}
 
-      {recordSettlement && groupId && userId && group && (
-        <RecordSettlementDialog
-          open
-          onOpenChange={(o) => {
-            if (!o) setRecordSettlement(null)
-          }}
-          groupId={groupId}
+      {balanceSummary && userId && (
+        <PayIntoGroupDialog
+          open={payIntoGroupOpen}
+          onOpenChange={setPayIntoGroupOpen}
+          groupId={groupId!}
           currency={group.currency}
-          fromUserId={recordSettlement.fromUserId}
-          toUserId={recordSettlement.recipients[0]?.toUserId ?? recordSettlement.fromUserId}
-          defaultAmount={recordSettlement.totalAmount}
-          amountEditable
-          fromName={recordSettlement.fromName}
-          toName={
-            recordSettlement.recipients.length === 1
-              ? recordSettlement.recipients[0].toName
-              : `${recordSettlement.recipients.length} people`
-          }
+          fromUserId={userId}
           markedBy={userId}
-          helperLines={recordSettlement.recipients.map(
-            (recipient) => `${recipient.toName}: ${formatCurrency(recipient.amount, group.currency)}`,
-          )}
-          onSubmit={async ({ amount, label }) => {
-            if (recordSettlement.recipients.length <= 1) {
-              const recipient = recordSettlement.recipients[0]
-              if (!recipient) return
-              await createSettlement(
-                groupId,
-                recordSettlement.fromUserId,
-                recipient.toUserId,
-                amount,
-                group.currency,
-                userId,
-                label,
-                null,
-              )
-              return
-            }
-            const scale = amount / recordSettlement.totalAmount
-            const scaled = recordSettlement.recipients.map((r) =>
-              Math.round(r.amount * scale * 100) / 100,
-            )
-            const drift = Math.round((amount - scaled.reduce((a, b) => a + b, 0)) * 100) / 100
-            if (drift !== 0) scaled[scaled.length - 1] = Math.round((scaled[scaled.length - 1] + drift) * 100) / 100
-            await createBundledGroupSettlement({
-              groupId,
-              fromUserId: recordSettlement.fromUserId,
-              recipients: recordSettlement.recipients.map((r, i) => ({ ...r, amount: scaled[i] })),
-              currency: group.currency,
-              markedBy: userId,
-              label,
-            })
-          }}
-          confirmLabel="Record payment"
+          owed={balanceSummary.entries
+            .filter((e) => e.net < -0.005)
+            .map((e) => ({ userId: e.memberUserId, name: e.displayName, owed: Math.abs(e.net) }))}
           onRecorded={() => void refreshBalances()}
+        />
+      )}
+
+      {payPerson && userId && (
+        <RecordSettlementDialog
+          open={!!payPerson}
+          onOpenChange={(o) => !o && setPayPerson(null)}
+          groupId={groupId ?? null}
+          currency={group.currency}
+          fromUserId={userId}
+          toUserId={payPerson.memberUserId}
+          defaultAmount={payPerson.owed}
+          amountEditable
+          fromName="You"
+          toName={payPerson.name}
+          markedBy={userId}
+          title={`Pay ${payPerson.name}`}
+          helperLines={[`You owe ${payPerson.name} ${formatCurrency(payPerson.owed, group.currency)}.`]}
+          onSubmit={async ({ amount }) => {
+            await createSettlement(
+              groupId ?? null,
+              userId,
+              payPerson.memberUserId,
+              amount,
+              group.currency,
+              userId,
+              undefined,
+              null,
+              { enforceCap: true },
+            )
+          }}
+          onRecorded={() => {
+            setPayPerson(null)
+            void refreshBalances()
+          }}
         />
       )}
 
@@ -1366,7 +1347,7 @@ export function GroupDetailPage() {
         onConfirm={executeDeleteGroup}
       />
 
-      {exportOpen && balanceSummary && (
+      {exportOpen && exportBalanceSummary && balanceSummary && (
         <ExportImageDialog
           filename={makeExportFilename(group.name, 'png').replace('.png', '')}
           onExportPDF={userId ? () => generateGroupPDF(group.id, userId) : undefined}
@@ -1380,7 +1361,8 @@ export function GroupDetailPage() {
               userId: m.userId,
               profileName: m.profileName,
             }))}
-            balanceSummary={balanceSummary}
+            balanceSummary={exportBalanceSummary}
+            pairwiseSummary={balanceSummary}
             bills={(bills ?? []).map((b) => ({
               id: b.id,
               title: b.title,

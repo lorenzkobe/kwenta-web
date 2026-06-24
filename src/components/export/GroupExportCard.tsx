@@ -1,5 +1,5 @@
 import { formatCurrency } from '@/lib/utils'
-import type { GroupBalanceSummary, SettlementHistoryItem } from '@/lib/settlement'
+import type { GroupBalanceSummary, GroupPairwiseSummary, SettlementHistoryItem } from '@/lib/settlement'
 
 interface BillEntry {
   id: string
@@ -21,11 +21,12 @@ interface Props {
   currency: string
   members: MemberEntry[]
   balanceSummary: GroupBalanceSummary
+  pairwiseSummary: GroupPairwiseSummary
   bills: BillEntry[]
   payments?: SettlementHistoryItem[]
 }
 
-export function GroupExportCard({ groupName, currency, members, balanceSummary, bills, payments = [] }: Props) {
+export function GroupExportCard({ groupName, currency, members, balanceSummary, pairwiseSummary, bills, payments = [] }: Props) {
   const balanceByUser = new Map<string, number>()
   for (const b of balanceSummary.balances) {
     balanceByUser.set(b.userId, b.amount)
@@ -156,8 +157,8 @@ export function GroupExportCard({ groupName, currency, members, balanceSummary, 
         </div>
       )}
 
-      {/* Settlement suggestions */}
-      {balanceSummary.groupedSuggestions.length > 0 && (
+      {/* Your Balances */}
+      {pairwiseSummary.entries.some((e) => Math.abs(e.net) > 0.005) && (
         <div style={{ borderTop: '1px solid #1f2937', padding: '14px 20px' }}>
           <div
             style={{
@@ -169,61 +170,42 @@ export function GroupExportCard({ groupName, currency, members, balanceSummary, 
               marginBottom: 10,
             }}
           >
-            Suggested Payments
+            Your Balances
           </div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-            {balanceSummary.groupedSuggestions.map((s) => {
-              const key = `${s.fromUserId}-${s.recipients.map((r) => r.toUserId).join('-')}`
-              return (
+            {pairwiseSummary.entries
+              .filter((e) => Math.abs(e.net) > 0.005)
+              .map((e) => (
                 <div
-                  key={key}
+                  key={e.memberUserId}
                   style={{
-                    padding: '8px 10px',
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                    padding: '7px 10px',
                     backgroundColor: '#1f2937',
                     borderRadius: 8,
                   }}
                 >
-                  <div
-                    style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: 6,
-                      fontSize: 12,
-                    }}
-                  >
-                    <span style={{ color: '#d1d5db', fontWeight: 600 }}>{s.fromName}</span>
-                    <span style={{ color: '#4b5563', fontSize: 10 }}>→</span>
-                    <span style={{ color: '#d1d5db', fontWeight: 600 }}>
-                      {s.recipients.length === 1
-                        ? s.recipients[0].toName
-                        : `${s.recipients.length} people`}
+                  <span style={{ color: '#d1d5db', fontSize: 12, fontWeight: 500 }}>
+                    {e.displayName}
+                  </span>
+                  <div style={{ textAlign: 'right' }}>
+                    <span
+                      style={{
+                        color: e.net > 0 ? '#34d399' : '#fbbf24',
+                        fontSize: 12,
+                        fontWeight: 700,
+                      }}
+                    >
+                      {formatCurrency(Math.abs(e.net), currency)}
                     </span>
-                    <span style={{ marginLeft: 'auto', color: '#2dd4bf', fontWeight: 700 }}>
-                      {formatCurrency(s.totalAmount, currency)}
-                    </span>
-                  </div>
-                  {s.recipients.length > 1 && (
-                    <div style={{ marginTop: 4, display: 'flex', flexDirection: 'column', gap: 2 }}>
-                      {s.recipients.map((r) => (
-                        <div
-                          key={r.toUserId}
-                          style={{
-                            display: 'flex',
-                            justifyContent: 'space-between',
-                            paddingLeft: 8,
-                          }}
-                        >
-                          <span style={{ color: '#6b7280', fontSize: 11 }}>· {r.toName}</span>
-                          <span style={{ color: '#9ca3af', fontSize: 11 }}>
-                            {formatCurrency(r.amount, currency)}
-                          </span>
-                        </div>
-                      ))}
+                    <div style={{ color: '#6b7280', fontSize: 10 }}>
+                      {e.net > 0 ? 'owes you' : 'you owe'}
                     </div>
-                  )}
+                  </div>
                 </div>
-              )
-            })}
+              ))}
           </div>
         </div>
       )}

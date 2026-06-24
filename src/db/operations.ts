@@ -21,6 +21,7 @@ import {
   resolveRecipientProfileIdForNotify,
 } from '@/lib/kwenta-notifications'
 import { computeSplits, type SplitInput } from '@/lib/splits'
+import { computeGroupPairwiseBalances, owedInGroup } from '@/lib/settlement'
 import {
   computePairwiseNetForBill,
   expandProfileIdsForSplitMatching,
@@ -532,6 +533,12 @@ export async function addGroupMember(
   displayName: string,
   addedBy: string,
 ): Promise<string> {
+  const targetGroup = await db.groups.get(groupId)
+  if (!targetGroup || targetGroup.is_deleted) throw new Error('Group not found')
+  if (targetGroup.created_by !== addedBy) {
+    throw new Error('Only the group creator can add members.')
+  }
+
   const trimmed = displayName.trim()
   const normalized = trimmed.toLowerCase()
 
@@ -704,6 +711,12 @@ export async function addExistingGroupMember(
   memberUserId: string,
   addedBy: string,
 ): Promise<void> {
+  const targetGroup = await db.groups.get(groupId)
+  if (!targetGroup || targetGroup.is_deleted) throw new Error('Group not found')
+  if (targetGroup.created_by !== addedBy) {
+    throw new Error('Only the group creator can add members.')
+  }
+
   const p = await db.profiles.get(memberUserId)
   if (!p || p.is_deleted) return
 
@@ -1007,72 +1020,51 @@ export async function removeGroupMember(
   groupId: string,
   memberUserId: string,
   removedBy: string,
-  options?: { suppressSync?: boolean },
+  options?: { suppressSync?: boolean; force?: boolean },
 ): Promise<void> {
+  const group = await db.groups.get(groupId)
+  if (!group || group.is_deleted) return
+  if (!options?.force && group.created_by !== removedBy) {
+    throw new Error('Only the group creator can remove members.')
+  }
+
+  const allMembers = await db.group_members.where('group_id').equals(groupId).toArray()
+  const membership = allMembers.find((m) => m.user_id === memberUserId && !m.is_deleted)
+  if (!membership) return
+
+  // Block removal unless fully settled (owes no one and is owed by no one).
+  if (!options?.force) {
+    const summary = await computeGroupPairwiseBalances(groupId, memberUserId)
+    if (summary && (summary.totalToReceive > 0.005 || summary.totalToPay > 0.005)) {
+      throw new Error(
+        'This member still has an outstanding balance. Settle up before removing them.',
+      )
+    }
+  }
+
+  const profile = await db.profiles.get(memberUserId)
+  const displayName = profile?.display_name ?? membership.display_name
   const timestamp = now()
 
-  await db.transaction(
-    'rw',
-    [db.profiles, db.group_members, db.bills, db.bill_items, db.item_splits, db.activity_log],
-    async () => {
-      // Soft-delete the membership record
-      const allMembers = await db.group_members.where('group_id').equals(groupId).toArray()
-      const membership = allMembers.find((m) => m.user_id === memberUserId && !m.is_deleted)
-      if (!membership) return
+  // Soft-delete the membership ONLY. Past bills/splits are preserved (no redistribution),
+  // so historical balances and names stay intact.
+  await db.transaction('rw', [db.group_members, db.activity_log], async () => {
+    await db.group_members.update(membership.id, {
+      is_deleted: true,
+      updated_at: timestamp,
+      synced_at: null,
+    })
+    await db.activity_log.add({
+      ...syncFields(),
+      group_id: groupId,
+      user_id: removedBy,
+      action: 'deleted',
+      entity_type: 'group',
+      entity_id: membership.id,
+      description: `Removed "${displayName}" from group`,
+    })
+  })
 
-      const profile = await db.profiles.get(memberUserId)
-      const displayName = profile?.display_name ?? membership.display_name
-
-      await db.group_members.update(membership.id, { is_deleted: true, updated_at: timestamp })
-
-      // Remove the member's splits from all bills in this group and recompute equal splits
-      const bills = await db.bills.where('group_id').equals(groupId).toArray()
-      const activeBills = bills.filter((b) => !b.is_deleted)
-
-      for (const bill of activeBills) {
-        const items = await db.bill_items.where('bill_id').equals(bill.id).toArray()
-        const activeItems = items.filter((i) => !i.is_deleted)
-
-        for (const item of activeItems) {
-          const splits = await db.item_splits.where('item_id').equals(item.id).toArray()
-          const activeSplits = splits.filter((s) => !s.is_deleted)
-          const memberSplit = activeSplits.find((s) => s.user_id === memberUserId)
-          if (!memberSplit) continue
-
-          await db.item_splits.update(memberSplit.id, {
-            is_deleted: true,
-            updated_at: timestamp,
-          })
-
-          // For equal splits: redistribute amount evenly across remaining members.
-          // Use floor-to-cent + remainder-to-first so the splits sum to item.amount
-          // exactly (matches computeEqual in splits.ts; raw division loses/gains cents).
-          const remaining = activeSplits.filter((s) => s.user_id !== memberUserId)
-          if (memberSplit.split_type === 'equal' && remaining.length > 0) {
-            const base = Math.floor((item.amount / remaining.length) * 100) / 100
-            const cents = Math.round((item.amount - base * remaining.length) * 100) / 100
-            for (let i = 0; i < remaining.length; i++) {
-              await db.item_splits.update(remaining[i].id, {
-                computed_amount: i === 0 ? base + cents : base,
-                updated_at: timestamp,
-                synced_at: null,
-              })
-            }
-          }
-        }
-      }
-
-      await db.activity_log.add({
-        ...syncFields(),
-        group_id: groupId,
-        user_id: removedBy,
-        action: 'deleted',
-        entity_type: 'group',
-        entity_id: membership.id,
-        description: `Removed "${displayName}" from group`,
-      })
-    },
-  )
   if (!options?.suppressSync) {
     await notifySyncAfterMutation({
       actorUserId: removedBy,
@@ -1175,7 +1167,7 @@ export async function deletePerson(personId: string, actorUserId: string): Promi
   const groupIds = [...new Set(memberships.filter((m) => !m.is_deleted).map((m) => m.group_id))]
 
   for (const gid of groupIds) {
-    await removeGroupMember(gid, personId, actorUserId, { suppressSync: true })
+    await removeGroupMember(gid, personId, actorUserId, { suppressSync: true, force: true })
   }
 
   await removePersonFromPersonalBills(personId, actorUserId, { suppressSync: true })
@@ -1307,6 +1299,7 @@ export async function createSettlement(
     suppressSync?: boolean
     syncOperation?: string
     routeHint?: string
+    enforceCap?: boolean
   },
 ): Promise<string> {
   const settlementId = generateId()
@@ -1333,6 +1326,13 @@ export async function createSettlement(
     // written, or vice versa.
     if (!union.has(resolvedFromUserId) || !union.has(resolvedToUserId)) {
       throw new Error('Both people must be on this bill')
+    }
+  }
+
+  if (options?.enforceCap && groupId) {
+    const owed = await owedInGroup(groupId, resolvedFromUserId, resolvedToUserId)
+    if (amount > owed + 0.005) {
+      throw new Error(`You can only pay up to ${owed.toFixed(2)} — that's what you owe them.`)
     }
   }
 
@@ -1414,6 +1414,7 @@ export async function createBundledGroupSettlement(params: {
   currency: string
   markedBy: string
   label?: string
+  enforceCap?: boolean
 }): Promise<{ bundleId: string; settlementIds: string[] }> {
   const cleanedRecipients = params.recipients
     .map((recipient) => ({
@@ -1448,6 +1449,15 @@ export async function createBundledGroupSettlement(params: {
     ),
   ])
   const labelTrim = (params.label ?? '').trim()
+
+  if (params.enforceCap) {
+    for (const recipient of resolvedRecipients) {
+      const owed = await owedInGroup(params.groupId, resolvedFromUserId, recipient.toUserId)
+      if (recipient.amount > owed + 0.005) {
+        throw new Error(`You can only pay up to ${owed.toFixed(2)} — that's what you owe them.`)
+      }
+    }
+  }
 
   await db.transaction('rw', [db.settlements, db.activity_log, db.profiles], async () => {
     for (let i = 0; i < resolvedRecipients.length; i++) {

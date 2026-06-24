@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { computeAllGroupBalances, type GroupBalanceSummary } from '@/lib/settlement'
+import { computeAllGroupPairwiseBalances, type GroupPairwiseSummary } from '@/lib/settlement'
 import { computePersonalNetRollup } from '@/lib/people'
 import {
   groupReceivePayMapsFromSummaries,
@@ -7,7 +7,7 @@ import {
 } from '@/lib/balance-rollups'
 
 export function useOverallBalanceRollups(userId: string | undefined) {
-  const [summaries, setSummaries] = useState<GroupBalanceSummary[]>([])
+  const [summaries, setSummaries] = useState<GroupPairwiseSummary[]>([])
   const [personalReceive, setPersonalReceive] = useState<Map<string, number>>(new Map())
   const [personalPay, setPersonalPay] = useState<Map<string, number>>(new Map())
   const [loading, setLoading] = useState(true)
@@ -30,7 +30,7 @@ export function useOverallBalanceRollups(userId: string | undefined) {
       setLoading(true)
       try {
         const [data, personal] = await Promise.all([
-          computeAllGroupBalances(userId),
+          computeAllGroupPairwiseBalances(userId),
           computePersonalNetRollup(userId),
         ])
         if (cancelled) return
