@@ -6,6 +6,7 @@ import {
   computeGroupBalances,
   computeGroupPairwiseBalances,
   computeGroupPairwiseNet,
+  computeMemberPaymentBreakdown,
   listSettlementHistoryForBill,
   owedInGroup,
 } from '@/lib/settlement'
@@ -446,5 +447,70 @@ describe('computeAllGroupPairwiseBalances', () => {
       makeMember({ group_id: 'G1', user_id: 'A', is_deleted: true }),
     )
     expect(await computeAllGroupPairwiseBalances('A')).toEqual([])
+  })
+})
+
+describe('computeMemberPaymentBreakdown', () => {
+  // Group G with members A, B, C.
+  // Bill1: B paid 90, split equally A/B/C (30 each) → A owes B 30, C owes B 30.
+  // Bill2: A paid 40, split A/C (20 each)          → C owes A 20.
+  async function seedThreeMemberGroup() {
+    await db.profiles.bulkAdd([
+      makeProfile({ id: 'A', display_name: 'Alice' }),
+      makeProfile({ id: 'B', display_name: 'Bob' }),
+      makeProfile({ id: 'C', display_name: 'Carol' }),
+    ])
+    await db.groups.add(makeGroup({ id: 'G', created_by: 'A', currency: 'PHP' }))
+    await db.group_members.bulkAdd([
+      makeMember({ group_id: 'G', user_id: 'A', display_name: 'Alice' }),
+      makeMember({ group_id: 'G', user_id: 'B', display_name: 'Bob' }),
+      makeMember({ group_id: 'G', user_id: 'C', display_name: 'Carol' }),
+    ])
+    await seedSimpleBill({ groupId: 'G', paidBy: 'B', shares: { A: 30, B: 30, C: 30 } })
+    await seedSimpleBill({ groupId: 'G', paidBy: 'A', shares: { A: 20, C: 20 } })
+  }
+
+  it('returns null for a missing group', async () => {
+    expect(await computeMemberPaymentBreakdown('nope', 'A')).toBeNull()
+  })
+
+  it("splits a member's pairwise nets into who they pay and who pays them", async () => {
+    await seedThreeMemberGroup()
+    // From Alice's perspective: she owes Bob 30 (pays), Carol owes her 20 (receives).
+    const breakdown = await computeMemberPaymentBreakdown('G', 'A')
+    expect(breakdown).not.toBeNull()
+    expect(breakdown!.memberUserId).toBe('A')
+    expect(breakdown!.displayName).toBe('Alice')
+    expect(breakdown!.currency).toBe('PHP')
+    expect(breakdown!.pays).toEqual([
+      { memberUserId: 'B', displayName: 'Bob', amount: 30 },
+    ])
+    expect(breakdown!.receives).toEqual([
+      { memberUserId: 'C', displayName: 'Carol', amount: 20 },
+    ])
+  })
+
+  it('computes the same numbers from any member perspective', async () => {
+    await seedThreeMemberGroup()
+    // Carol owes both Bob (30) and Alice (20); receives from nobody.
+    const breakdown = await computeMemberPaymentBreakdown('G', 'C')
+    expect(breakdown!.pays).toEqual([
+      { memberUserId: 'A', displayName: 'Alice', amount: 20 },
+      { memberUserId: 'B', displayName: 'Bob', amount: 30 },
+    ])
+    expect(breakdown!.receives).toEqual([])
+  })
+
+  it('excludes settled (net-zero) relationships from both lists', async () => {
+    await seedThreeMemberGroup()
+    // Alice settles her 30 debt to Bob.
+    await db.settlements.add(
+      makeSettlement({ group_id: 'G', from_user_id: 'A', to_user_id: 'B', amount: 30 }),
+    )
+    const breakdown = await computeMemberPaymentBreakdown('G', 'A')
+    expect(breakdown!.pays).toEqual([])
+    expect(breakdown!.receives).toEqual([
+      { memberUserId: 'C', displayName: 'Carol', amount: 20 },
+    ])
   })
 })

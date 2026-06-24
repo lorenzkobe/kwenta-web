@@ -1,5 +1,6 @@
 import { db } from '@/db/db'
 import type { Settlement } from '@/types'
+import { isEffectivelyZero } from '@/lib/utils'
 
 export interface BalanceEntry {
   userId: string
@@ -159,6 +160,67 @@ export async function computeGroupPairwiseBalances(
     entries,
     totalToReceive: Math.round(totalToReceive * 100) / 100,
     totalToPay: Math.round(totalToPay * 100) / 100,
+  }
+}
+
+export interface MemberPaymentParty {
+  /** The other member's canonical roster user id */
+  memberUserId: string
+  displayName: string
+  /** Always positive: the magnitude of the pending balance with this member */
+  amount: number
+}
+
+export interface MemberPaymentBreakdown {
+  /** The member whose perspective this breakdown is taken from */
+  memberUserId: string
+  displayName: string
+  currency: string
+  /** Members this member still owes (will pay), sorted by name */
+  pays: MemberPaymentParty[]
+  /** Members who still owe this member (will receive from), sorted by name */
+  receives: MemberPaymentParty[]
+}
+
+/**
+ * Resolve who a single member pays and is paid by within a group. Reparametrizes
+ * computeGroupPairwiseBalances from `memberUserId`'s perspective — the canonical synced
+ * rows make this identical to what that member sees on their own device — then splits the
+ * signed nets into positive-magnitude "pays" (net < 0) and "receives" (net > 0) lists.
+ * Settled (net ≈ 0) relationships are omitted from both.
+ */
+export async function computeMemberPaymentBreakdown(
+  groupId: string,
+  memberUserId: string,
+): Promise<MemberPaymentBreakdown | null> {
+  const summary = await computeGroupPairwiseBalances(groupId, memberUserId)
+  if (!summary) return null
+
+  const member = await db.group_members
+    .where('[group_id+user_id]')
+    .equals([groupId, memberUserId])
+    .first()
+  const displayName = member?.display_name?.trim() || 'Unknown'
+
+  const pays: MemberPaymentParty[] = []
+  const receives: MemberPaymentParty[] = []
+  for (const entry of summary.entries) {
+    if (isEffectivelyZero(entry.net)) continue
+    const party: MemberPaymentParty = {
+      memberUserId: entry.memberUserId,
+      displayName: entry.displayName,
+      amount: Math.abs(entry.net),
+    }
+    if (entry.net < 0) pays.push(party)
+    else receives.push(party)
+  }
+
+  return {
+    memberUserId,
+    displayName,
+    currency: summary.currency,
+    pays,
+    receives,
   }
 }
 

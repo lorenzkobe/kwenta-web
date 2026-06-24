@@ -68,6 +68,7 @@ import { useGroupSettlementHistory } from '@/db/hooks'
 import { listCanonicalRelatedProfileIds, resolveProfileDisplay } from '@/lib/people'
 import { MemberMultiPicker } from '@/components/common/MemberMultiPicker'
 import { PayIntoGroupDialog } from '@/components/common/PayIntoGroupDialog'
+import { MemberBalancesDialog } from '@/components/common/MemberBalancesDialog'
 
 const CURRENCY_OPTIONS = [
   ['PHP', 'PHP — Philippine Peso'],
@@ -717,6 +718,7 @@ export function GroupDetailPage() {
   const [editingSettlement, setEditingSettlement] = useState<SettlementHistoryItem | null>(null)
   const [payIntoGroupOpen, setPayIntoGroupOpen] = useState(false)
   const [payPerson, setPayPerson] = useState<{ memberUserId: string; name: string; owed: number } | null>(null)
+  const [viewMember, setViewMember] = useState<{ userId: string; name: string; isCurrentUser: boolean } | null>(null)
   const [deleteGroupConfirmOpen, setDeleteGroupConfirmOpen] = useState(false)
   const [showTotalSpending, setShowTotalSpending] = useState(false)
   const [exportOpen, setExportOpen] = useState(false)
@@ -1005,7 +1007,18 @@ export function GroupDetailPage() {
                   key={m.id}
                   className="flex items-center justify-between gap-3 rounded-xl border border-stone-200 bg-stone-100/60 px-4 py-3"
                 >
-                  <div className="flex min-w-0 items-center gap-2.5">
+                  <button
+                    type="button"
+                    className="flex min-w-0 items-center gap-2.5 rounded-lg text-left transition-colors hover:opacity-80"
+                    aria-label={`View ${m.profileName}'s balances`}
+                    onClick={() =>
+                      setViewMember({
+                        userId: m.userId,
+                        name: m.profileName,
+                        isCurrentUser: m.isCurrentUser,
+                      })
+                    }
+                  >
                     <div className="flex size-9 shrink-0 items-center justify-center rounded-full bg-teal-800/15 text-sm font-semibold text-teal-800">
                       {m.profileName.charAt(0).toUpperCase()}
                     </div>
@@ -1017,7 +1030,7 @@ export function GroupDetailPage() {
                         )}
                       </p>
                     </div>
-                  </div>
+                  </button>
                   <div className="flex shrink-0 items-center gap-2">
                     <div className="text-right">
                       <p className={cn('text-sm font-semibold tabular-nums', amountClass)}>
@@ -1286,6 +1299,14 @@ export function GroupDetailPage() {
           onRecorded={() => void refreshBalances()}
         />
       )}
+
+      <MemberBalancesDialog
+        open={viewMember !== null}
+        onOpenChange={(o) => !o && setViewMember(null)}
+        groupId={groupId!}
+        currency={group.currency}
+        member={viewMember}
+      />
 
       {payPerson && userId && (
         <RecordSettlementDialog
