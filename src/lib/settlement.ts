@@ -1,6 +1,12 @@
 import { db } from '@/db/db'
 import type { Settlement } from '@/types'
 import { isEffectivelyZero } from '@/lib/utils'
+import {
+  buildDebtGraph,
+  decomposeDebtGraph,
+  groupTransfersByPayer,
+  type SettlementLeg,
+} from '@/lib/settlement-suggestions'
 
 export interface BalanceEntry {
   userId: string
@@ -357,6 +363,120 @@ export async function computeGroupBalances(
     totalToReceive,
     totalToPay,
   }
+}
+
+export interface SuggestedPayerGroup {
+  fromUserId: string
+  fromName: string
+  total: number
+  recipients: { toUserId: string; toName: string; amount: number }[]
+  legs: SettlementLeg[]
+}
+
+export interface GroupSuggestionsSummary {
+  groupId: string
+  groupName: string
+  currency: string
+  /** One entry per physical payer; empty when the group is settled. */
+  payers: SuggestedPayerGroup[]
+}
+
+/**
+ * Whole-group settle-up suggestions. Builds the pairwise debt graph from the canonical
+ * synced rows (same source as computeGroupBalances, so every member computes identical
+ * suggestions), decomposes it into the fewest physical transfers, and resolves names with
+ * the group_members fallback. Each suggested transfer carries the real pairwise legs that
+ * back it, so recording them keeps every balance screen consistent.
+ */
+export async function computeGroupSuggestions(
+  groupId: string,
+): Promise<GroupSuggestionsSummary | null> {
+  const group = await db.groups.get(groupId)
+  if (!group || group.is_deleted) return null
+
+  const members = await db.group_members.where('group_id').equals(groupId).toArray()
+  const nameByUser = new Map<string, string>()
+  for (const m of members) {
+    if (m.display_name.trim()) nameByUser.set(m.user_id, m.display_name.trim())
+  }
+
+  const bills = (await db.bills.where('group_id').equals(groupId).toArray()).filter(
+    (b) => !b.is_deleted && (!b.currency || b.currency === group.currency),
+  )
+  const billIds = bills.map((b) => b.id)
+  const items = (
+    billIds.length > 0 ? await db.bill_items.where('bill_id').anyOf(billIds).toArray() : []
+  ).filter((i) => !i.is_deleted)
+  const itemsByBill = new Map<string, typeof items>()
+  for (const it of items) {
+    const arr = itemsByBill.get(it.bill_id) ?? []
+    arr.push(it)
+    itemsByBill.set(it.bill_id, arr)
+  }
+  const itemIds = items.map((i) => i.id)
+  const splits = (
+    itemIds.length > 0 ? await db.item_splits.where('item_id').anyOf(itemIds).toArray() : []
+  ).filter((s) => !s.is_deleted)
+  const splitsByItem = new Map<string, typeof splits>()
+  for (const sp of splits) {
+    const arr = splitsByItem.get(sp.item_id) ?? []
+    arr.push(sp)
+    splitsByItem.set(sp.item_id, arr)
+  }
+
+  // Raw directed debts: a split assigns a share the splitter owes the bill's payer.
+  const rawDebts: { from: string; to: string; amount: number }[] = []
+  for (const bill of bills) {
+    const payer = bill.paid_by
+    if (!payer) continue
+    for (const it of itemsByBill.get(bill.id) ?? []) {
+      for (const sp of splitsByItem.get(it.id) ?? []) {
+        if (sp.user_id === payer) continue
+        rawDebts.push({ from: sp.user_id, to: payer, amount: sp.computed_amount })
+      }
+    }
+  }
+
+  // Settled payments reduce the payer→recipient debt (reverse-direction debt cancels it).
+  const settlements = (await db.settlements.where('group_id').equals(groupId).toArray()).filter(
+    (s) => !s.is_deleted && s.is_settled && (!s.currency || s.currency === group.currency),
+  )
+  for (const s of settlements) {
+    rawDebts.push({ from: s.to_user_id, to: s.from_user_id, amount: s.amount })
+  }
+
+  const transfers = decomposeDebtGraph(buildDebtGraph(rawDebts))
+  const grouped = groupTransfersByPayer(transfers)
+
+  // Resolve any id missing from the roster via profiles (orphaned/stale ids).
+  const idsToName = new Set<string>()
+  for (const g of grouped) {
+    idsToName.add(g.fromUserId)
+    for (const r of g.recipients) idsToName.add(r.toUserId)
+  }
+  for (const id of idsToName) {
+    if (!nameByUser.has(id)) {
+      const profile = await db.profiles.get(id)
+      if (profile?.display_name?.trim()) nameByUser.set(id, profile.display_name.trim())
+    }
+  }
+  const nameOf = (id: string) => nameByUser.get(id) ?? 'Unknown'
+
+  const payers: SuggestedPayerGroup[] = grouped
+    .map((g) => ({
+      fromUserId: g.fromUserId,
+      fromName: nameOf(g.fromUserId),
+      total: g.total,
+      recipients: g.recipients.map((r) => ({
+        toUserId: r.toUserId,
+        toName: nameOf(r.toUserId),
+        amount: r.amount,
+      })),
+      legs: g.legs,
+    }))
+    .sort((a, b) => a.fromName.localeCompare(b.fromName))
+
+  return { groupId, groupName: group.name, currency: group.currency, payers }
 }
 
 export async function computeAllGroupBalances(

@@ -39,6 +39,9 @@ import {
   computeGroupPairwiseBalances,
   type GroupPairwiseSummary,
   type SettlementHistoryItem,
+  computeGroupSuggestions,
+  type GroupSuggestionsSummary,
+  type SuggestedPayerGroup,
 } from '@/lib/settlement'
 import { useCurrentUser } from '@/hooks/useCurrentUser'
 import { cn, formatCurrency } from '@/lib/utils'
@@ -68,6 +71,7 @@ import { useGroupSettlementHistory } from '@/db/hooks'
 import { listCanonicalRelatedProfileIds, resolveProfileDisplay } from '@/lib/people'
 import { MemberMultiPicker } from '@/components/common/MemberMultiPicker'
 import { PayIntoGroupDialog } from '@/components/common/PayIntoGroupDialog'
+import { GroupSettleUpDialog } from '@/components/common/GroupSettleUpDialog'
 import { MemberBalancesDialog } from '@/components/common/MemberBalancesDialog'
 
 const CURRENCY_OPTIONS = [
@@ -717,6 +721,8 @@ export function GroupDetailPage() {
   const [mergeTarget, setMergeTarget] = useState<DuplicateIdentityCandidate | null>(null)
   const [editingSettlement, setEditingSettlement] = useState<SettlementHistoryItem | null>(null)
   const [payIntoGroupOpen, setPayIntoGroupOpen] = useState(false)
+  const [suggestions, setSuggestions] = useState<GroupSuggestionsSummary | null>(null)
+  const [settleUpPayer, setSettleUpPayer] = useState<SuggestedPayerGroup | null>(null)
   const [payPerson, setPayPerson] = useState<{ memberUserId: string; name: string; owed: number } | null>(null)
   const [viewMember, setViewMember] = useState<{ userId: string; name: string; isCurrentUser: boolean } | null>(null)
   const [deleteGroupConfirmOpen, setDeleteGroupConfirmOpen] = useState(false)
@@ -827,6 +833,8 @@ export function GroupDetailPage() {
     setBalanceSummary(updated)
     const exportUpdated = await computeGroupBalances(groupId, userId)
     setExportBalanceSummary(exportUpdated)
+    const updatedSuggestions = await computeGroupSuggestions(groupId)
+    setSuggestions(updatedSuggestions)
   }
 
   async function refreshDupCandidates() {
@@ -1105,6 +1113,45 @@ export function GroupDetailPage() {
           </div>
         </div>
 
+        {suggestions && suggestions.payers.length > 0 && (
+          <div className="rounded-3xl border border-stone-200 bg-white p-5 shadow-sm">
+            <h2 className="text-lg font-semibold">Settle up</h2>
+            <p className="mt-1 text-xs text-stone-500">
+              Fewest payments to clear everyone in this group.
+            </p>
+            <div className="mt-4 space-y-2">
+              {suggestions.payers.map((payer) => (
+                <div
+                  key={payer.fromUserId}
+                  className="flex flex-col gap-2 rounded-xl border border-stone-200 bg-stone-100/60 px-4 py-3 sm:flex-row sm:items-center sm:justify-between"
+                >
+                  <div className="min-w-0 text-sm">
+                    <p className="font-medium text-stone-800">
+                      {payer.fromName} pays{' '}
+                      <span className="font-semibold text-teal-800">
+                        {formatCurrency(payer.total, suggestions.currency)}
+                      </span>
+                    </p>
+                    <p className="text-xs text-stone-500">
+                      {payer.recipients
+                        .map((r) => `${r.toName} ${formatCurrency(r.amount, suggestions.currency)}`)
+                        .join(', ')}
+                    </p>
+                  </div>
+                  <Button
+                    variant="success"
+                    size="xs"
+                    className="w-full shrink-0 rounded-lg sm:w-auto"
+                    onClick={() => setSettleUpPayer(payer)}
+                  >
+                    Settle
+                  </Button>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
         <div className="rounded-3xl border border-stone-200 bg-white p-5 shadow-sm">
           <div className="flex items-center gap-2">
             <ReceiptText className="size-4 text-teal-800" />
@@ -1304,6 +1351,19 @@ export function GroupDetailPage() {
             isCurrentUser: m.isCurrentUser,
           }))}
           onRecorded={() => void refreshBalances()}
+        />
+      )}
+
+      {userId && (
+        <GroupSettleUpDialog
+          open={settleUpPayer !== null}
+          onOpenChange={(open) => { if (!open) setSettleUpPayer(null) }}
+          groupId={groupId!}
+          currency={group.currency}
+          markedBy={userId}
+          payer={settleUpPayer}
+          onRecorded={() => void refreshBalances()}
+          onUsePayInto={() => { setSettleUpPayer(null); setPayIntoGroupOpen(true) }}
         />
       )}
 

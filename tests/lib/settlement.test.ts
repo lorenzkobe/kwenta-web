@@ -6,6 +6,7 @@ import {
   computeGroupBalances,
   computeGroupPairwiseBalances,
   computeGroupPairwiseNet,
+  computeGroupSuggestions,
   computeMemberPaymentBreakdown,
   listSettlementHistoryForBill,
   owedInGroup,
@@ -512,5 +513,56 @@ describe('computeMemberPaymentBreakdown', () => {
     expect(breakdown!.receives).toEqual([
       { memberUserId: 'C', displayName: 'Carol', amount: 20 },
     ])
+  })
+})
+
+describe('computeGroupSuggestions', () => {
+  it('cuts the middleman and backs each transfer with real pairwise legs', async () => {
+    // Group: Ana owes Carlo 200 (Carlo paid), Carlo owes John 100 (John paid).
+    await db.groups.add(makeGroup({ id: 'G', name: 'Trip', currency: 'PHP' }))
+    await db.group_members.bulkAdd([
+      makeMember({ group_id: 'G', user_id: 'Ana', display_name: 'Ana' }),
+      makeMember({ group_id: 'G', user_id: 'Carlo', display_name: 'Carlo' }),
+      makeMember({ group_id: 'G', user_id: 'John', display_name: 'John' }),
+    ])
+    await db.bills.bulkAdd([
+      makeBill({ id: 'B1', group_id: 'G', paid_by: 'Carlo', currency: 'PHP' }),
+      makeBill({ id: 'B2', group_id: 'G', paid_by: 'John', currency: 'PHP' }),
+    ])
+    await db.bill_items.bulkAdd([
+      makeItem({ id: 'I1', bill_id: 'B1' }),
+      makeItem({ id: 'I2', bill_id: 'B2' }),
+    ])
+    await db.item_splits.bulkAdd([
+      makeSplit({ id: 'S1', item_id: 'I1', user_id: 'Ana', computed_amount: 200 }),
+      makeSplit({ id: 'S2', item_id: 'I2', user_id: 'Carlo', computed_amount: 100 }),
+    ])
+
+    const summary = await computeGroupSuggestions('G')
+    expect(summary).not.toBeNull()
+    expect(summary!.currency).toBe('PHP')
+    expect(summary!.payers).toHaveLength(1)
+    const ana = summary!.payers[0]
+    expect(ana.fromUserId).toBe('Ana')
+    expect(ana.fromName).toBe('Ana')
+    expect(ana.total).toBe(200)
+    expect(ana.recipients.map((r) => `${r.toName}:${r.amount}`).sort()).toEqual([
+      'Carlo:100',
+      'John:100',
+    ])
+    expect(ana.legs).toEqual([
+      { fromUserId: 'Ana', toUserId: 'Carlo', amount: 200 },
+      { fromUserId: 'Carlo', toUserId: 'John', amount: 100 },
+    ])
+  })
+
+  it('returns no payers when the group is settled', async () => {
+    await db.groups.add(makeGroup({ id: 'G2', currency: 'PHP' }))
+    await db.group_members.bulkAdd([
+      makeMember({ group_id: 'G2', user_id: 'X', display_name: 'X' }),
+      makeMember({ group_id: 'G2', user_id: 'Y', display_name: 'Y' }),
+    ])
+    const summary = await computeGroupSuggestions('G2')
+    expect(summary!.payers).toEqual([])
   })
 })

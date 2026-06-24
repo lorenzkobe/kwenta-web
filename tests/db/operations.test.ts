@@ -12,10 +12,12 @@ import {
   deletePerson,
   getBillWithDetails,
   linkProfileToRemote,
+  recordDecomposedSettlement,
   removeGroupMember,
   resolveGroupMemberUserId,
   updateBill,
 } from '@/db/operations'
+import { computeGroupBalances, computeGroupPairwiseBalances } from '@/lib/settlement'
 import {
   makeBill,
   makeGroup,
@@ -794,5 +796,87 @@ describe('payment caps', () => {
         enforceCap: true,
       }),
     ).rejects.toThrow(/can only pay up to/i)
+  })
+})
+
+describe('recordDecomposedSettlement', () => {
+  async function seedChain() {
+    // Ana owes Carlo 200 (Carlo paid); Carlo owes John 100 (John paid).
+    await db.groups.add(makeGroup({ id: 'G', name: 'Trip', currency: 'PHP' }))
+    await db.group_members.bulkAdd([
+      makeMember({ group_id: 'G', user_id: 'Ana', display_name: 'Ana' }),
+      makeMember({ group_id: 'G', user_id: 'Carlo', display_name: 'Carlo' }),
+      makeMember({ group_id: 'G', user_id: 'John', display_name: 'John' }),
+    ])
+    await db.profiles.bulkAdd([
+      makeProfile({ id: 'Ana', display_name: 'Ana' }),
+      makeProfile({ id: 'Carlo', display_name: 'Carlo' }),
+      makeProfile({ id: 'John', display_name: 'John' }),
+    ])
+    await db.bills.bulkAdd([
+      makeBill({ id: 'B1', group_id: 'G', paid_by: 'Carlo', currency: 'PHP' }),
+      makeBill({ id: 'B2', group_id: 'G', paid_by: 'John', currency: 'PHP' }),
+    ])
+    await db.bill_items.bulkAdd([
+      makeItem({ id: 'I1', bill_id: 'B1' }),
+      makeItem({ id: 'I2', bill_id: 'B2' }),
+    ])
+    await db.item_splits.bulkAdd([
+      makeSplit({ id: 'S1', item_id: 'I1', user_id: 'Ana', computed_amount: 200 }),
+      makeSplit({ id: 'S2', item_id: 'I2', user_id: 'Carlo', computed_amount: 100 }),
+    ])
+  }
+
+  it('writes one bundle with a row per leg, allowing heterogeneous payers', async () => {
+    await seedChain()
+    const { bundleId, settlementIds } = await recordDecomposedSettlement({
+      groupId: 'G',
+      currency: 'PHP',
+      markedBy: 'Ana',
+      legs: [
+        { fromUserId: 'Ana', toUserId: 'Carlo', amount: 200 },
+        { fromUserId: 'Carlo', toUserId: 'John', amount: 100 },
+      ],
+    })
+    expect(settlementIds).toHaveLength(2)
+    const rows = await db.settlements.where('bundle_id').equals(bundleId).toArray()
+    expect(rows).toHaveLength(2)
+    expect(rows.every((r) => r.is_settled && r.group_id === 'G')).toBe(true)
+    const byFrom = new Map(rows.map((r) => [r.from_user_id, r]))
+    expect(byFrom.get('Ana')?.to_user_id).toBe('Carlo')
+    expect(byFrom.get('Ana')?.amount).toBe(200)
+    expect(byFrom.get('Carlo')?.to_user_id).toBe('John')
+    expect(byFrom.get('Carlo')?.amount).toBe(100)
+  })
+
+  it('settles every screen to zero after recording all suggested legs', async () => {
+    await seedChain()
+    await recordDecomposedSettlement({
+      groupId: 'G',
+      currency: 'PHP',
+      markedBy: 'Ana',
+      legs: [
+        { fromUserId: 'Ana', toUserId: 'Carlo', amount: 200 },
+        { fromUserId: 'Carlo', toUserId: 'John', amount: 100 },
+      ],
+    })
+    const net = await computeGroupBalances('G', 'Ana')
+    expect(net!.balances.every((b) => Math.abs(b.amount) < 0.005)).toBe(true)
+    for (const viewer of ['Ana', 'Carlo', 'John']) {
+      const pw = await computeGroupPairwiseBalances('G', viewer)
+      expect(pw!.entries.every((e) => Math.abs(e.net) < 0.005)).toBe(true)
+    }
+  })
+
+  it('drops sub-cent legs and throws when nothing is left', async () => {
+    await seedChain()
+    await expect(
+      recordDecomposedSettlement({
+        groupId: 'G',
+        currency: 'PHP',
+        markedBy: 'Ana',
+        legs: [{ fromUserId: 'Ana', toUserId: 'Carlo', amount: 0.004 }],
+      }),
+    ).rejects.toThrow()
   })
 })

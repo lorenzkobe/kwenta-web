@@ -22,6 +22,7 @@ import {
 } from '@/lib/kwenta-notifications'
 import { computeSplits, type SplitInput } from '@/lib/splits'
 import { computeGroupPairwiseBalances, owedInGroup } from '@/lib/settlement'
+import type { SettlementLeg } from '@/lib/settlement-suggestions'
 import {
   computePairwiseNetForBill,
   expandProfileIdsForSplitMatching,
@@ -1531,6 +1532,124 @@ export async function createBundledGroupSettlement(params: {
       groupId: params.groupId,
       recipients: resolvedRecipients.length,
       totalAmount: Math.round(resolvedRecipients.reduce((sum, recipient) => sum + recipient.amount, 0) * 100) / 100,
+      currency: params.currency,
+    },
+    routeHint: `/app/groups/${params.groupId}`,
+  })
+
+  return { bundleId, settlementIds }
+}
+
+/**
+ * Record a decomposed settle-up suggestion: a set of pairwise legs that may have different
+ * payers (e.g. Ana→Carlo and Carlo→John when Ana physically pays on Carlo's behalf), all
+ * under one bundle_id. Each leg's from/to is resolved to the canonical group roster id.
+ * `markedBy` is the signed-in user who recorded it (distinct from each leg's payer).
+ */
+export async function recordDecomposedSettlement(params: {
+  groupId: string
+  currency: string
+  legs: SettlementLeg[]
+  markedBy: string
+  label?: string
+}): Promise<{ bundleId: string; settlementIds: string[] }> {
+  const cleaned = params.legs
+    .map((leg) => ({ ...leg, amount: Math.round(leg.amount * 100) / 100 }))
+    .filter((leg) => leg.amount > 0.005 && leg.fromUserId !== leg.toUserId)
+  if (cleaned.length === 0) {
+    throw new Error('No payments to record for this settle-up.')
+  }
+
+  const group = await db.groups.get(params.groupId)
+  if (!group || group.is_deleted) throw new Error('Group not found')
+
+  const bundleId = generateId()
+  const resolved = await Promise.all(
+    cleaned.map(async (leg) => ({
+      fromUserId: await resolveGroupMemberUserId(
+        params.groupId,
+        await resolveSettlementPartyId(leg.fromUserId),
+      ),
+      toUserId: await resolveGroupMemberUserId(
+        params.groupId,
+        await resolveSettlementPartyId(leg.toUserId),
+      ),
+      amount: leg.amount,
+      settlementId: generateId(),
+    })),
+  )
+  const labelTrim = (params.label ?? '').trim()
+  const settlementIds = resolved.map((r) => r.settlementId)
+
+  await db.transaction('rw', [db.settlements, db.activity_log, db.profiles], async () => {
+    for (const r of resolved) {
+      await db.settlements.add({
+        ...syncFields({ id: r.settlementId }),
+        group_id: params.groupId,
+        bill_id: null,
+        bundle_id: bundleId,
+        from_user_id: r.fromUserId,
+        to_user_id: r.toUserId,
+        amount: r.amount,
+        currency: params.currency,
+        label: labelTrim,
+        is_settled: true,
+      })
+    }
+
+    const fmt = (amt: number) =>
+      new Intl.NumberFormat('en-PH', {
+        style: 'currency',
+        currency: params.currency,
+        minimumFractionDigits: 0,
+      }).format(amt)
+    const parts: string[] = []
+    for (const r of resolved) {
+      const from = await db.profiles.get(r.fromUserId)
+      const to = await db.profiles.get(r.toUserId)
+      parts.push(`${from?.display_name ?? 'Someone'} -> ${to?.display_name ?? 'Someone'} ${fmt(r.amount)}`)
+    }
+    const labelSuffix = labelTrim ? ` · ${labelTrim}` : ''
+    await db.activity_log.add({
+      ...syncFields(),
+      group_id: params.groupId,
+      user_id: params.markedBy,
+      action: 'settled',
+      entity_type: 'settlement',
+      entity_id: bundleId,
+      description: `Settle up: ${parts.join(', ')}${labelSuffix}`,
+    })
+  })
+
+  const actor = await db.profiles.get(params.markedBy)
+  for (const r of resolved) {
+    const recipientId = await resolveRecipientProfileIdForNotify(r.toUserId)
+    if (!recipientId || recipientId === params.markedBy) continue
+    const from = await db.profiles.get(r.fromUserId)
+    const to = await db.profiles.get(r.toUserId)
+    void notifyPaymentRecorded({
+      actorId: params.markedBy,
+      actorName: actor?.display_name?.trim() || 'Someone',
+      recipientId,
+      amount: r.amount,
+      currency: params.currency,
+      fromName: from?.display_name?.trim() || 'Someone',
+      toName: to?.display_name?.trim() || 'Someone',
+      groupId: params.groupId,
+      groupName: group.name,
+      settlementId: r.settlementId,
+    })
+  }
+
+  await notifySyncAfterMutation({
+    actorUserId: params.markedBy,
+    operation: 'create_settlement_bundle',
+    entityType: 'settlement',
+    entityId: bundleId,
+    payload: {
+      groupId: params.groupId,
+      recipients: resolved.length,
+      totalAmount: Math.round(resolved.reduce((s, r) => s + r.amount, 0) * 100) / 100,
       currency: params.currency,
     },
     routeHint: `/app/groups/${params.groupId}`,
