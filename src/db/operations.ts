@@ -180,6 +180,26 @@ export async function createBill(input: CreateBillInput): Promise<string> {
     for (const uid of distinctSplitIds) {
       resolvedSplitUserId.set(uid, await resolveGroupMemberUserId(groupId, uid))
     }
+
+    // Restrict group-bill participants to roster members. The add-bill UI only
+    // offers current members, so this never fires for UI-created bills; it is a
+    // backstop that keeps a non-member (orphan local-contact) id out of
+    // item_splits.user_id / bills.paid_by. Such an id is invisible to every
+    // other member (pull-bundle privacy boundary) and renders as "Unknown" in
+    // balances and settle-up. Adding someone new must go through the group roster.
+    const memberIds = new Set(
+      (await db.group_members.where('group_id').equals(groupId).toArray())
+        .filter((m) => !m.is_deleted)
+        .map((m) => m.user_id),
+    )
+    const offenders = [...new Set([resolvedPaidBy, ...resolvedSplitUserId.values()])].filter(
+      (id) => !memberIds.has(id),
+    )
+    if (offenders.length > 0) {
+      throw new Error(
+        `Cannot create a group bill with non-member participant(s): ${offenders.join(', ')}. Add them to the group first.`,
+      )
+    }
   }
 
   const totalAmount = input.items.reduce((sum, item) => {

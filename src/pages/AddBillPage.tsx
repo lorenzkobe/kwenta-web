@@ -471,6 +471,11 @@ export function AddBillPage() {
   }
 
   async function submitAddPerson() {
+    // Group bills split only among roster members (the "add a person" affordance
+    // is hidden for groups). Guard here too so a new local contact can never be
+    // minted into a group bill's splits, where it would show as "Unknown" for
+    // every other member. New people must be added to the group roster first.
+    if (groupId) return
     if (!userId || !addPersonName.trim()) return
     setAddPersonBusy(true)
     try {

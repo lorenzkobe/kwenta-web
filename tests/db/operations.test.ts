@@ -208,6 +208,65 @@ describe('updateBill', () => {
     expect((await db.bills.get(billId))?.title).toBe('Mine')
   })
 
+  it('rejects a group bill whose split references a non-roster member', async () => {
+    await db.groups.add(makeGroup({ id: 'G', created_by: 'ME' }))
+    await db.group_members.bulkAdd([
+      makeMember({ group_id: 'G', user_id: 'ME' }),
+      makeMember({ group_id: 'G', user_id: 'FR' }),
+    ])
+    await db.profiles.bulkAdd([
+      makeProfile({ id: 'ME' }),
+      makeProfile({ id: 'FR' }),
+      // Local contact owned by ME, never added to the group and not linked: the
+      // exact orphan-id case that renders as "Unknown" for other members.
+      makeProfile({ id: 'ORPHAN', is_local: true, owner_id: 'ME' }),
+    ])
+
+    await expect(
+      createBill({
+        title: 'B',
+        currency: 'PHP',
+        groupId: 'G',
+        createdBy: 'ME',
+        note: '',
+        items: [
+          {
+            name: 'I',
+            amount: 100,
+            splits: [
+              { userId: 'ME', splitType: 'equal', splitValue: 1 },
+              { userId: 'ORPHAN', splitType: 'equal', splitValue: 1 },
+            ],
+          },
+        ],
+      }),
+    ).rejects.toThrow(/member/i)
+
+    // The guard runs before the write transaction: nothing is persisted.
+    expect(await db.bills.where('group_id').equals('G').count()).toBe(0)
+  })
+
+  it('rejects a group bill whose paid_by is a non-roster member', async () => {
+    await db.groups.add(makeGroup({ id: 'G', created_by: 'ME' }))
+    await db.group_members.add(makeMember({ group_id: 'G', user_id: 'ME' }))
+    await db.profiles.bulkAdd([
+      makeProfile({ id: 'ME' }),
+      makeProfile({ id: 'ORPHAN', is_local: true, owner_id: 'ME' }),
+    ])
+
+    await expect(
+      createBill({
+        title: 'B',
+        currency: 'PHP',
+        groupId: 'G',
+        createdBy: 'ME',
+        paidBy: 'ORPHAN',
+        note: '',
+        items: [{ name: 'I', amount: 100, splits: [{ userId: 'ME', splitType: 'equal', splitValue: 1 }] }],
+      }),
+    ).rejects.toThrow(/member/i)
+  })
+
   describe('updateBill identity', () => {
     it('rewrites group split user_ids and paid_by to roster ids on edit', async () => {
       await db.groups.add(makeGroup({ id: 'G', created_by: 'ME' }))
