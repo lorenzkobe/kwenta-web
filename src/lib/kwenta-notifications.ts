@@ -244,6 +244,47 @@ export async function notifyPaymentRecorded(params: {
   void flushQueuedKwentaNotifications()
 }
 
+/**
+ * Bulk variant of {@link notifyPaymentRecorded}. A settle-up records many legs
+ * at once; enqueueing each via notifyPaymentRecorded would create one outbox
+ * entry — and one Supabase insert on flush — per leg. This batches every
+ * recipient's row into ONE outbox entry (one insert) and flushes once.
+ */
+export async function notifyPaymentsRecorded(params: {
+  actorId: string
+  actorName: string
+  groupId: string | null
+  groupName: string | null
+  currency: string
+  payments: {
+    recipientId: string
+    amount: number
+    fromName: string
+    toName: string
+    settlementId: string
+  }[]
+}): Promise<void> {
+  if (params.payments.length === 0) return
+  const scope =
+    params.groupId && params.groupName ? `Group · ${params.groupName}` : 'Personal payment'
+  const fmt = new Intl.NumberFormat('en-PH', {
+    style: 'currency',
+    currency: params.currency,
+    minimumFractionDigits: 0,
+  })
+  const rows: NotificationInsertRow[] = params.payments.map((p) => ({
+    recipient_id: p.recipientId,
+    actor_id: params.actorId,
+    kind: 'payment_recorded',
+    title: 'Payment recorded',
+    body: `${params.actorName} recorded ${fmt.format(p.amount)} (${p.fromName} -> ${p.toName}) · ${scope}.`,
+    entity_id: p.settlementId,
+    group_id: params.groupId,
+  }))
+  enqueueNotificationRows(params.actorId, rows)
+  void flushQueuedKwentaNotifications()
+}
+
 export async function notifyAddedToGroup(params: {
   actorId: string
   actorName: string

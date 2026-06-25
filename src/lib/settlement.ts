@@ -15,6 +15,106 @@ export interface BalanceEntry {
   amount: number
 }
 
+/** One hop in a settle-up's money movement (a single recorded settlement row). */
+export interface SettlementMovementLeg {
+  fromUserId: string
+  fromName: string
+  toUserId: string
+  toName: string
+  amount: number
+}
+
+export interface MovementChainStep {
+  userId: string
+  name: string
+}
+
+/** A single end-to-end money path (e.g. You → Cha → Yumi) and the amount that flowed along it. */
+export interface MovementChain {
+  steps: MovementChainStep[]
+  amount: number
+}
+
+/**
+ * Reconstruct readable money paths from a bundle's bookkeeping legs.
+ *
+ * A settle-up stores pairwise legs (e.g. You→Cha, Cha→Yumi) that reduce the
+ * underlying debts, but on their own they read as nonsense ("why is Cha paying
+ * Yumi inside *my* payment?"). This decomposes the legs into the flows that
+ * produced them — each maximal path from a source (a node that only pays) to a
+ * sink (a node that only receives) — so the UI can show "You → Cha → Yumi".
+ *
+ * Pure + integer-cents internally to avoid float drift. Any leftover from an
+ * unexpected cycle is emitted as its own single-hop chain so nothing is dropped.
+ */
+export function buildMovementChains(legs: SettlementMovementLeg[]): MovementChain[] {
+  if (legs.length === 0) return []
+
+  const nameOf = new Map<string, string>()
+  for (const l of legs) {
+    nameOf.set(l.fromUserId, l.fromName)
+    nameOf.set(l.toUserId, l.toName)
+  }
+  const name = (id: string) => nameOf.get(id) ?? 'Someone'
+
+  const edges = legs.map((l) => ({ from: l.fromUserId, to: l.toUserId }))
+  const remaining = legs.map((l) => Math.round(l.amount * 100))
+  const outIdx = new Map<string, number[]>()
+  const indeg = new Map<string, number>()
+  edges.forEach((e, i) => {
+    if (!outIdx.has(e.from)) outIdx.set(e.from, [])
+    outIdx.get(e.from)!.push(i)
+    indeg.set(e.to, (indeg.get(e.to) ?? 0) + 1)
+    if (!indeg.has(e.from)) indeg.set(e.from, indeg.get(e.from) ?? 0)
+  })
+
+  const pickOut = (node: string): number => {
+    for (const i of outIdx.get(node) ?? []) if (remaining[i] > 0) return i
+    return -1
+  }
+
+  // Sources only pay (never receive). If a cycle leaves none, fall back to every
+  // distinct payer so the loop below still drains the edges.
+  const fromNodes = [...new Set(edges.map((e) => e.from))]
+  const roots = fromNodes.filter((f) => (indeg.get(f) ?? 0) === 0)
+  const starts = roots.length ? roots : fromNodes
+
+  const chains: MovementChain[] = []
+  const maxIter = edges.length * 4 + 8
+  let guard = 0
+  for (const root of starts) {
+    while (pickOut(root) !== -1 && guard++ < maxIter) {
+      const path: number[] = []
+      let node = root
+      for (let i = pickOut(node); i !== -1; i = pickOut(node)) {
+        path.push(i)
+        node = edges[i].to
+      }
+      const bottleneck = Math.min(...path.map((i) => remaining[i]))
+      for (const i of path) remaining[i] -= bottleneck
+      const steps: MovementChainStep[] = [
+        { userId: edges[path[0]].from, name: name(edges[path[0]].from) },
+      ]
+      for (const i of path) steps.push({ userId: edges[i].to, name: name(edges[i].to) })
+      chains.push({ steps, amount: bottleneck / 100 })
+    }
+  }
+  // Emit any residual (cycle) edges so no money silently disappears.
+  edges.forEach((e, i) => {
+    if (remaining[i] > 0) {
+      chains.push({
+        steps: [
+          { userId: e.from, name: name(e.from) },
+          { userId: e.to, name: name(e.to) },
+        ],
+        amount: remaining[i] / 100,
+      })
+      remaining[i] = 0
+    }
+  })
+  return chains
+}
+
 export interface BundledSuggestionRecipient {
   toUserId: string
   toName: string
@@ -517,6 +617,8 @@ export interface SettlementHistoryItem {
   label: string
   createdAt: string
   recipients: BundledSuggestionRecipient[]
+  /** Per-row money movement (from→to→amount). One entry per recorded settlement row in the bundle. */
+  legs: SettlementMovementLeg[]
   /** The user who pressed "Pay" — may differ from fromUserId when someone records on behalf of another */
   recordedByUserId: string | null
   recordedByName: string | null
@@ -571,6 +673,20 @@ async function buildSettlementHistoryItem(
     })
   }
 
+  // Money movement: one leg per recorded row, preserving the real from→to that
+  // the recipient grouping above discards. Surfaces on-behalf / multi-hop flows
+  // (e.g. "You → Yumi" alongside "Cha → Yumi") that collapse into one recipient.
+  const legs: SettlementMovementLeg[] = []
+  for (const row of sortedRows) {
+    legs.push({
+      fromUserId: row.from_user_id,
+      fromName: (await resolveName(row.from_user_id)) ?? 'Someone',
+      toUserId: row.to_user_id,
+      toName: (await resolveName(row.to_user_id)) ?? 'Someone',
+      amount: row.amount,
+    })
+  }
+
   const recipients = [...recipientMap.values()].sort((a, b) => b.amount - a.amount)
   const billId = sortedRows.every((row) => row.bill_id === primary.bill_id) ? primary.bill_id : null
   const billRow = billId ? await db.bills.get(billId) : null
@@ -602,6 +718,7 @@ async function buildSettlementHistoryItem(
     label,
     createdAt: primary.created_at,
     recipients,
+    legs,
     recordedByUserId,
     recordedByName,
   }

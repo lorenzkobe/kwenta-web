@@ -1490,6 +1490,15 @@ export async function listPairwiseSettlementsBetween(
           amount: s.amount,
         },
       ],
+      legs: [
+        {
+          fromUserId: s.from_user_id,
+          fromName,
+          toUserId: s.to_user_id,
+          toName,
+          amount: s.amount,
+        },
+      ],
       recordedByUserId: null,
       recordedByName: null,
     })

@@ -7,6 +7,7 @@ import {
   notifyAddedToGroup,
   notifyBillParticipantsCreated,
   notifyPaymentRecorded,
+  notifyPaymentsRecorded,
   notifyProfileLinked,
   resolveRecipientProfileIdForNotify,
 } from '@/lib/kwenta-notifications'
@@ -173,6 +174,41 @@ describe('notification senders enqueue to the outbox', () => {
     })
     const kinds = readOutbox().map((e) => (e.rows[0] as { kind: string }).kind)
     expect(kinds).toEqual(['payment_recorded', 'added_to_group'])
+  })
+
+  it('notifyPaymentsRecorded batches all legs into a single outbox entry', async () => {
+    await notifyPaymentsRecorded({
+      actorId: 'ACTOR',
+      actorName: 'Ann',
+      groupId: 'G',
+      groupName: 'Trip',
+      currency: 'PHP',
+      payments: [
+        { recipientId: 'R1', amount: 100, fromName: 'Ann', toName: 'Bob', settlementId: 'S1' },
+        { recipientId: 'R2', amount: 50, fromName: 'Cha', toName: 'Bob', settlementId: 'S2' },
+        { recipientId: 'R3', amount: 25, fromName: 'Ann', toName: 'Dee', settlementId: 'S3' },
+      ],
+    })
+    const queue = readOutbox()
+    // One outbox entry (→ one batched insert on flush), not three.
+    expect(queue).toHaveLength(1)
+    const rows = queue[0].rows as Array<{ kind: string; recipient_id: string; entity_id: string }>
+    expect(rows).toHaveLength(3)
+    expect(rows.every((r) => r.kind === 'payment_recorded')).toBe(true)
+    expect(rows.map((r) => r.recipient_id)).toEqual(['R1', 'R2', 'R3'])
+    expect(rows.map((r) => r.entity_id)).toEqual(['S1', 'S2', 'S3'])
+  })
+
+  it('notifyPaymentsRecorded does nothing with no payments', async () => {
+    await notifyPaymentsRecorded({
+      actorId: 'ACTOR',
+      actorName: 'Ann',
+      groupId: null,
+      groupName: null,
+      currency: 'PHP',
+      payments: [],
+    })
+    expect(readOutbox()).toHaveLength(0)
   })
 })
 

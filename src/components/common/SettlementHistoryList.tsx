@@ -1,5 +1,6 @@
-import { Banknote, Pencil } from 'lucide-react'
-import type { SettlementHistoryItem } from '@/lib/settlement'
+import { useState } from 'react'
+import { Banknote, ChevronRight, Pencil } from 'lucide-react'
+import { buildMovementChains, type SettlementHistoryItem } from '@/lib/settlement'
 import { cn, formatCurrency } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 
@@ -42,73 +43,127 @@ export function SettlementHistoryList({
 
   return (
     <ul className={cn('space-y-2', className)}>
-      {items.map((h) => {
-        const primary = describePayment(h, currentUserId)
-        return (
-          <li
-            key={h.id}
-            className="flex flex-col gap-0.5 rounded-xl border border-stone-200 bg-stone-100/60 px-4 py-3 sm:flex-row sm:items-center sm:justify-between"
-          >
-            <div className="flex items-start gap-2.5">
-              <div className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-full bg-emerald-500/15 text-emerald-700">
-                <Banknote className="size-4" aria-hidden />
-              </div>
-              <div>
-                {showGroupName && h.groupName && (
-                  <p className="text-[0.65rem] font-medium uppercase tracking-wide text-stone-400">
-                    {h.groupName}
-                  </p>
-                )}
-                <p className="text-sm font-medium text-stone-800">{primary}</p>
-                {h.billTitle && (
-                  <p className="mt-0.5 text-xs text-teal-800/90">Bill: {h.billTitle}</p>
-                )}
-                {!h.billTitle && h.groupId === null && (
-                  <p className="mt-0.5 text-xs text-stone-500">General payment</p>
-                )}
-                {h.label.trim() !== '' && (
-                  <p className="mt-0.5 text-xs font-medium text-stone-600">{h.label}</p>
-                )}
-                {h.isBundled && h.recipients.length > 1 && (
-                  <div className="mt-1 space-y-0.5">
-                    {h.recipients.map((recipient) => (
-                      <p key={recipient.toUserId} className="text-xs text-stone-500">
-                        • {recipient.toName} {formatCurrency(recipient.amount, h.currency)}
-                      </p>
-                    ))}
-                  </div>
-                )}
-                <p className="text-xs text-stone-400">
-                  {new Date(h.createdAt).toLocaleString(undefined, {
-                    dateStyle: 'medium',
-                    timeStyle: 'short',
-                  })}
-                  {h.recordedByUserId && h.recordedByUserId !== h.fromUserId && h.recordedByName && (
-                    <> · Added by {h.recordedByUserId === currentUserId ? 'you' : h.recordedByName}</>
-                  )}
+      {items.map((h) => (
+        <HistoryRow
+          key={h.id}
+          h={h}
+          currentUserId={currentUserId}
+          showGroupName={showGroupName}
+          onEdit={onEdit}
+        />
+      ))}
+    </ul>
+  )
+}
+
+function HistoryRow({
+  h,
+  currentUserId,
+  showGroupName,
+  onEdit,
+}: {
+  h: SettlementHistoryItem
+  currentUserId?: string | null
+  showGroupName?: boolean
+  onEdit?: (item: SettlementHistoryItem) => void
+}) {
+  const [showMovement, setShowMovement] = useState(false)
+  const primary = describePayment(h, currentUserId)
+  // Only worth showing when a leg isn't a direct hand-off from the headline
+  // payer — i.e. the money moved through an intermediary or covered someone
+  // else's debt, which the recipient summary above hides.
+  const hasMovement = h.legs.some((leg) => leg.fromUserId !== h.fromUserId)
+  // Reconstruct the bookkeeping legs into readable end-to-end money paths.
+  const movementChains = hasMovement ? buildMovementChains(h.legs) : []
+
+  return (
+    <li className="flex flex-col gap-0.5 rounded-xl border border-stone-200 bg-stone-100/60 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+      <div className="flex items-start gap-2.5">
+        <div className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-full bg-emerald-500/15 text-emerald-700">
+          <Banknote className="size-4" aria-hidden />
+        </div>
+        <div>
+          {showGroupName && h.groupName && (
+            <p className="text-[0.65rem] font-medium uppercase tracking-wide text-stone-400">
+              {h.groupName}
+            </p>
+          )}
+          <p className="text-sm font-medium text-stone-800">{primary}</p>
+          {h.billTitle && <p className="mt-0.5 text-xs text-teal-800/90">Bill: {h.billTitle}</p>}
+          {!h.billTitle && h.groupId === null && (
+            <p className="mt-0.5 text-xs text-stone-500">General payment</p>
+          )}
+          {h.label.trim() !== '' && (
+            <p className="mt-0.5 text-xs font-medium text-stone-600">{h.label}</p>
+          )}
+          {h.isBundled && h.recipients.length > 1 && (
+            <div className="mt-1 space-y-0.5">
+              {h.recipients.map((recipient) => (
+                <p key={recipient.toUserId} className="text-xs text-stone-500">
+                  • {recipient.toName} {formatCurrency(recipient.amount, h.currency)}
                 </p>
-              </div>
+              ))}
             </div>
-            <div className="flex shrink-0 items-center gap-1 pl-10 sm:pl-0">
-              <p className="text-sm font-semibold text-emerald-700">
-                {formatCurrency(h.amount, h.currency)}
-              </p>
-              {onEdit && (
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon-xs"
-                  className="rounded-full text-stone-500 hover:text-teal-800"
-                  aria-label="Edit payment"
-                  onClick={() => onEdit(h)}
-                >
-                  <Pencil className="size-3.5" />
-                </Button>
+          )}
+          {hasMovement && (
+            <div className="mt-1">
+              <button
+                type="button"
+                className="flex items-center gap-0.5 text-xs font-medium text-teal-800 underline-offset-2 hover:underline"
+                onClick={() => setShowMovement((s) => !s)}
+                aria-expanded={showMovement}
+              >
+                <ChevronRight
+                  className={cn('size-3 transition-transform', showMovement && 'rotate-90')}
+                  aria-hidden
+                />
+                How this settled
+              </button>
+              {showMovement && (
+                <div className="mt-1 space-y-0.5 border-l border-stone-200 pl-2.5">
+                  {movementChains.map((chain, i) => (
+                    <p
+                      key={`${chain.steps.map((s) => s.userId).join('-')}-${i}`}
+                      className="flex items-baseline justify-between gap-3 text-xs text-stone-500"
+                    >
+                      <span>{chain.steps.map((s) => s.name).join(' → ')}</span>
+                      <span className="font-medium text-stone-600">
+                        {formatCurrency(chain.amount, h.currency)}
+                      </span>
+                    </p>
+                  ))}
+                </div>
               )}
             </div>
-          </li>
-        )
-      })}
-    </ul>
+          )}
+          <p className="mt-0.5 text-xs text-stone-400">
+            {new Date(h.createdAt).toLocaleString(undefined, {
+              dateStyle: 'medium',
+              timeStyle: 'short',
+            })}
+            {h.recordedByUserId && h.recordedByUserId !== h.fromUserId && h.recordedByName && (
+              <> · Added by {h.recordedByUserId === currentUserId ? 'you' : h.recordedByName}</>
+            )}
+          </p>
+        </div>
+      </div>
+      <div className="flex shrink-0 items-center gap-1 pl-10 sm:pl-0">
+        <p className="text-sm font-semibold text-emerald-700">
+          {formatCurrency(h.amount, h.currency)}
+        </p>
+        {onEdit && (
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-xs"
+            className="rounded-full text-stone-500 hover:text-teal-800"
+            aria-label="Edit payment"
+            onClick={() => onEdit(h)}
+          >
+            <Pencil className="size-3.5" />
+          </Button>
+        )}
+      </div>
+    </li>
   )
 }

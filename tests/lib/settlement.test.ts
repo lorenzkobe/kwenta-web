@@ -7,8 +7,10 @@ import {
   computeGroupPairwiseBalances,
   computeGroupPairwiseNet,
   computeGroupSuggestions,
+  buildMovementChains,
   computeMemberPaymentBreakdown,
   listSettlementHistoryForBill,
+  listSettlementHistoryForGroup,
   owedInGroup,
 } from '@/lib/settlement'
 import {
@@ -298,6 +300,105 @@ describe('listSettlementHistoryForBill', () => {
     expect(history[0].fromName).toBe('Bob')
     expect(history[0].toName).toBe('Alice')
     expect(history[0].recipients[0].toName).toBe('Alice')
+  })
+})
+
+describe('settlement history money movement (legs)', () => {
+  it('exposes each bundle row as a from→to→amount leg, even when recipients collapse to one', async () => {
+    // A settle-up where the physical payer (You) also covers Cha's debt to Yumi.
+    // Both legs land on Yumi, so the recipient breakdown collapses to a single
+    // recipient — but the money movement is two distinct legs.
+    await db.profiles.bulkAdd([
+      makeProfile({ id: 'A', display_name: 'You' }),
+      makeProfile({ id: 'B', display_name: 'Cha' }),
+      makeProfile({ id: 'C', display_name: 'Yumi' }),
+    ])
+    await db.groups.add(makeGroup({ id: 'G', created_by: 'A' }))
+    await db.settlements.bulkAdd([
+      makeSettlement({
+        id: 'S1', group_id: 'G', bundle_id: 'BUN',
+        from_user_id: 'A', to_user_id: 'C', amount: 100,
+      }),
+      makeSettlement({
+        id: 'S2', group_id: 'G', bundle_id: 'BUN',
+        from_user_id: 'B', to_user_id: 'C', amount: 50,
+      }),
+    ])
+
+    const history = await listSettlementHistoryForGroup('G')
+    expect(history).toHaveLength(1)
+    const item = history[0]
+    // Recipients still collapse to Yumi (₱150 total).
+    expect(item.recipients.map((r) => `${r.toName}:${r.amount}`)).toEqual(['Yumi:150'])
+    // …but the money movement is preserved leg-by-leg.
+    expect(item.legs.map((l) => `${l.fromName}->${l.toName}:${l.amount}`).sort()).toEqual([
+      'Cha->Yumi:50',
+      'You->Yumi:100',
+    ])
+  })
+
+  it('reports a single leg for a direct one-to-one payment', async () => {
+    await db.profiles.bulkAdd([
+      makeProfile({ id: 'A', display_name: 'You' }),
+      makeProfile({ id: 'B', display_name: 'Cha' }),
+    ])
+    await db.groups.add(makeGroup({ id: 'G', created_by: 'A' }))
+    await db.settlements.add(
+      makeSettlement({ id: 'S1', group_id: 'G', from_user_id: 'A', to_user_id: 'B', amount: 200 }),
+    )
+
+    const history = await listSettlementHistoryForGroup('G')
+    expect(history).toHaveLength(1)
+    expect(history[0].legs).toEqual([
+      { fromUserId: 'A', fromName: 'You', toUserId: 'B', toName: 'Cha', amount: 200 },
+    ])
+  })
+})
+
+describe('buildMovementChains', () => {
+  const leg = (fromUserId: string, toUserId: string, amount: number) => ({
+    fromUserId,
+    fromName: fromUserId,
+    toUserId,
+    toName: toUserId,
+    amount,
+  })
+
+  it('reconstructs a pass-through into a single arrow chain', () => {
+    // You pay Yumi directly (1000) and cover Cha's 923 debt to Yumi, recorded as
+    // bookkeeping legs You→Cha and Cha→Yumi. The flow is You → Cha → Yumi.
+    const chains = buildMovementChains([
+      leg('You', 'Yumi', 1000),
+      leg('You', 'Cha', 923),
+      leg('Cha', 'Yumi', 923),
+    ])
+    const rendered = chains.map((c) => `${c.steps.map((s) => s.name).join('→')}:${c.amount}`)
+    expect(rendered).toEqual(['You→Yumi:1000', 'You→Cha→Yumi:923'])
+  })
+
+  it('keeps direct payments as two-step chains', () => {
+    const chains = buildMovementChains([leg('You', 'A', 50), leg('You', 'B', 30)])
+    expect(chains).toEqual([
+      { steps: [{ userId: 'You', name: 'You' }, { userId: 'A', name: 'A' }], amount: 50 },
+      { steps: [{ userId: 'You', name: 'You' }, { userId: 'B', name: 'B' }], amount: 30 },
+    ])
+  })
+
+  it('returns one chain for a single leg', () => {
+    const chains = buildMovementChains([leg('You', 'Cha', 200)])
+    expect(chains).toHaveLength(1)
+    expect(chains[0].steps.map((s) => s.name)).toEqual(['You', 'Cha'])
+    expect(chains[0].amount).toBe(200)
+  })
+
+  it('splits a longer pass-through correctly (two hops, equal amounts)', () => {
+    const chains = buildMovementChains([
+      leg('Ana', 'Carlo', 100),
+      leg('Carlo', 'John', 100),
+    ])
+    expect(chains).toHaveLength(1)
+    expect(chains[0].steps.map((s) => s.name)).toEqual(['Ana', 'Carlo', 'John'])
+    expect(chains[0].amount).toBe(100)
   })
 })
 

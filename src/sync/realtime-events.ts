@@ -16,17 +16,7 @@ import type {
   ProfilePeerLink,
 } from '@/types'
 import { KWENTA_LAST_PULL_STORAGE_KEY, pullChanges, syncRoundTrip } from '@/sync/sync-service'
-
-type UserEventRow = {
-  id: string
-  user_id: string
-  event_type: string
-  entity_type: string
-  entity_id: string
-  op: string
-  payload: unknown | null
-  created_at: string
-}
+import { planRealtimeBatch, type UserEventRow } from '@/sync/realtime-batch'
 type ReconcileBundle = Partial<
   Record<
     | 'profiles'
@@ -390,14 +380,61 @@ export function startRealtimeForUser(userId: string): () => void {
   const lastSeen = localStorage.getItem(LAST_SEEN_EVENT_KEY(userId)) ?? now()
   scheduleCatchUp(lastSeen)
 
+  // Collapse a burst of events (e.g. a multi-leg settle-up fanned out into one
+  // event per leg) into a single syncRoundTrip instead of one reconcile RPC per
+  // event. A lone fresh event keeps the lighter targeted-reconcile path.
+  async function processBatch(batch: UserEventRow[]) {
+    const plan = planRealtimeBatch(batch, (id) => recentEventSet.has(id))
+
+    if (plan.fresh.length <= 1) {
+      for (const ev of plan.fresh) await processEventSafely(ev)
+      if (plan.latestCreatedAt) {
+        localStorage.setItem(LAST_SEEN_EVENT_KEY(userId), plan.latestCreatedAt)
+      }
+      return
+    }
+
+    // Remember every id up front so a redelivery of any of them is skipped.
+    for (const ev of plan.fresh) rememberEventId(recentEventOrder, recentEventSet, ev.id)
+    const startedAt = performance.now()
+    try {
+      // Profile-link events expose historical rows older than the pull cursor;
+      // clear it so the round trip pulls them from scratch.
+      if (plan.hasProfileLink) localStorage.removeItem(KWENTA_LAST_PULL_STORAGE_KEY)
+      await syncRoundTrip(userId)
+      captureMetric('realtime.batch.coalesced', true, performance.now() - startedAt, {
+        events: batch.length,
+        fresh: plan.fresh.length,
+        fullPull: plan.hasProfileLink,
+      })
+    } catch (error) {
+      console.warn('[realtime] coalesced batch sync failed; falling back to pull', { error })
+      await pullChanges(userId)
+      captureMetric('realtime.batch.coalesced', false, performance.now() - startedAt, {
+        events: batch.length,
+        fresh: plan.fresh.length,
+      })
+    } finally {
+      if (plan.latestCreatedAt) {
+        localStorage.setItem(LAST_SEEN_EVENT_KEY(userId), plan.latestCreatedAt)
+      }
+    }
+  }
+
   async function flush() {
     if (flushing) return
     flushing = true
     try {
       while (!disposed && queue.length > 0) {
-        const ev = queue.shift()
-        if (!ev) break
-        await processEventSafely(ev)
+        if (!isRuntimeFlagEnabled('coalesceRealtimeBatch')) {
+          const ev = queue.shift()
+          if (!ev) break
+          await processEventSafely(ev)
+          continue
+        }
+        // Drain everything queued so far and handle it as one batch.
+        const batch = queue.splice(0, queue.length)
+        await processBatch(batch)
       }
     } finally {
       flushing = false

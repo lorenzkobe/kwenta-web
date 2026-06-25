@@ -148,6 +148,7 @@ Three profile flavors in Dexie (`src/types/index.ts`):
 - `catchUpSince` bulk path (>5 missed events): before bulk `syncRoundTrip`, checks fetched events and does a targeted query for profile link events — if any found, clears `KWENTA_LAST_PULL_STORAGE_KEY` so the bulk sync does a full pull from epoch (bill records with old `updated_at` would otherwise be skipped)
 - `realtimeCatchupSingleRun` flag deduplicates concurrent catch-ups
 - `targetedRealtimeReconcile` flag: use `kwenta_reconcile_user_event` RPC instead of full pull
+- `coalesceRealtimeBatch` flag (default on): `flush()` drains the whole queue per burst and runs `planRealtimeBatch` (`src/sync/realtime-batch.ts`, pure/tested). A lone fresh event keeps the targeted reconcile; **≥2 fresh events collapse into one `syncRoundTrip`** instead of one reconcile RPC per event. A bundled settle-up fans out into one settlement event *per leg per member* (trigger `kwenta_on_settlement_changed` is `FOR EACH ROW`), so this turns N reconcile RPCs into a single round trip. The last-seen cursor still advances to the batch's max `created_at`; a profile-link event in the batch clears `KWENTA_LAST_PULL_STORAGE_KEY` first to force a full pull.
 
 ---
 
@@ -365,6 +366,7 @@ The `kwenta_sync` RPC is the single entry point for all sync: accepts push paylo
     realtimeCatchupSingleRun: boolean  // default true — dedupe catch-up RPC
     notificationPushOnlyMode: boolean  // default true — counter relies on realtime INSERTs
     targetedRealtimeReconcile: boolean // default true — use reconcile RPC vs full pull
+    coalesceRealtimeBatch: boolean     // default true — drain realtime queue per burst; ≥2 fresh events → one syncRoundTrip instead of one reconcile RPC per event
   }
 }
 ```

@@ -16,7 +16,7 @@ import { finalizeMutationSync } from '@/sync/cloud-first-mutations'
 import {
   notifyAddedToGroup,
   notifyBillParticipantsCreated,
-  notifyPaymentRecorded,
+  notifyPaymentsRecorded,
   notifyProfileLinked,
   resolveRecipientProfileIdForNotify,
 } from '@/lib/kwenta-notifications'
@@ -1397,22 +1397,26 @@ export async function createSettlement(
 
   if (!options?.suppressNotification) {
     const recipientCandidates = [resolvedFromUserId, resolvedToUserId].filter((id) => id !== markedBy)
+    const payments: Parameters<typeof notifyPaymentsRecorded>[0]['payments'] = []
     for (const candidate of recipientCandidates) {
       const recipientId = await resolveRecipientProfileIdForNotify(candidate)
       if (!recipientId || recipientId === markedBy) continue
-      void notifyPaymentRecorded({
-        actorId: markedBy,
-        actorName: actor?.display_name?.trim() || 'Someone',
+      payments.push({
         recipientId,
         amount,
-        currency,
         fromName: fromProfile?.display_name?.trim() || 'Someone',
         toName: toProfile?.display_name?.trim() || 'Someone',
-        groupId,
-        groupName,
         settlementId,
       })
     }
+    void notifyPaymentsRecorded({
+      actorId: markedBy,
+      actorName: actor?.display_name?.trim() || 'Someone',
+      groupId,
+      groupName,
+      currency,
+      payments,
+    })
   }
 
   if (!options?.suppressSync) {
@@ -1524,24 +1528,28 @@ export async function createBundledGroupSettlement(params: {
 
   const actor = await db.profiles.get(params.markedBy)
   const fromProfile = (await db.profiles.get(resolvedFromUserId)) ?? (await db.profiles.get(params.fromUserId))
+  const payments: Parameters<typeof notifyPaymentsRecorded>[0]['payments'] = []
   for (let i = 0; i < resolvedRecipients.length; i++) {
     const recipient = resolvedRecipients[i]
     const toProfile = await db.profiles.get(recipient.toUserId)
     const recipientId = await resolveRecipientProfileIdForNotify(recipient.toUserId)
     if (!recipientId || recipientId === params.markedBy) continue
-    void notifyPaymentRecorded({
-      actorId: params.markedBy,
-      actorName: actor?.display_name?.trim() || 'Someone',
+    payments.push({
       recipientId,
       amount: recipient.amount,
-      currency: params.currency,
       fromName: fromProfile?.display_name?.trim() || 'Someone',
       toName: toProfile?.display_name?.trim() || 'Someone',
-      groupId: params.groupId,
-      groupName: group.name,
       settlementId: settlementIds[i],
     })
   }
+  void notifyPaymentsRecorded({
+    actorId: params.markedBy,
+    actorName: actor?.display_name?.trim() || 'Someone',
+    groupId: params.groupId,
+    groupName: group.name,
+    currency: params.currency,
+    payments,
+  })
 
   await notifySyncAfterMutation({
     actorUserId: params.markedBy,
@@ -1642,24 +1650,28 @@ export async function recordDecomposedSettlement(params: {
   })
 
   const actor = await db.profiles.get(params.markedBy)
+  const payments: Parameters<typeof notifyPaymentsRecorded>[0]['payments'] = []
   for (const r of resolved) {
     const recipientId = await resolveRecipientProfileIdForNotify(r.toUserId)
     if (!recipientId || recipientId === params.markedBy) continue
     const from = await db.profiles.get(r.fromUserId)
     const to = await db.profiles.get(r.toUserId)
-    void notifyPaymentRecorded({
-      actorId: params.markedBy,
-      actorName: actor?.display_name?.trim() || 'Someone',
+    payments.push({
       recipientId,
       amount: r.amount,
-      currency: params.currency,
       fromName: from?.display_name?.trim() || 'Someone',
       toName: to?.display_name?.trim() || 'Someone',
-      groupId: params.groupId,
-      groupName: group.name,
       settlementId: r.settlementId,
     })
   }
+  void notifyPaymentsRecorded({
+    actorId: params.markedBy,
+    actorName: actor?.display_name?.trim() || 'Someone',
+    groupId: params.groupId,
+    groupName: group.name,
+    currency: params.currency,
+    payments,
+  })
 
   await notifySyncAfterMutation({
     actorUserId: params.markedBy,
@@ -1708,22 +1720,26 @@ async function emitSinglePaymentNotification(params: {
     if (g && !g.is_deleted) groupName = g.name
   }
   const recipientCandidates = [params.fromUserId, params.toUserId].filter((id) => id !== params.markedBy)
+  const payments: Parameters<typeof notifyPaymentsRecorded>[0]['payments'] = []
   for (const candidate of recipientCandidates) {
     const recipientId = await resolveRecipientProfileIdForNotify(candidate)
     if (!recipientId || recipientId === params.markedBy) continue
-    void notifyPaymentRecorded({
-      actorId: params.markedBy,
-      actorName: actor?.display_name?.trim() || 'Someone',
+    payments.push({
       recipientId,
       amount: params.amount,
-      currency: params.currency,
       fromName: fromProfile?.display_name?.trim() || 'Someone',
       toName: toProfile?.display_name?.trim() || 'Someone',
-      groupId: params.groupId,
-      groupName,
       settlementId: params.settlementId,
     })
   }
+  void notifyPaymentsRecorded({
+    actorId: params.markedBy,
+    actorName: actor?.display_name?.trim() || 'Someone',
+    groupId: params.groupId,
+    groupName,
+    currency: params.currency,
+    payments,
+  })
 }
 
 export async function createPersonalPaymentWithDistribution(params: {

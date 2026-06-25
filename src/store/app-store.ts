@@ -15,6 +15,7 @@ type RuntimeFlagKey =
   | 'realtimeCatchupSingleRun'
   | 'notificationPushOnlyMode'
   | 'targetedRealtimeReconcile'
+  | 'coalesceRealtimeBatch'
 
 type RuntimeFlags = Record<RuntimeFlagKey, boolean>
 
@@ -51,6 +52,7 @@ export const useAppStore = create<AppState>((set) => ({
     realtimeCatchupSingleRun: true,
     notificationPushOnlyMode: true,
     targetedRealtimeReconcile: true,
+    coalesceRealtimeBatch: true,
   },
 
   setOnline: (online) => set({ isOnline: online }),

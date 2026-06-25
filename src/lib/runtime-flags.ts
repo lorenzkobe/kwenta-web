@@ -5,6 +5,7 @@ export type RuntimeFlagKey =
   | 'realtimeCatchupSingleRun'
   | 'notificationPushOnlyMode'
   | 'targetedRealtimeReconcile'
+  | 'coalesceRealtimeBatch'
 
 const STORAGE_PREFIX = 'kwenta_flag:'
 

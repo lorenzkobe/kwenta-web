@@ -37,7 +37,7 @@ import { finalizeMutationSync } from '@/sync/cloud-first-mutations'
 vi.mock('@/lib/kwenta-notifications', () => ({
   notifyAddedToGroup: vi.fn(async () => {}),
   notifyBillParticipantsCreated: vi.fn(async () => {}),
-  notifyPaymentRecorded: vi.fn(async () => {}),
+  notifyPaymentsRecorded: vi.fn(async () => {}),
   notifyProfileLinked: vi.fn(async () => {}),
   resolveRecipientProfileIdForNotify: vi.fn(async () => null),
 }))
