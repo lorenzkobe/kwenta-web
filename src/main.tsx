@@ -25,6 +25,7 @@ const updateServiceWorker = registerSW({
     // updateServiceWorker(true) skip-waits the new worker, then reloads once
     // it takes control.
     toast('A new version of Kwenta is available.', {
+      id: 'kwenta-sw-update', // stable id: re-fires reuse one toast instead of stacking
       action: { label: 'Refresh', onClick: () => void updateServiceWorker(true) },
       duration: Infinity,
     })
