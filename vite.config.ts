@@ -9,7 +9,11 @@ export default defineConfig({
     react(),
     tailwindcss(),
     VitePWA({
-      registerType: 'autoUpdate',
+      // 'prompt' (not 'autoUpdate'): with injectManifest, autoUpdate expects the
+      // SW to self-skipWaiting and never wires onNeedRefresh — our sw.ts only
+      // skip-waits on the SKIP_WAITING message, so we drive the update via the
+      // prompt path (waiting → onNeedRefresh toast → updateServiceWorker(true)).
+      registerType: 'prompt',
       strategies: 'injectManifest',
       srcDir: 'src',
       filename: 'sw.ts',
