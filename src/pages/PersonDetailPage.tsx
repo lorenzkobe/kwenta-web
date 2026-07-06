@@ -1391,9 +1391,17 @@ export function PersonDetailPage() {
       </div>
 
       <div className="rounded-3xl border border-stone-200 bg-white p-5 shadow-sm">
-        <div className="flex items-center gap-2">
-          <Banknote className="size-4 text-teal-800" />
-          <h2 className="text-lg font-semibold">Payments between you</h2>
+        <div className="flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <Banknote className="size-4 text-teal-800" />
+            <h2 className="text-lg font-semibold">Payments between you</h2>
+          </div>
+          <Link
+            to={`/app/people/${personId}/ledger`}
+            className="shrink-0 text-sm font-medium text-teal-800 hover:underline"
+          >
+            View money flow →
+          </Link>
         </div>
         {settlementsLoading ? (
           <div className="mt-3 flex items-center gap-2 text-sm text-stone-500">

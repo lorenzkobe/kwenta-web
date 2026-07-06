@@ -20,6 +20,9 @@ const PeoplePage = lazy(() => import('@/pages/PeoplePage').then((m) => ({ defaul
 const PersonDetailPage = lazy(() =>
   import('@/pages/PersonDetailPage').then((m) => ({ default: m.PersonDetailPage })),
 )
+const PersonLedgerPage = lazy(() =>
+  import('@/pages/PersonLedgerPage').then((m) => ({ default: m.PersonLedgerPage })),
+)
 const SettingsPage = lazy(() => import('@/pages/SettingsPage').then((m) => ({ default: m.SettingsPage })))
 const AdminUsersPage = lazy(() =>
   import('@/pages/AdminUsersPage').then((m) => ({ default: m.AdminUsersPage })),
@@ -61,6 +64,7 @@ function App() {
                 <Route path="groups/:groupId" element={<GroupDetailPage />} />
                 <Route path="people" element={<PeoplePage />} />
                 <Route path="people/:personId" element={<PersonDetailPage />} />
+                <Route path="people/:personId/ledger" element={<PersonLedgerPage />} />
                 <Route path="balances" element={<Navigate to="/app" replace />} />
                 <Route path="settings" element={<SettingsPage />} />
                 <Route element={<RequireAdmin />}>
