@@ -1,7 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { db } from '@/db/db'
 import { settleUpPersonalBills } from '@/db/operations'
-import { buildPersonalReconcilePlan, computePairwiseNetForBill } from '@/lib/people'
+import {
+  buildPersonalReconcilePlan,
+  computeAvailableGeneralCredit,
+  computePairwiseNetForBill,
+  listPairwiseSettlementsBetween,
+} from '@/lib/people'
 import { makeProfile, makeSettlement, resetDb, seedSimpleBill } from '../helpers/db'
 
 // operations.ts fires sync + notifications as side effects. Stub them so the
@@ -66,7 +71,7 @@ describe('settleUpPersonalBills', () => {
     expect(sY?.label.toLowerCase()).toContain('offset')
   })
 
-  it('consumes general credit for credit slices but not for offset slices', async () => {
+  it('re-tags fully-consumed general credit onto the bill instead of deleting it (payment log survives)', async () => {
     const x = await theyOweMeBill(300)
     const y = await iOweThemBill(200)
     const creditId = (
@@ -85,17 +90,57 @@ describe('settleUpPersonalBills', () => {
       creditSlices: plan.creditSlices.map((s) => ({ billId: s.billId, amount: s.amount, direction: s.direction })),
     })
 
-    // the general credit row was consumed (soft-deleted to 0)
+    // The general credit row is NOT deleted — it is re-tagged onto the bill it funded,
+    // so the payment stays visible and its money is traceable.
     const credit = await db.settlements.get(creditId)
-    expect(credit?.is_deleted).toBe(true)
+    expect(credit?.is_deleted).toBe(false)
+    expect(credit?.amount).toBe(100)
+    expect(credit?.bill_id).toBe(x)
+    expect(credit?.label.toLowerCase()).toContain('credit')
     // both bills settle to zero
     expect(await computePairwiseNetForBill(x, 'me', 'other')).toBe(0)
     expect(await computePairwiseNetForBill(y, 'me', 'other')).toBe(0)
-    // a credit-sourced settlement carries a credit note, not an offset note
-    const creditSettlement = (await db.settlements.where('bill_id').equals(x).toArray()).find((s) =>
-      s.label.toLowerCase().includes('credit'),
-    )
-    expect(creditSettlement).toBeTruthy()
+    // the payment is still in the pairwise history, not lost
+    const history = await listPairwiseSettlementsBetween('me', 'other')
+    expect(history.some((h) => h.id === creditId)).toBe(true)
+  })
+
+  it('partially consumes credit by splitting: source keeps the remainder, no row is deleted', async () => {
+    const x = await theyOweMeBill(40) // they owe me 40
+    const creditId = (
+      await db.settlements.add(
+        makeSettlement({ from_user_id: 'other', to_user_id: 'me', amount: 100, group_id: null, bill_id: null }),
+      )
+    ).valueOf() as string
+
+    const plan = await buildPersonalReconcilePlan({ meId: 'me', otherId: 'other', currency: 'PHP' })
+    await settleUpPersonalBills({
+      meId: 'me',
+      otherId: 'other',
+      currency: 'PHP',
+      markedBy: 'me',
+      offsetSlices: plan.offsetSlices.map((s) => ({ billId: s.billId, amount: s.amount, direction: s.direction })),
+      creditSlices: plan.creditSlices.map((s) => ({ billId: s.billId, amount: s.amount, direction: s.direction })),
+    })
+
+    // Nothing is deleted; the source row survives as the leftover credit (100 - 40 = 60).
+    expect(await db.settlements.filter((s) => s.is_deleted).count()).toBe(0)
+    const credit = await db.settlements.get(creditId)
+    expect(credit?.is_deleted).toBe(false)
+    expect(credit?.bill_id).toBe(null)
+    expect(credit?.amount).toBe(60)
+    // The consumed 40 is now a bill-tagged settlement on x, so the bill nets to zero.
+    expect(await computePairwiseNetForBill(x, 'me', 'other')).toBe(0)
+    // 60 of general credit remains available.
+    expect(
+      await computeAvailableGeneralCredit({
+        meId: 'me',
+        otherId: 'other',
+        fromUserId: 'other',
+        toUserId: 'me',
+        currency: 'PHP',
+      }),
+    ).toBe(60)
   })
 
   it('rejects a slice that exceeds the current bill balance', async () => {

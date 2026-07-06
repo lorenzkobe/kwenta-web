@@ -1,7 +1,7 @@
 import { db } from '@/db/db'
 import type { Bill } from '@/types'
 import type { SettlementHistoryItem } from '@/lib/settlement'
-import { computeGroupBalances } from '@/lib/settlement'
+import { computeGroupBalances, computeGroupPairwiseNet } from '@/lib/settlement'
 import { supabase } from '@/lib/supabase'
 import { formatCurrency, MONEY_EPSILON } from '@/lib/utils'
 
@@ -965,7 +965,12 @@ export async function computePairwiseNetPersonalOnly(
   const meIds = await expandProfileIdsForSplitMatching(meId, meId)
   const otherIds = await expandProfileIdsForSplitMatching(otherId, meId)
 
-  const byCurrency = new Map<string, number>()
+  // Debt from bills, net of bill-tagged settlements (+ they owe me / − I owe them).
+  const billNet = new Map<string, number>()
+  // Untargeted "general" payments are prepaid credit, not debt. Held per direction so
+  // they can offset same-direction debt but never manufacture a reverse balance.
+  const genMeToOther = new Map<string, number>() // I prepaid them
+  const genOtherToMe = new Map<string, number>() // they prepaid me
 
   const bills = await db.bills.filter((b) => !b.is_deleted && b.group_id === null).toArray()
 
@@ -983,14 +988,14 @@ export async function computePairwiseNetPersonalOnly(
       const mySplit = active.find((s) => meIds.has(s.user_id))
       const otherSplit = active.find((s) => otherIds.has(s.user_id))
       const cur = bill.currency
-      const prev = byCurrency.get(cur) ?? 0
+      const prev = billNet.get(cur) ?? 0
 
       if (meIds.has(bill.paid_by)) {
         if (!otherSplit) continue
-        byCurrency.set(cur, prev + otherSplit.computed_amount)
+        billNet.set(cur, prev + otherSplit.computed_amount)
       } else if (otherIds.has(bill.paid_by)) {
         if (!mySplit) continue
-        byCurrency.set(cur, prev - mySplit.computed_amount)
+        billNet.set(cur, prev - mySplit.computed_amount)
       }
     }
   }
@@ -1005,15 +1010,70 @@ export async function computePairwiseNetPersonalOnly(
     if (!((fromMe && toOther) || (fromOther && toMe))) continue
 
     const cur = s.currency
-    const prev = byCurrency.get(cur) ?? 0
-    if (fromOther && toMe) {
-      byCurrency.set(cur, prev - s.amount)
-    } else if (fromMe && toOther) {
-      byCurrency.set(cur, prev + s.amount)
+    if (s.bill_id !== null) {
+      // Targeted payment against a specific bill's debt — part of the real balance.
+      const prev = billNet.get(cur) ?? 0
+      if (fromOther && toMe) billNet.set(cur, prev - s.amount)
+      else if (fromMe && toOther) billNet.set(cur, prev + s.amount)
+    } else {
+      // Untargeted general payment = available credit.
+      if (fromOther && toMe) genOtherToMe.set(cur, (genOtherToMe.get(cur) ?? 0) + s.amount)
+      else if (fromMe && toOther) genMeToOther.set(cur, (genMeToOther.get(cur) ?? 0) + s.amount)
     }
   }
 
+  // Apply general payments as credit: they draw down same-direction debt toward zero,
+  // but any overshoot stays as available credit rather than flipping into reverse debt.
+  const byCurrency = new Map<string, number>()
+  const currencies = new Set<string>([
+    ...billNet.keys(),
+    ...genMeToOther.keys(),
+    ...genOtherToMe.keys(),
+  ])
+  for (const cur of currencies) {
+    let net = billNet.get(cur) ?? 0
+    const gMe = genMeToOther.get(cur) ?? 0 // my prepayment offsets what I owe them (net < 0)
+    const gOther = genOtherToMe.get(cur) ?? 0 // their prepayment offsets what they owe me (net > 0)
+    if (net < 0) net += Math.min(-net, gMe)
+    if (net > 0) net -= Math.min(net, gOther)
+    byCurrency.set(cur, Math.round(net * 100) / 100)
+  }
+
   return byCurrency
+}
+
+/**
+ * Full pairwise standing with a person across every context — personal bills/payments
+ * (credit-clamped) plus their net in every shared group, including 3+ member groups
+ * that the headline `computePairwiseNet` intentionally drops. This is what the People
+ * list and Person page headline show: "even" here means even everywhere.
+ */
+export async function computePairwiseNetAllContexts(
+  meId: string,
+  otherId: string,
+): Promise<Map<string, number>> {
+  const result = new Map<string, number>(await computePairwiseNetPersonalOnly(meId, otherId))
+
+  const meIds = await expandProfileIdsForSplitMatching(meId, meId)
+  const otherIds = await expandProfileIdsForSplitMatching(otherId, meId)
+
+  const myMemberships = await db.group_members.where('user_id').anyOf([...meIds]).toArray()
+  const myGroupIds = [...new Set(myMemberships.filter((m) => !m.is_deleted).map((m) => m.group_id))]
+
+  for (const gid of myGroupIds) {
+    const group = await db.groups.get(gid)
+    if (!group || group.is_deleted) continue
+    // Resolve the other person to their roster id in this group (handles linked contacts).
+    const members = await db.group_members.where('group_id').equals(gid).toArray()
+    const otherMember = members.find((m) => !m.is_deleted && otherIds.has(m.user_id))
+    if (!otherMember) continue
+    const net = await computeGroupPairwiseNet(gid, meId, otherMember.user_id)
+    if (Math.abs(net) <= MONEY_EPSILON) continue
+    const cur = group.currency
+    result.set(cur, Math.round(((result.get(cur) ?? 0) + net) * 100) / 100)
+  }
+
+  return result
 }
 
 /** One logical peer per person (dedupes local contact + linked remote). */

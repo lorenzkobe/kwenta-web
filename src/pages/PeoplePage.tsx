@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom'
 import { BookUser, ChevronRight, Loader2, Plus, UserPlus } from 'lucide-react'
 import { useLiveQuery } from 'dexie-react-hooks'
 import {
-  computePairwiseNet,
+  computePairwiseNetAllContexts,
   formatPairwiseSummary,
   listCanonicalRelatedProfileIds,
   resolveProfileDisplay,
@@ -35,7 +35,7 @@ export function PeoplePage() {
       lines: string[]
     }[] = []
     for (const id of ids) {
-      const net = await computePairwiseNet(userId, id)
+      const net = await computePairwiseNetAllContexts(userId, id)
       const disp = await resolveProfileDisplay(id, userId)
       const { lines, primaryLabel, tone } = formatPairwiseSummary(net)
       out.push({

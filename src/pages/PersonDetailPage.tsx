@@ -20,7 +20,6 @@ import {
   buildPersonalBillAllocationPlan,
   buildPersonalReconcilePlan,
   computePairwiseNetForBill,
-  computePairwiseNet,
   computePairwiseNetPersonalOnly,
   fetchRemoteProfileIntoDexie,
   findRemoteProfileIdForLinking,
@@ -383,11 +382,6 @@ export function PersonDetailPage() {
     return resolveFallbackIdentityForViewer(userId, personId)
   }, [userId, personId])
 
-  const netByCurrency = useLiveQuery(async () => {
-    if (!userId || !personId) return new Map<string, number>()
-    return computePairwiseNet(userId, personId)
-  }, [userId, personId])
-
   const bills = useLiveQuery(async () => {
     if (!userId || !personId) return []
     return listBillsInvolvingPair(userId, personId)
@@ -437,6 +431,13 @@ export function PersonDetailPage() {
 
     return { sources, overall, groupNetById }
   }, [userId, personId])
+
+  // Overall standing (personal + every shared group, credit-clamped). Single source of
+  // truth for the headline, export card, and per-bill "covered" hint so they never disagree.
+  const netByCurrency = useMemo(
+    () => breakdown?.overall ?? new Map<string, number>(),
+    [breakdown],
+  )
 
   const settlements = useLiveQuery(async () => {
     if (!userId || !personId) return []

@@ -2,11 +2,13 @@ import { beforeEach, describe, expect, it } from 'vitest'
 import { db } from '@/db/db'
 import {
   computePairwiseNet,
+  computePairwiseNetAllContexts,
   computePairwiseNetForBill,
+  computePairwiseNetPersonalOnly,
   expandProfileIdsForSplitMatching,
   participantUnionForBill,
 } from '@/lib/people'
-import { makeBill, makeItem, makeProfile, makeSettlement, makeSplit, resetDb, seedSimpleBill } from '../helpers/db'
+import { makeBill, makeGroup, makeItem, makeMember, makeProfile, makeSettlement, makeSplit, resetDb, seedSimpleBill } from '../helpers/db'
 
 const ISO = '2026-06-18T00:00:00.000Z'
 function syncFieldsForTest(id: string) {
@@ -192,5 +194,93 @@ describe('peer-links fold into viewer-scoped pairwise balances', () => {
 
     const after = await computePairwiseNet('ME', 'SAM_A')
     expect(after.get('PHP')).toBe(150) // SAM_B's debt folds in via the viewer's peer-link
+  })
+})
+
+describe('computePairwiseNetPersonalOnly — general payments are credit, not reverse debt', () => {
+  beforeEach(async () => {
+    await db.profiles.bulkAdd([makeProfile({ id: 'me' }), makeProfile({ id: 'other' })])
+  })
+
+  it('a standalone payment they made with no bill debt does NOT show as me owing them', async () => {
+    // They handed me PHP 100 with no underlying bill. It is prepaid credit, not a debt I owe.
+    await db.settlements.add(
+      makeSettlement({ from_user_id: 'other', to_user_id: 'me', amount: 100, group_id: null, bill_id: null }),
+    )
+    const net = await computePairwiseNetPersonalOnly('me', 'other')
+    expect(net.get('PHP') ?? 0).toBe(0)
+  })
+
+  it('a standalone payment I made with no bill debt does NOT show as them owing me', async () => {
+    await db.settlements.add(
+      makeSettlement({ from_user_id: 'me', to_user_id: 'other', amount: 100, group_id: null, bill_id: null }),
+    )
+    const net = await computePairwiseNetPersonalOnly('me', 'other')
+    expect(net.get('PHP') ?? 0).toBe(0)
+  })
+
+  it('a general payment settles a same-direction debt down to zero', async () => {
+    await seedSimpleBill({ groupId: null, paidBy: 'other', shares: { other: 0, me: 50 } }) // I owe 50
+    await db.settlements.add(
+      makeSettlement({ from_user_id: 'me', to_user_id: 'other', amount: 50, group_id: null, bill_id: null }),
+    )
+    const net = await computePairwiseNetPersonalOnly('me', 'other')
+    expect(net.get('PHP') ?? 0).toBe(0)
+  })
+
+  it('an overpaying general payment is clamped to zero, never flipped into reverse debt', async () => {
+    await seedSimpleBill({ groupId: null, paidBy: 'other', shares: { other: 0, me: 50 } }) // I owe 50
+    await db.settlements.add(
+      makeSettlement({ from_user_id: 'me', to_user_id: 'other', amount: 80, group_id: null, bill_id: null }),
+    )
+    const net = await computePairwiseNetPersonalOnly('me', 'other')
+    // I paid 80 against a 50 debt: debt clears (0), the extra 30 is credit — NOT +30 they-owe-me.
+    expect(net.get('PHP') ?? 0).toBe(0)
+  })
+
+  it('a real bill debt still shows when there is no offsetting payment', async () => {
+    await seedSimpleBill({ groupId: null, paidBy: 'me', shares: { me: 0, other: 40 } }) // they owe me 40
+    const net = await computePairwiseNetPersonalOnly('me', 'other')
+    expect(net.get('PHP') ?? 0).toBe(40)
+  })
+})
+
+describe('computePairwiseNetAllContexts — folds in every shared group, including 3+ member groups', () => {
+  beforeEach(async () => {
+    await db.profiles.bulkAdd([
+      makeProfile({ id: 'me' }),
+      makeProfile({ id: 'other' }),
+      makeProfile({ id: 'third' }),
+    ])
+  })
+
+  it('includes what they owe me in a 3-member group (which the headline pairwise fn drops)', async () => {
+    const g = makeGroup({ id: 'G', created_by: 'me', currency: 'PHP' })
+    await db.groups.add(g)
+    await db.group_members.bulkAdd([
+      makeMember({ group_id: 'G', user_id: 'me' }),
+      makeMember({ group_id: 'G', user_id: 'other' }),
+      makeMember({ group_id: 'G', user_id: 'third' }),
+    ])
+    // I paid 90 split three ways; other and third each owe me 30.
+    await seedSimpleBill({ groupId: 'G', paidBy: 'me', shares: { me: 30, other: 30, third: 30 } })
+
+    // The headline pairwise fn intentionally skips 3+ member groups -> looks balanced.
+    expect((await computePairwiseNet('me', 'other')).get('PHP') ?? 0).toBe(0)
+    // The all-contexts fn must surface the real group debt.
+    expect((await computePairwiseNetAllContexts('me', 'other')).get('PHP') ?? 0).toBe(30)
+  })
+
+  it('adds personal and group standing together for the same person', async () => {
+    await seedSimpleBill({ groupId: null, paidBy: 'me', shares: { me: 0, other: 20 } }) // personal: they owe me 20
+    const g = makeGroup({ id: 'G2', created_by: 'me', currency: 'PHP' })
+    await db.groups.add(g)
+    await db.group_members.bulkAdd([
+      makeMember({ group_id: 'G2', user_id: 'me' }),
+      makeMember({ group_id: 'G2', user_id: 'other' }),
+      makeMember({ group_id: 'G2', user_id: 'third' }),
+    ])
+    await seedSimpleBill({ groupId: 'G2', paidBy: 'me', shares: { me: 30, other: 30, third: 30 } }) // group: they owe me 30
+    expect((await computePairwiseNetAllContexts('me', 'other')).get('PHP') ?? 0).toBe(50)
   })
 })

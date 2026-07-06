@@ -1947,7 +1947,6 @@ export async function applyGeneralCreditToSelection(params: {
     throw new Error('Selected credit allocations no longer match the amount to apply.')
   }
 
-  let remainingToConsume = roundedAppliedAmount
   const [resolvedFromUserId, resolvedToUserId, sourceFromIds, sourceToIds] = await Promise.all([
     resolveSettlementPartyId(params.fromUserId),
     resolveSettlementPartyId(params.toUserId),
@@ -2005,7 +2004,7 @@ export async function applyGeneralCreditToSelection(params: {
       ).sort((a, b) => a.created_at.localeCompare(b.created_at))
 
       const totalAvailable = sourceGeneral.reduce((sum, row) => sum + row.amount, 0)
-      if (totalAvailable + 0.005 < remainingToConsume) {
+      if (totalAvailable + 0.005 < roundedAppliedAmount) {
         throw new Error('General credit changed. Refresh and try again.')
       }
 
@@ -2066,91 +2065,133 @@ export async function applyGeneralCreditToSelection(params: {
       ])
 
       const timestamp = now()
-      for (const row of sourceGeneral) {
-        if (remainingToConsume <= 0.005) break
-        const consume = Math.min(row.amount, remainingToConsume)
-        const nextAmount = Math.round((row.amount - consume) * 100) / 100
-        if (nextAmount <= 0.005) {
-          await db.settlements.update(row.id, {
-            amount: 0,
-            is_deleted: true,
-            updated_at: timestamp,
-            synced_at: null,
-          })
-        } else {
-          await db.settlements.update(row.id, {
-            amount: nextAmount,
-            updated_at: timestamp,
-            synced_at: null,
-          })
-        }
-        remainingToConsume -= consume
-      }
-
+      const round2 = (n: number) => Math.round(n * 100) / 100
       const originalAmountFormatted = currencyFormatter.format(roundedAppliedAmount)
+
+      // The applications this credit funds, in priority order (personal bills first).
+      type CreditApp = {
+        groupId: string | null
+        billId: string | null
+        from: string
+        to: string
+        amount: number
+        label: string
+      }
+      const applications: CreditApp[] = []
       for (const slice of params.personalSlices) {
         if (slice.amount <= 0.005) continue
-        const settlementId = generateId()
-        const label = `Applied general credit to bills (from ${originalAmountFormatted} credit)`
-        const labelSuffix = ` · ${label}`
-        await db.settlements.add({
-          ...syncFields({ id: settlementId }),
-          group_id: null,
-          bill_id: slice.billId,
-          bundle_id: null,
-          from_user_id: resolvedFromUserId,
-          to_user_id: resolvedToUserId,
-          amount: slice.amount,
-          currency: params.currency,
-          label,
-          is_settled: true,
+        applications.push({
+          groupId: null,
+          billId: slice.billId,
+          from: resolvedFromUserId,
+          to: resolvedToUserId,
+          amount: round2(slice.amount),
+          label: `Applied general credit to bills (from ${originalAmountFormatted} credit)`,
         })
-        await db.activity_log.add({
-          ...syncFields(),
-          group_id: null,
-          user_id: params.markedBy,
-          action: 'settled',
-          entity_type: 'settlement',
-          entity_id: settlementId,
-          description: `${fromProfile?.display_name ?? 'Someone'} settled ${currencyFormatter.format(slice.amount)} with ${toProfile?.display_name ?? 'someone'}${labelSuffix}`,
-        })
-        if (!personalSettlementId) personalSettlementId = settlementId
-        settlementIds.push(settlementId)
       }
-
       for (const group of params.groupAllocations) {
         if (group.amount <= 0.005) continue
-        const settlementId = generateId()
-        const label = `Applied general credit to group balance (from ${originalAmountFormatted} credit)`
-        const labelSuffix = ` · ${label}`
         const groupParties = groupResolvedParties.get(group.groupId)
-        await db.settlements.add({
-          ...syncFields({ id: settlementId }),
-          group_id: group.groupId,
-          bill_id: null,
-          bundle_id: null,
-          from_user_id: groupParties?.from ?? resolvedFromUserId,
-          to_user_id: groupParties?.to ?? resolvedToUserId,
-          amount: group.amount,
-          currency: params.currency,
-          label,
-          is_settled: true,
+        applications.push({
+          groupId: group.groupId,
+          billId: null,
+          from: groupParties?.from ?? resolvedFromUserId,
+          to: groupParties?.to ?? resolvedToUserId,
+          amount: round2(group.amount),
+          label: `Applied general credit to group balance (from ${originalAmountFormatted} credit)`,
         })
+      }
+
+      const track = (app: CreditApp, settlementId: string, amount: number) => {
+        settlementIds.push(settlementId)
+        if (app.groupId) {
+          createdGroupSettlements.push({ settlementId, groupId: app.groupId, amount: round2(amount) })
+        } else if (!personalSettlementId) {
+          personalSettlementId = settlementId
+        }
+      }
+      const logApplied = async (app: CreditApp, settlementId: string, amount: number) => {
         await db.activity_log.add({
           ...syncFields(),
-          group_id: group.groupId,
+          group_id: app.groupId,
           user_id: params.markedBy,
           action: 'settled',
           entity_type: 'settlement',
           entity_id: settlementId,
-          description: `${fromProfile?.display_name ?? 'Someone'} settled ${currencyFormatter.format(group.amount)} with ${toProfile?.display_name ?? 'someone'}${labelSuffix}`,
+          description: `${fromProfile?.display_name ?? 'Someone'} settled ${currencyFormatter.format(amount)} with ${toProfile?.display_name ?? 'someone'} · ${app.label}`,
         })
-        settlementIds.push(settlementId)
-        createdGroupSettlements.push({
-          settlementId,
-          groupId: group.groupId,
-          amount: Math.round(group.amount * 100) / 100,
+      }
+      const writeApplication = async (app: CreditApp, amount: number) => {
+        const settlementId = generateId()
+        await db.settlements.add({
+          ...syncFields({ id: settlementId }),
+          group_id: app.groupId,
+          bill_id: app.billId,
+          bundle_id: null,
+          from_user_id: app.from,
+          to_user_id: app.to,
+          amount: round2(amount),
+          currency: params.currency,
+          label: app.label,
+          is_settled: true,
         })
+        await logApplied(app, settlementId, amount)
+        track(app, settlementId, amount)
+      }
+      // Re-tag an existing general-credit payment onto an application, preserving the row
+      // (and its place in history) instead of deleting it.
+      const retagApplication = async (rowId: string, app: CreditApp, amount: number) => {
+        await db.settlements.update(rowId, {
+          group_id: app.groupId,
+          bill_id: app.billId,
+          from_user_id: app.from,
+          to_user_id: app.to,
+          amount: round2(amount),
+          label: app.label,
+          updated_at: timestamp,
+          synced_at: null,
+        })
+        await logApplied(app, rowId, amount)
+        track(app, rowId, amount)
+      }
+
+      // Allocate application demand across the source credit rows (FIFO by age).
+      const draws = new Map<string, { app: CreditApp; amount: number }[]>()
+      let ci = 0
+      let rem = sourceGeneral.length > 0 ? sourceGeneral[0].amount : 0
+      for (const app of applications) {
+        let need = app.amount
+        while (need > 0.005) {
+          while (ci < sourceGeneral.length && rem <= 0.005) {
+            ci += 1
+            rem = ci < sourceGeneral.length ? sourceGeneral[ci].amount : 0
+          }
+          if (ci >= sourceGeneral.length) break
+          const row = sourceGeneral[ci]
+          const take = Math.min(rem, need)
+          const list = draws.get(row.id) ?? []
+          list.push({ app, amount: round2(take) })
+          draws.set(row.id, list)
+          rem = round2(rem - take)
+          need = round2(need - take)
+        }
+      }
+
+      // Apply per source row: re-tag whole rows, split rows that span applications,
+      // and leave any leftover as still-available credit. No row is ever deleted.
+      for (const row of sourceGeneral) {
+        const list = draws.get(row.id)
+        if (!list || list.length === 0) continue
+        const drawn = round2(list.reduce((sum, d) => sum + d.amount, 0))
+        const remainder = round2(row.amount - drawn)
+        if (remainder > 0.005) {
+          await db.settlements.update(row.id, { amount: remainder, updated_at: timestamp, synced_at: null })
+          for (const d of list) await writeApplication(d.app, d.amount)
+        } else {
+          const [first, ...rest] = list
+          await retagApplication(row.id, first.app, first.amount)
+          for (const d of rest) await writeApplication(d.app, d.amount)
+        }
       }
     },
   )
@@ -2291,7 +2332,52 @@ export async function settleUpPersonalBills(params: {
         }
       }
 
-      // 2. Consume available general credit for the credit portion (offset is free).
+      const logSettled = async (settlementId: string, label: string) => {
+        await db.activity_log.add({
+          ...syncFields(),
+          group_id: null,
+          user_id: params.markedBy,
+          action: 'settled',
+          entity_type: 'settlement',
+          entity_id: settlementId,
+          description: `${meProfile?.display_name ?? 'Someone'} settled up with ${otherName} · ${label}`,
+        })
+      }
+      const addBillSettlement = async (
+        billId: string,
+        direction: ReconcileDirection,
+        amount: number,
+        source: 'offset' | 'credit',
+      ) => {
+        const parties = partiesFor(direction)
+        const settlementId = generateId()
+        const label = noteFor(direction, source)
+        await db.settlements.add({
+          ...syncFields({ id: settlementId }),
+          group_id: null,
+          bill_id: billId,
+          bundle_id: bundleId,
+          from_user_id: parties.from,
+          to_user_id: parties.to,
+          amount: round2(amount),
+          currency: params.currency,
+          label,
+          is_settled: true,
+        })
+        await logSettled(settlementId, label)
+        settlementIds.push(settlementId)
+      }
+
+      // 2. Offset slices net one bill against another — write a fresh bill-tagged settlement.
+      for (const slice of allSlices) {
+        if (slice.source !== 'offset') continue
+        await addBillSettlement(slice.billId, slice.direction, slice.amount, 'offset')
+      }
+
+      // 3. Credit slices draw from existing general-credit payments. Instead of deleting
+      //    those payments (which erased the settle-up's money trail), re-tag each source row
+      //    onto the bill it funds — preserving the original payment in history — and split a
+      //    row only when it spans more than one bill. No credit row is ever deleted.
       if (creditTotal > 0.005 && creditDirection) {
         const parties = partiesFor(creditDirection)
         const [sourceFromIds, sourceToIds] = await Promise.all([
@@ -2316,47 +2402,58 @@ export async function settleUpPersonalBills(params: {
         if (totalAvailable + 0.005 < creditTotal) {
           throw new Error('Available credit changed. Refresh and try again.')
         }
-        let remainingToConsume = creditTotal
-        for (const row of sourceGeneral) {
-          if (remainingToConsume <= 0.005) break
-          const consume = Math.min(row.amount, remainingToConsume)
-          const nextAmount = round2(row.amount - consume)
-          if (nextAmount <= 0.005) {
-            await db.settlements.update(row.id, { amount: 0, is_deleted: true, updated_at: timestamp, synced_at: null })
-          } else {
-            await db.settlements.update(row.id, { amount: nextAmount, updated_at: timestamp, synced_at: null })
-          }
-          remainingToConsume = round2(remainingToConsume - consume)
-        }
-      }
 
-      // 3. Write a bill-tagged settlement per slice, each with an explanatory note.
-      for (const slice of allSlices) {
-        const parties = partiesFor(slice.direction)
-        const settlementId = generateId()
-        const label = noteFor(slice.direction, slice.source)
-        await db.settlements.add({
-          ...syncFields({ id: settlementId }),
-          group_id: null,
-          bill_id: slice.billId,
-          bundle_id: bundleId,
-          from_user_id: parties.from,
-          to_user_id: parties.to,
-          amount: round2(slice.amount),
-          currency: params.currency,
-          label,
-          is_settled: true,
-        })
-        await db.activity_log.add({
-          ...syncFields(),
-          group_id: null,
-          user_id: params.markedBy,
-          action: 'settled',
-          entity_type: 'settlement',
-          entity_id: settlementId,
-          description: `${meProfile?.display_name ?? 'Someone'} settled up with ${otherName} · ${label}`,
-        })
-        settlementIds.push(settlementId)
+        // Allocate credit-slice demand across source rows (FIFO by age).
+        const draws = new Map<string, { billId: string; direction: ReconcileDirection; amount: number }[]>()
+        let ci = 0
+        let rem = sourceGeneral.length > 0 ? sourceGeneral[0].amount : 0
+        for (const slice of allSlices) {
+          if (slice.source !== 'credit') continue
+          let need = round2(slice.amount)
+          while (need > 0.005) {
+            while (ci < sourceGeneral.length && rem <= 0.005) {
+              ci += 1
+              rem = ci < sourceGeneral.length ? sourceGeneral[ci].amount : 0
+            }
+            if (ci >= sourceGeneral.length) break
+            const row = sourceGeneral[ci]
+            const take = Math.min(rem, need)
+            const list = draws.get(row.id) ?? []
+            list.push({ billId: slice.billId, direction: slice.direction, amount: round2(take) })
+            draws.set(row.id, list)
+            rem = round2(rem - take)
+            need = round2(need - take)
+          }
+        }
+
+        // Apply the allocation per source row.
+        for (const row of sourceGeneral) {
+          const list = draws.get(row.id)
+          if (!list || list.length === 0) continue // untouched — remains available credit
+          const drawn = round2(list.reduce((sum, d) => sum + d.amount, 0))
+          const remainder = round2(row.amount - drawn)
+          if (remainder > 0.005) {
+            // Partially used: keep the source as leftover credit, carve off a child per draw.
+            await db.settlements.update(row.id, { amount: remainder, updated_at: timestamp, synced_at: null })
+            for (const d of list) await addBillSettlement(d.billId, d.direction, d.amount, 'credit')
+          } else {
+            // Fully used: re-tag the original payment onto its first bill, children for the rest.
+            // Keep it OUT of the settle-up bundle so a later bundle-delete can't destroy the
+            // pre-existing payment — it stays as an independent, now bill-linked record.
+            const [first, ...rest] = list
+            const label = noteFor(first.direction, 'credit')
+            await db.settlements.update(row.id, {
+              bill_id: first.billId,
+              amount: round2(first.amount),
+              label,
+              updated_at: timestamp,
+              synced_at: null,
+            })
+            await logSettled(row.id, label)
+            settlementIds.push(row.id)
+            for (const d of rest) await addBillSettlement(d.billId, d.direction, d.amount, 'credit')
+          }
+        }
       }
     },
   )
