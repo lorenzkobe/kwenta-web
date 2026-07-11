@@ -1,4 +1,5 @@
 import { hydrateLinkedRemoteProfilesForActor } from '@/lib/people'
+import { maybeAutoRepairData } from '@/lib/kwenta-data-repair'
 import { flushQueuedKwentaNotifications, hasQueuedKwentaNotifications } from '@/lib/kwenta-notifications'
 import { markPendingMutationsApplied, markPendingMutationsConflict } from '@/sync/cloud-first-mutations'
 import { supabase } from '@/lib/supabase'
@@ -137,6 +138,7 @@ async function runSync(reason: SyncRunReason) {
         useAppStore.getState().setSyncStatus('idle')
         useAppStore.getState().setPullStale(false)
         await flushQueuedKwentaNotifications({ assumeCloudAck: true })
+        void maybeAutoRepairData(userId)
         return
       }
     }
@@ -158,6 +160,7 @@ async function runSync(reason: SyncRunReason) {
       useAppStore.getState().setPullStale(false)
       await flushQueuedKwentaNotifications({ assumeCloudAck: true })
       await hydrateLinkedRemoteProfilesForActor(userId)
+      void maybeAutoRepairData(userId)
     }
   } catch (err) {
     if (isDatabaseClosedError(err)) {

@@ -272,7 +272,7 @@ Balance between two people is a **plain signed sum**, per currency: (Σ pairwise
 
 **Payments:** `recordPersonPayment` (`operations.ts`) writes one atomic payment; multi-context allocations share a `bundle_id` (partition the total, never duplicate). "Settle up" = a `RecordPaymentDialog` prefilled to the full balance. The Person page statement (`buildPersonMoneyFlow` + `PersonStatement.tsx`) is the running-balance timeline (the standalone `/ledger` route is retired).
 
-**Data repair:** `src/lib/kwenta-data-repair.ts` (`planKwentaDataRepair` / `applyKwentaDataRepair`, surfaced in Settings via `RepairDataPanel`) safely removes orphaned/duplicate settlements and canonicalizes stale party ids; migration `047` is the server-authoritative backstop.
+**Data repair:** `src/lib/kwenta-data-repair.ts` (`planKwentaDataRepair` / `applyKwentaDataRepair`, surfaced in Settings via `RepairDataPanel`) safely removes orphaned/duplicate settlements and canonicalizes stale party ids; migration `047` is the server-authoritative backstop. `maybeAutoRepairData` also runs the plan+apply automatically **once per session after a successful sync** (wired in `sync-manager.ts`; fire-and-forget, never throws, deduped by a module-scoped guard) so artifacts are cleaned without the manual button.
 
 ---
 

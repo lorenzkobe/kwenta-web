@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react'
-import { Banknote, Pencil, Receipt } from 'lucide-react'
+import { Banknote, ChevronRight, Pencil, Receipt } from 'lucide-react'
 import type { MoneyFlowResult, MoneyFlowRow } from '@/lib/money-flow'
 import { cn, formatCurrency } from '@/lib/utils'
 
@@ -8,6 +8,8 @@ const PAGE = 20
 interface DisplayRow {
   key: string
   kind: 'bill' | 'payment'
+  /** Underlying bill id for bill rows (for opening the detail sheet); null for payments. */
+  billId: string | null
   title: string
   contextLabel: string
   createdAt: string
@@ -41,6 +43,7 @@ function collapse(rows: MoneyFlowRow[]): DisplayRow[] {
     out.push({
       key: `${r.type}-${r.id}`,
       kind,
+      billId: kind === 'bill' ? r.id : null,
       title: r.title,
       contextLabel: r.contextLabel,
       createdAt: r.createdAt,
@@ -62,11 +65,14 @@ export function PersonStatement({
   result,
   onEditPayment,
   editableSettlementIds,
+  onOpenBill,
 }: {
   result: MoneyFlowResult | undefined
   /** Given a settlement id in a payment row, open its editor. */
   onEditPayment?: (settlementId: string) => void
   editableSettlementIds?: Set<string>
+  /** Given a bill id in a bill row, open its detail sheet. */
+  onOpenBill?: (billId: string) => void
 }) {
   const [filter, setFilter] = useState<'all' | 'payments'>('all')
   const [visible, setVisible] = useState(PAGE)
@@ -114,11 +120,11 @@ export function PersonStatement({
               const isBill = row.kind === 'bill'
               const positive = row.signedAmount >= 0
               const editableId = row.settlementIds.find((id) => editableSettlementIds?.has(id))
-              return (
-                <li
-                  key={row.key}
-                  className="flex items-start justify-between gap-3 rounded-xl border border-stone-200 bg-stone-100/60 px-4 py-3"
-                >
+              const clickable = isBill && row.billId != null && onOpenBill != null
+              const rowClass =
+                'flex w-full items-start justify-between gap-3 rounded-xl border border-stone-200 bg-stone-100/60 px-4 py-3'
+              const inner = (
+                <>
                   <div className="flex min-w-0 items-start gap-3">
                     <div
                       className={cn(
@@ -128,7 +134,7 @@ export function PersonStatement({
                     >
                       {isBill ? <Receipt className="size-4" /> : <Banknote className="size-4" />}
                     </div>
-                    <div className="min-w-0">
+                    <div className="min-w-0 text-left">
                       <p className="text-sm font-medium text-stone-800">{row.title}</p>
                       <p className="mt-0.5 text-xs text-stone-500">{row.contextLabel}</p>
                       <p className="mt-0.5 text-[11px] text-stone-400">{fmtDate(row.createdAt)}</p>
@@ -153,6 +159,7 @@ export function PersonStatement({
                         Bal {formatCurrency(row.runningNet, row.currency)}
                       </p>
                     </div>
+                    {clickable && <ChevronRight className="mt-0.5 size-4 shrink-0 text-stone-400" />}
                     {row.kind === 'payment' && editableId && onEditPayment && (
                       <button
                         type="button"
@@ -164,6 +171,22 @@ export function PersonStatement({
                       </button>
                     )}
                   </div>
+                </>
+              )
+              return (
+                <li key={row.key}>
+                  {clickable ? (
+                    <button
+                      type="button"
+                      className={cn(rowClass, 'text-left transition-colors hover:border-stone-300 hover:bg-stone-100')}
+                      aria-label={`Open bill ${row.title}`}
+                      onClick={() => onOpenBill!(row.billId!)}
+                    >
+                      {inner}
+                    </button>
+                  ) : (
+                    <div className={rowClass}>{inner}</div>
+                  )}
                 </li>
               )
             })}

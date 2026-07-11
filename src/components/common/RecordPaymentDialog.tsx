@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { ArrowRight, SlidersHorizontal, X } from 'lucide-react'
 import { toast } from 'sonner'
 import { recordPersonPayment } from '@/db/operations'
@@ -80,6 +80,11 @@ export function RecordPaymentDialog({
   const [customOn, setCustomOn] = useState(false)
   const [customAmounts, setCustomAmounts] = useState<Record<string, string>>({})
   const [saving, setSaving] = useState(false)
+  // True once the user manually taps a direction, so a late-loading `contexts` doesn't override it.
+  const userPickedDirection = useRef(false)
+  // True once we've seeded direction from a real (non-zero) net, so later background net changes
+  // (e.g. a realtime update mid-edit) never silently flip the direction under the user.
+  const directionSeeded = useRef(false)
 
   // Contexts owed in the chosen direction (they_paid_me → they owe me → net > 0).
   const eligible = useMemo(() => {
@@ -90,10 +95,12 @@ export function RecordPaymentDialog({
 
   const owedTotal = useMemo(() => roundMoney(eligible.reduce((s, c) => s + c.owed, 0)), [eligible])
 
+  // Reset the form whenever the dialog (re)opens or the counterparty changes.
   useEffect(() => {
     if (!open) return
-    const dir = defaultDirection ?? (overallNet >= 0 ? 'they_paid_me' : 'i_paid_them')
-    setDirection(dir)
+    userPickedDirection.current = false
+    directionSeeded.current = false
+    setDirection(defaultDirection ?? (overallNet >= 0 ? 'they_paid_me' : 'i_paid_them'))
     setAmountStr(defaultAmount && defaultAmount > MONEY_EPSILON ? String(roundMoney(defaultAmount)) : '')
     setMethod('')
     setNote('')
@@ -101,6 +108,17 @@ export function RecordPaymentDialog({
     setCustomAmounts({})
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, otherId, defaultAmount, defaultDirection])
+
+  // If `contexts` load AFTER the dialog opened (overallNet was 0 at mount), re-seed the default
+  // direction from the now-known net — but exactly ONCE, and only from a real non-zero net, so a
+  // later background net change never flips the direction under the user. Never overrides an
+  // explicit prop or the user's own pick.
+  useEffect(() => {
+    if (!open || defaultDirection || userPickedDirection.current || directionSeeded.current) return
+    if (Math.abs(overallNet) <= MONEY_EPSILON) return
+    directionSeeded.current = true
+    setDirection(overallNet >= 0 ? 'they_paid_me' : 'i_paid_them')
+  }, [open, overallNet, defaultDirection])
 
   if (!open) return null
 
@@ -194,7 +212,10 @@ export function RecordPaymentDialog({
               className={`rounded-lg px-2 py-2 text-xs font-medium transition-colors ${
                 direction === 'they_paid_me' ? 'bg-teal-800/10 text-teal-900' : 'text-stone-500 hover:text-stone-800'
               }`}
-              onClick={() => setDirection('they_paid_me')}
+              onClick={() => {
+                userPickedDirection.current = true
+                setDirection('they_paid_me')
+              }}
               disabled={saving}
             >
               {otherName} paid you
@@ -204,7 +225,10 @@ export function RecordPaymentDialog({
               className={`rounded-lg px-2 py-2 text-xs font-medium transition-colors ${
                 direction === 'i_paid_them' ? 'bg-teal-800/10 text-teal-900' : 'text-stone-500 hover:text-stone-800'
               }`}
-              onClick={() => setDirection('i_paid_them')}
+              onClick={() => {
+                userPickedDirection.current = true
+                setDirection('i_paid_them')
+              }}
               disabled={saving}
             >
               You paid {otherName}
@@ -246,7 +270,7 @@ export function RecordPaymentDialog({
                 onClick={() => setAmountStr(String(owedTotal))}
                 disabled={saving}
               >
-                Settle all · {formatCurrency(owedTotal, currency)}
+                Settle up · {formatCurrency(owedTotal, currency)}
               </button>
             )}
           </div>

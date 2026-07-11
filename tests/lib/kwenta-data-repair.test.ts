@@ -1,7 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { db } from '@/db/db'
-import { planKwentaDataRepair, applyKwentaDataRepair } from '@/lib/kwenta-data-repair'
+import {
+  planKwentaDataRepair,
+  applyKwentaDataRepair,
+  maybeAutoRepairData,
+  __resetAutoRepairGuardForTests,
+} from '@/lib/kwenta-data-repair'
 import { computePairwiseNetAllContexts } from '@/lib/people'
+import { useAppStore } from '@/store/app-store'
 import { makeGroup, makeMember, makeProfile, makeSettlement, resetDb, seedSimpleBill } from '../helpers/db'
 
 // The repair fires a sync round trip; stub it so we assert Dexie state only.
@@ -195,5 +201,77 @@ describe('applyKwentaDataRepair', () => {
     // 100 owed − 30 paid = 70 (a surviving double would wrongly give 40).
     const net = (await computePairwiseNetAllContexts('me', 'other')).get('PHP') ?? 0
     expect(net).toBeCloseTo(70, 2)
+  })
+})
+
+describe('maybeAutoRepairData', () => {
+  beforeEach(() => {
+    __resetAutoRepairGuardForTests()
+    useAppStore.setState({ pullStale: false })
+  })
+
+  it('soft-deletes an orphan when artifacts exist', async () => {
+    const billId = await seedSimpleBill({ groupId: null, paidBy: 'me', shares: { other: 100 } })
+    await db.settlements.add(
+      makeSettlement({ id: 'S', bill_id: billId, from_user_id: 'other', to_user_id: 'me', amount: 100 }),
+    )
+    await db.bills.update(billId, { is_deleted: true })
+
+    await maybeAutoRepairData('me')
+    expect((await db.settlements.get('S'))?.is_deleted).toBe(true)
+  })
+
+  it('leaves clean data untouched', async () => {
+    await seedSimpleBill({ groupId: null, paidBy: 'me', shares: { other: 100 } })
+    await db.settlements.add(
+      makeSettlement({ id: 'REAL', from_user_id: 'other', to_user_id: 'me', amount: 30 }),
+    )
+    await maybeAutoRepairData('me')
+    expect((await db.settlements.get('REAL'))?.is_deleted).toBe(false)
+  })
+
+  it('runs only once per session — a later artifact is not repaired until the next session', async () => {
+    // First run on clean data marks the session guard done.
+    await maybeAutoRepairData('me')
+
+    // A new orphan appears mid-session; the guard must prevent a second repair.
+    const billId = await seedSimpleBill({ groupId: null, paidBy: 'me', shares: { other: 10 } })
+    await db.settlements.add(
+      makeSettlement({ id: 'late', bill_id: billId, from_user_id: 'other', to_user_id: 'me', amount: 10 }),
+    )
+    await db.bills.update(billId, { is_deleted: true })
+
+    await maybeAutoRepairData('me')
+    expect((await db.settlements.get('late'))?.is_deleted).toBe(false)
+
+    // Simulating a fresh session (page reload) clears the guard and the orphan is then cleaned.
+    __resetAutoRepairGuardForTests()
+    await maybeAutoRepairData('me')
+    expect((await db.settlements.get('late'))?.is_deleted).toBe(true)
+  })
+
+  it('never throws when the underlying repair fails', async () => {
+    const spy = vi.spyOn(db.settlements, 'filter').mockImplementationOnce(() => {
+      throw new Error('boom')
+    })
+    await expect(maybeAutoRepairData('me')).resolves.toBeUndefined()
+    spy.mockRestore()
+  })
+
+  it('skips entirely when the pull is stale (data may be partial)', async () => {
+    useAppStore.setState({ pullStale: true })
+    const billId = await seedSimpleBill({ groupId: null, paidBy: 'me', shares: { other: 100 } })
+    await db.settlements.add(
+      makeSettlement({ id: 'S', bill_id: billId, from_user_id: 'other', to_user_id: 'me', amount: 100 }),
+    )
+    await db.bills.update(billId, { is_deleted: true })
+
+    await maybeAutoRepairData('me')
+    // Guard held: the orphan is untouched, and the session guard is NOT consumed (retryable).
+    expect((await db.settlements.get('S'))?.is_deleted).toBe(false)
+
+    useAppStore.setState({ pullStale: false })
+    await maybeAutoRepairData('me')
+    expect((await db.settlements.get('S'))?.is_deleted).toBe(true)
   })
 })

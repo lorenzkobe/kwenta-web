@@ -42,9 +42,9 @@ import { EditSettlementDialog } from '@/components/common/EditSettlementDialog'
 import {
   RecordPaymentDialog,
   type PaymentContext,
-  type PaymentDirection,
 } from '@/components/common/RecordPaymentDialog'
 import { PersonStatement } from '@/components/common/PersonStatement'
+import { BillDetailModal } from '@/components/common/BillDetailModal'
 import { ExportImageDialog } from '@/components/export/ExportImageDialog'
 import { PersonExportCard, type PersonBillEntry } from '@/components/export/PersonExportCard'
 import { exportPersonToCSV } from '@/lib/export-csv'
@@ -328,9 +328,7 @@ export function PersonDetailPage() {
   const { userId, profile: meProfile } = useCurrentUser()
   const [editing, setEditing] = useState<SettlementHistoryItem | null>(null)
   const [paymentOpen, setPaymentOpen] = useState(false)
-  const [settlePrefill, setSettlePrefill] = useState<{ amount: number; direction: PaymentDirection } | null>(
-    null,
-  )
+  const [openBillId, setOpenBillId] = useState<string | null>(null)
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false)
   const [showOptionsMenu, setShowOptionsMenu] = useState(false)
   const [linkByIdInput, setLinkByIdInput] = useState('')
@@ -541,7 +539,6 @@ export function PersonDetailPage() {
     return buildPersonMoneyFlow(userId, personId)
   }, [userId, personId])
 
-  const primaryNet = useMemo(() => netByCurrency.get(defaultCurrency) ?? 0, [netByCurrency, defaultCurrency])
   const meName = meProfile?.display_name?.trim() || 'You'
 
   // Personal + each shared group (for the chosen currency) as payment "apply to" buckets.
@@ -893,30 +890,10 @@ export function PersonDetailPage() {
             size="sm"
             className="rounded-full"
             type="button"
-            onClick={() => {
-              setSettlePrefill(null)
-              setPaymentOpen(true)
-            }}
+            onClick={() => setPaymentOpen(true)}
           >
             Record a payment
           </Button>
-          {Math.abs(primaryNet) > 0.005 && (
-            <Button
-              size="sm"
-              variant="outline"
-              className="rounded-full"
-              type="button"
-              onClick={() => {
-                setSettlePrefill({
-                  amount: Math.abs(primaryNet),
-                  direction: primaryNet >= 0 ? 'they_paid_me' : 'i_paid_them',
-                })
-                setPaymentOpen(true)
-              }}
-            >
-              Settle up
-            </Button>
-          )}
         </div>
       </div>
 
@@ -935,6 +912,7 @@ export function PersonDetailPage() {
             const item = settlementByLegId.get(id)
             if (item) setEditing(item)
           }}
+          onOpenBill={(id) => setOpenBillId(id)}
         />
       </div>
 
@@ -942,10 +920,7 @@ export function PersonDetailPage() {
         <RecordPaymentDialog
           open
           onOpenChange={(o) => {
-            if (!o) {
-              setPaymentOpen(false)
-              setSettlePrefill(null)
-            }
+            if (!o) setPaymentOpen(false)
           }}
           meId={userId}
           otherId={personId}
@@ -954,12 +929,19 @@ export function PersonDetailPage() {
           currency={defaultCurrency}
           markedBy={userId}
           contexts={paymentContexts}
-          defaultDirection={settlePrefill?.direction}
-          defaultAmount={settlePrefill?.amount}
-          title={settlePrefill ? 'Settle up' : 'Record a payment'}
-          onRecorded={() => {
-            setPaymentOpen(false)
-            setSettlePrefill(null)
+          onRecorded={() => setPaymentOpen(false)}
+        />
+      )}
+
+      {openBillId && userId && (
+        <BillDetailModal
+          billId={openBillId}
+          currentUserId={userId}
+          onClose={() => setOpenBillId(null)}
+          onUpdated={() => {}}
+          onEdit={(id) => {
+            setOpenBillId(null)
+            navigate(`/app/bills/${id}`)
           }}
         />
       )}

@@ -2,6 +2,7 @@ import { db } from '@/db/db'
 import { generateId, getDeviceId, now } from '@/lib/utils'
 import { resolveGroupMemberUserId } from '@/db/operations'
 import { finalizeMutationSync } from '@/sync/cloud-first-mutations'
+import { useAppStore } from '@/store/app-store'
 import type { Profile, Settlement } from '@/types'
 
 /**
@@ -193,6 +194,48 @@ export async function planKwentaDataRepair(userId: string): Promise<KwentaDataRe
       total: orphanSettlements.length + duplicateSettlements.length + nonCanonicalSettlements.length,
     },
   }
+}
+
+// Runs once per app session (module-scoped), so the post-sync auto-repair doesn't re-scan on
+// every backup sync. A full page reload resets it, re-checking for newly-accumulated artifacts.
+let autoRepairDone = false
+let autoRepairInFlight = false
+
+/**
+ * Fire-and-forget auto-repair: run {@link planKwentaDataRepair} once per session after a
+ * successful sync and, if it finds anything, apply it. Conservative by construction (see the
+ * plan doc — never condemns a real payment) so it is safe to apply without manual review.
+ *
+ * Never throws: a repair failure must not break app startup or sync. Only marks itself done on
+ * success, so a transient failure retries on the next session.
+ */
+export async function maybeAutoRepairData(userId: string): Promise<void> {
+  if (autoRepairDone || autoRepairInFlight) return
+  // Defense-in-depth: only repair against fully-pulled data. Orphan detection soft-deletes rows
+  // whose bill/group/party isn't in Dexie, so a stale/partial pull could condemn a real row.
+  // Both current callers already run post-successful-sync; this guards future callers too.
+  if (useAppStore.getState().pullStale) return
+  autoRepairInFlight = true
+  try {
+    const plan = await planKwentaDataRepair(userId)
+    if (plan.summary.total > 0) {
+      const res = await applyKwentaDataRepair(userId, plan)
+      console.info(
+        `[kwenta] auto data repair: removed ${res.softDeleted}, canonicalized ${res.rewritten}`,
+      )
+    }
+    autoRepairDone = true
+  } catch (err) {
+    console.warn('[kwenta] auto data repair failed (will retry next session):', err)
+  } finally {
+    autoRepairInFlight = false
+  }
+}
+
+/** Test-only: reset the once-per-session auto-repair guard between cases. */
+export function __resetAutoRepairGuardForTests(): void {
+  autoRepairDone = false
+  autoRepairInFlight = false
 }
 
 /**
