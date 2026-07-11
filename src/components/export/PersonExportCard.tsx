@@ -101,6 +101,7 @@ export function PersonExportCard({ displayName, netByCurrency, unsettledPersonal
           <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 4 }}>
             {netEntries.map(([currency, net]) => (
               <span key={currency} style={{ color: netColor(net), fontSize: 18, fontWeight: 700 }}>
+                {net > 0 ? `${displayName} owes you ` : 'You owe '}
                 {formatCurrency(Math.abs(net), currency)}
               </span>
             ))}

@@ -31,6 +31,7 @@ import { supabase } from '@/lib/supabase'
 import { hasUnsyncedLocalDataForUser, fullSync } from '@/sync/sync-service'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { RepairDataPanel } from '@/components/settings/RepairDataPanel'
 import { timeAgo } from '@/lib/utils'
 import { toast } from 'sonner'
 
@@ -301,6 +302,8 @@ export function SettingsPage() {
             </div>
           </div>
         )}
+
+        {userId && <RepairDataPanel userId={userId} />}
 
         {(pendingConflicts?.length ?? 0) > 0 && (
           <div className="rounded-3xl border border-amber-200 bg-amber-50/60 p-5 shadow-sm">

@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import { useLiveQuery } from 'dexie-react-hooks'
-import { ArrowLeft, Check, Clock, Loader2, Pencil, ReceiptText, Share2, Trash2, Users } from 'lucide-react'
+import { ArrowLeft, Clock, Loader2, Pencil, ReceiptText, Share2, Trash2, Users } from 'lucide-react'
 import { toast } from 'sonner'
 import {
   CATEGORY_COLORS,
@@ -13,13 +13,14 @@ import { getBillWithDetails, deleteBill } from '@/db/operations'
 import { db } from '@/db/db'
 import { BILL_BACK_QUERY, billDetailBackPath, withBillBackQuery } from '@/lib/bill-navigation'
 import {
-  computePairwiseNet,
+  computePairwiseNetAllContexts,
   computePairwiseNetForBill,
   dedupeParticipantIds,
   expandProfileIdsForSplitMatching,
   participantUnionForBill,
   resolveProfileDisplay,
 } from '@/lib/people'
+import { isEffectivelyZero } from '@/lib/utils'
 import { useCurrentUser } from '@/hooks/useCurrentUser'
 import { fullSync } from '@/sync/sync-service'
 import { cn, formatCurrency } from '@/lib/utils'
@@ -27,7 +28,6 @@ import { makeExportFilename } from '@/lib/export-utils'
 import { generateBillDetailPDF } from '@/lib/export-pdf'
 import { exportBillsToCSV } from '@/lib/export-csv'
 import { Button } from '@/components/ui/button'
-import { RecordSettlementDialog } from '@/components/common/RecordSettlementDialog'
 import { SettlementHistoryList } from '@/components/common/SettlementHistoryList'
 import { listSettlementHistoryForBill } from '@/lib/settlement'
 import { ConfirmDialog } from '@/components/common/ConfirmDialog'
@@ -53,26 +53,11 @@ export function BillDetailPage() {
     return getBillWithDetails(billId)
   }, [billId])
   const [billPairRows, setBillPairRows] = useState<
-    { otherId: string; displayName: string; net: number; autoOffset?: boolean; globalNet?: number }[]
+    { otherId: string; displayName: string; net: number; squareOverall: boolean }[]
   >([])
-  const [recordSettlement, setRecordSettlement] = useState<{
-    fromUserId: string
-    toUserId: string
-    amount: number
-    fromName: string
-    toName: string
-  } | null>(null)
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false)
   const [mySplitTotal, setMySplitTotal] = useState<number | null>(null)
   const [exportOpen, setExportOpen] = useState(false)
-
-  const reloadBill = useCallback(() => {
-    if (!billId) return
-    getBillWithDetails(billId).then((data) => {
-      setBillState(data)
-      setLoadingState(false)
-    })
-  }, [billId])
 
   useEffect(() => {
     if (!billId) return
@@ -166,22 +151,17 @@ export function BillDetailPage() {
     const myIds = await expandProfileIdsForSplitMatching(userId, userId)
     const reps = await dedupeParticipantIds(union, userId)
     const others = reps.filter((id) => !myIds.has(id))
-    const rows: { otherId: string; displayName: string; net: number; autoOffset?: boolean; globalNet?: number }[] = []
+    const rows: { otherId: string; displayName: string; net: number; squareOverall: boolean }[] = []
     for (const oid of others) {
       const net = await computePairwiseNetForBill(billId, userId, oid)
       if (Math.abs(net) < 0.005) continue
       const disp = await resolveProfileDisplay(oid, userId)
-      let autoOffset: boolean | undefined
-      let globalNet: number | undefined
-      if (net < 0) {
-        const globalByCurrency = await computePairwiseNet(userId, oid)
-        const gNet = globalByCurrency.get(bill.currency) ?? 0
-        if (gNet >= 0) {
-          autoOffset = true
-          globalNet = gNet
-        }
-      }
-      rows.push({ otherId: oid, displayName: disp.displayName, net, autoOffset, globalNet })
+      // Whether you're square with this person overall (combined tab) — status lives on the
+      // person, not the bill, so a payment there settles this bill's contribution too. Scope
+      // to this bill's currency so an unrelated balance in another currency doesn't flip it.
+      const tab = await computePairwiseNetAllContexts(userId, oid)
+      const squareOverall = isEffectivelyZero(tab.get(bill.currency) ?? 0)
+      rows.push({ otherId: oid, displayName: disp.displayName, net, squareOverall })
     }
     rows.sort((a, b) => a.displayName.localeCompare(b.displayName))
     setBillPairRows(rows)
@@ -341,74 +321,37 @@ export function BillDetailPage() {
         )}
       </div>
 
-      {userId && billPairRows.some((r) => !r.autoOffset) && (
+      {userId && billPairRows.length > 0 && (
         <div className="rounded-3xl border border-stone-200 bg-white p-5 shadow-sm">
-          <h2 className="text-lg font-semibold">Settle on this bill</h2>
+          <h2 className="text-lg font-semibold">This bill&apos;s balance</h2>
           <p className="mt-1 text-xs text-stone-500">
-            Amounts use this bill&apos;s splits and payments tagged to this bill.
+            What this bill adds to your running balance with each person. Record payments on their page —
+            it settles across everything you share.
           </p>
           <ul className="mt-4 space-y-2">
-            {billPairRows.map((row) =>
-              row.autoOffset ? (
-                <li
-                  key={row.otherId}
-                  className="flex flex-col gap-1 rounded-xl border border-stone-200 bg-stone-50/80 px-4 py-3"
+            {billPairRows.map((row) => (
+              <li key={row.otherId}>
+                <Link
+                  to={`/app/people/${row.otherId}`}
+                  className="flex items-center justify-between gap-3 rounded-xl border border-stone-200 bg-stone-50/80 px-4 py-3 transition-colors hover:bg-stone-100"
                 >
-                  <p className="text-sm font-medium text-stone-500">
-                    Covered — {row.displayName} owes you{' '}
-                    {formatCurrency(row.globalNet ?? 0, bill.currency)} overall
-                  </p>
-                  <p className="text-xs text-stone-400">
-                    Your {formatCurrency(Math.abs(row.net), bill.currency)} share is offset by
-                    their balance
-                  </p>
-                </li>
-              ) : (
-                <li
-                  key={row.otherId}
-                  className="flex flex-col gap-2 rounded-xl border border-stone-200 bg-stone-50/80 px-4 py-3 sm:flex-row sm:items-center sm:justify-between"
-                >
-                  <div>
+                  <div className="min-w-0">
                     <p className="text-sm font-medium text-stone-800">
                       {row.net < 0
                         ? `You owe ${row.displayName}`
-                        : `${row.displayName} owes you`}
-                    </p>
-                    <p className="text-xs text-stone-500">
+                        : `${row.displayName} owes you`}{' '}
                       {formatCurrency(Math.abs(row.net), bill.currency)}
                     </p>
+                    <p className="mt-0.5 text-xs text-stone-500">
+                      {row.squareOverall
+                        ? "You're square overall — settled ✓"
+                        : 'From this bill · open their page to settle'}
+                    </p>
                   </div>
-                  <Button
-                    type="button"
-                    variant="success"
-                    size="sm"
-                    className="h-10 shrink-0 rounded-lg"
-                    onClick={() => {
-                      if (row.net < 0) {
-                        setRecordSettlement({
-                          fromUserId: userId,
-                          toUserId: row.otherId,
-                          amount: Math.abs(row.net),
-                          fromName: 'You',
-                          toName: row.displayName,
-                        })
-                      } else {
-                        setRecordSettlement({
-                          fromUserId: row.otherId,
-                          toUserId: userId,
-                          amount: row.net,
-                          fromName: row.displayName,
-                          toName: 'You',
-                        })
-                      }
-                    }}
-                  >
-                    <Check className="size-3.5" />
-                    Record payment
-                  </Button>
-                </li>
-              ),
-            )}
+                  <span className="shrink-0 text-sm font-medium text-teal-800">Open →</span>
+                </Link>
+              </li>
+            ))}
           </ul>
         </div>
       )}
@@ -514,28 +457,6 @@ export function BillDetailPage() {
         )}
       </div>
 
-      {recordSettlement && billId && userId && (
-        <RecordSettlementDialog
-          open
-          onOpenChange={(o) => {
-            if (!o) setRecordSettlement(null)
-          }}
-          groupId={bill.group_id}
-          billId={billId}
-          currency={bill.currency}
-          fromUserId={recordSettlement.fromUserId}
-          toUserId={recordSettlement.toUserId}
-          defaultAmount={recordSettlement.amount}
-          fromName={recordSettlement.fromName}
-          toName={recordSettlement.toName}
-          markedBy={userId}
-          onRecorded={() => {
-            reloadBill()
-            void reloadBillPairs()
-            setRecordSettlement(null)
-          }}
-        />
-      )}
     </div>
 
     <ConfirmDialog

@@ -92,4 +92,46 @@ describe('isPersonalBillFullySettled', () => {
     )
     expect(await isPersonalBillFullySettled(billId, 'me')).toBe(false)
   })
+
+  it('stays settled in its own currency despite an open balance in another', async () => {
+    // A PHP bill, fully paid...
+    const phpBill = await seedSimpleBill({
+      groupId: null,
+      paidBy: 'me',
+      currency: 'PHP',
+      shares: { me: 50, other: 50 },
+    })
+    await db.settlements.add(
+      makeSettlement({ from_user_id: 'other', to_user_id: 'me', amount: 50, currency: 'PHP' }),
+    )
+    // ...but an unrelated USD bill with the same person is still open.
+    await seedSimpleBill({
+      groupId: null,
+      paidBy: 'me',
+      currency: 'USD',
+      shares: { me: 30, other: 30 },
+    })
+    // The PHP bill is settled in PHP; the open USD balance must not flip it to unpaid.
+    expect(await isPersonalBillFullySettled(phpBill, 'me')).toBe(true)
+  })
+
+  it('an untargeted payment that clears the tab settles the bill (stuck-unpaid fix)', async () => {
+    // Status is derived from the person tab, not bill-tagged payments: a general payment
+    // that squares you up marks the bill settled — the exact "still shows unpaid" bug.
+    const billId = await seedSimpleBill({
+      groupId: null,
+      paidBy: 'me',
+      shares: { me: 50, other: 50 },
+    })
+    expect(await isPersonalBillFullySettled(billId, 'me')).toBe(false)
+    await db.settlements.add(
+      makeSettlement({
+        bill_id: null, // untargeted — not tagged to this bill
+        from_user_id: 'other',
+        to_user_id: 'me',
+        amount: 50,
+      }),
+    )
+    expect(await isPersonalBillFullySettled(billId, 'me')).toBe(true)
+  })
 })

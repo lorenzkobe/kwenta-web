@@ -51,8 +51,7 @@ describe('buildPersonMoneyFlow — personal bills', () => {
     expect(rows[0].currency).toBe('PHP')
     expect(rows[0].rawAmount).toBe(500)
     expect(rows[0].runningNet).toBe(500)
-    expect(rows[0].theirCreditAvailable).toBe(0)
-    expect(rows[0].myCreditAvailable).toBe(0)
+    expect(rows[0].signedAmount).toBe(500)
     expect(currentNet.get('PHP')).toBe(500)
   })
 
@@ -94,46 +93,40 @@ describe('buildPersonMoneyFlow — payments against debt', () => {
   })
 })
 
-describe('buildPersonMoneyFlow — general credit', () => {
-  it('an overpayment clears the debt and banks the remainder as their credit (never flips sign)', async () => {
+describe('buildPersonMoneyFlow — overpayment flips the tab (no credit)', () => {
+  it('an untargeted overpayment from them flips the balance past zero', async () => {
     await theyOweMe(500, T.t1)
-    // Untargeted payment from them: group_id and bill_id both null → general credit.
+    // Untargeted payment from them: group_id and bill_id both null.
     await db.settlements.add(
       makeSettlement({ from_user_id: 'other', to_user_id: 'me', amount: 800, created_at: T.t2 }),
     )
-    const { rows, currentNet, currentTheirCredit } = await buildPersonMoneyFlow('me', 'other')
-    expect(rows[1].type).toBe('general_payment')
-    expect(rows[1].runningNet).toBe(0) // NOT -300
-    expect(rows[1].theirCreditAvailable).toBe(300)
-    expect(currentNet.get('PHP')).toBe(0)
-    expect(currentTheirCredit.get('PHP')).toBe(300)
+    const { rows, currentNet } = await buildPersonMoneyFlow('me', 'other')
+    expect(rows[1].type).toBe('payment')
+    expect(rows[1].runningNet).toBe(-300) // flips: I now owe them 300
+    expect(currentNet.get('PHP')).toBe(-300)
   })
 
-  it('a later same-direction bill is covered by available credit', async () => {
+  it('a later same-direction bill moves the flipped tab back', async () => {
     await theyOweMe(500, T.t1)
     await db.settlements.add(
       makeSettlement({ from_user_id: 'other', to_user_id: 'me', amount: 800, created_at: T.t2 }),
     )
     await theyOweMe(200, T.t3)
-    const { rows, currentNet, currentTheirCredit } = await buildPersonMoneyFlow('me', 'other')
+    const { rows, currentNet } = await buildPersonMoneyFlow('me', 'other')
     expect(rows).toHaveLength(3)
     expect(rows[2].type).toBe('personal_bill')
-    expect(rows[2].runningNet).toBe(0)
-    expect(rows[2].theirCreditAvailable).toBe(100)
-    expect(currentNet.get('PHP')).toBe(0)
-    expect(currentTheirCredit.get('PHP')).toBe(100)
+    expect(rows[2].runningNet).toBe(-100) // -300 + 200
+    expect(currentNet.get('PHP')).toBe(-100)
   })
 
-  it('my own overpayment banks credit on my side', async () => {
+  it('my own overpayment flips the tab to their favor', async () => {
     await iOweThem(300, T.t1)
     await db.settlements.add(
       makeSettlement({ from_user_id: 'me', to_user_id: 'other', amount: 500, created_at: T.t2 }),
     )
-    const { rows, currentNet, currentMyCredit } = await buildPersonMoneyFlow('me', 'other')
-    expect(rows[1].runningNet).toBe(0)
-    expect(rows[1].myCreditAvailable).toBe(200)
-    expect(currentNet.get('PHP')).toBe(0)
-    expect(currentMyCredit.get('PHP')).toBe(200)
+    const { rows, currentNet } = await buildPersonMoneyFlow('me', 'other')
+    expect(rows[1].runningNet).toBe(200) // -300 + 500 → they owe me 200
+    expect(currentNet.get('PHP')).toBe(200)
   })
 })
 
@@ -207,6 +200,55 @@ describe('buildPersonMoneyFlow — multi-currency', () => {
     const { currentNet } = await buildPersonMoneyFlow('me', 'other')
     expect(currentNet.get('PHP')).toBe(500)
     expect(currentNet.get('USD')).toBe(-20)
+  })
+})
+
+describe('buildPersonMoneyFlow — peer-linked identity', () => {
+  it('counts one split per item when a person has two peer-linked ids on it (no double-count)', async () => {
+    // 'otherPeer' is a second id for the same person, joined to 'other' by a manual peer link.
+    await db.profiles.add(makeProfile({ id: 'otherPeer', display_name: 'Other (peer)' }))
+    await db.profile_peer_links.add({
+      id: 'link-1',
+      created_at: T.t1,
+      updated_at: T.t1,
+      synced_at: T.t1,
+      is_deleted: false,
+      device_id: 'test',
+      owner_user_id: 'me',
+      anchor_profile_id: 'other',
+      peer_profile_id: 'otherPeer',
+    })
+    // One personal item I paid, with a split under EACH of the person's two ids.
+    const billId = await seedSimpleBill({
+      groupId: null,
+      paidBy: 'me',
+      shares: { other: 50, otherPeer: 50 },
+    })
+    await db.bills.update(billId, { created_at: T.t1 })
+
+    const { rows, currentNet } = await buildPersonMoneyFlow('me', 'other')
+    expect(rows).toHaveLength(1)
+    expect(rows[0].rawAmount).toBe(50) // one split, not 100
+    expect(currentNet.get('PHP')).toBe(50)
+    // Must reconcile to the headline balance (the invariant the double-count broke).
+    const truth = await computePairwiseNetAllContexts('me', 'other')
+    expect(currentNet.get('PHP')).toBeCloseTo(truth.get('PHP') ?? 0, 2)
+  })
+})
+
+describe('buildPersonMoneyFlow — name resolution', () => {
+  it('titles a payment with a live roster name, not a soft-deleted membership', async () => {
+    await db.profiles.update('other', { is_deleted: true }) // no usable profile name
+    await db.group_members.bulkAdd([
+      makeMember({ group_id: 'g', user_id: 'other', display_name: 'Removed', is_deleted: true }),
+      makeMember({ group_id: 'g', user_id: 'other', display_name: 'Active', is_deleted: false }),
+    ])
+    await db.settlements.add(
+      makeSettlement({ from_user_id: 'other', to_user_id: 'me', amount: 100, created_at: T.t1 }),
+    )
+    const { rows } = await buildPersonMoneyFlow('me', 'other')
+    const payment = rows.find((r) => r.type === 'payment')
+    expect(payment?.title).toBe('Active paid you')
   })
 })
 

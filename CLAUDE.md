@@ -25,7 +25,7 @@ Tests are **mandatory** for this project — we create tests and run testing as 
 - `tests/setup.ts` (registered as `setupFiles`) imports `fake-indexeddb/auto` so any module that touches `@/db/db` can open the DB. For Dexie-backed functions, use the factories + `resetDb()` in `tests/helpers/db.ts` (call `resetDb()` in `beforeEach`).
 - **Mocking Supabase / sync side-effects:** modules that import `@/lib/supabase` or fire sync/notifications (e.g. `operations.ts`, `kwenta-notifications.ts`, `sync-service.ts`) are tested by `vi.mock`-ing the network/side-effect deps and asserting Dexie/localStorage state. Use `vi.hoisted` to share controllable mock state with the hoisted `vi.mock` factory (see `tests/lib/kwenta-notifications.test.ts`, `tests/lib/cloud-first-mutations.test.ts`, `tests/db/operations.test.ts`). A benign `@/lib/supabase` stub (`rpc → {data:null,error:null}`) keeps `fetchRemoteProfileIntoDexie` offline.
 - When adding or changing behavior, add/extend unit tests that cover it. Prefer the pure-logic modules (`src/lib/splits.ts`, `src/lib/utils.ts`, `src/lib/bill-split-form.ts`, etc.). DB-coupled modules (`settlement.ts`, `people.ts`, `personal-bill-status.ts`, `operations.ts`) are tested against `fake-indexeddb`.
-- Run `npm test` before considering any change complete — it must pass (currently **219 tests / 22 files**).
+- Run `npm test` before considering any change complete — it must pass (currently **389 tests / 30 files**).
 - Coverage inventory:
   - `tests/lib/` pure logic: `splits`, `utils` (incl. `roundMoney`/`isEffectivelyZero`/`MONEY_EPSILON`), `amount-input`, `bill-split-form`, `bill-navigation`, `balance-rollups`, `db-query-helpers`, `account-gate-messages`, `export-utils`, `bill-categories`, `auth-session-flags`, `runtime-flags`, `client-metrics`
   - `tests/lib/` DB-backed: `settlement` (incl. `listSettlementHistoryForBill`), `people`, `personal-bill-status`, `clear-kwenta-local`, `export-csv`
@@ -154,7 +154,7 @@ Three profile flavors in Dexie (`src/types/index.ts`):
 
 ## Dexie Schema (`src/db/db.ts`)
 
-Current version: **13**. All tables extend sync fields: `id` (UUID PK), `created_at`, `updated_at`, `synced_at` (null = unsynced), `is_deleted`, `device_id`. Versions 9+ added compound indexes (e.g. `[group_id+is_deleted]`) for query performance.
+Current version: **14** (v14 added optional `settlements.method` — cash/transfer/… payment audit). All tables extend sync fields: `id` (UUID PK), `created_at`, `updated_at`, `synced_at` (null = unsynced), `is_deleted`, `device_id`. Versions 9+ added compound indexes (e.g. `[group_id+is_deleted]`) for query performance.
 
 | Table | Key Indexes | Purpose |
 |-------|---------|---------|
@@ -262,10 +262,17 @@ Notifications are queued in `localStorage` (`kwenta_notification_outbox_v1`) and
 
 ### Balance Computation Helpers
 
-- `computePairwiseNet(meId, otherId)` — net owed between two users across all shared bills and settled payments, keyed by currency
-- `computePairwiseNetForBill(billId, meId, otherId)` — same but scoped to one bill
-- `computePersonalNetRollup(meId)` — totals across all contacts
-- `buildPersonalBillAllocationPlan(params)` — Phase B: determines which bills a payment should settle and in what amounts
+Balance between two people is a **plain signed sum**, per currency: (Σ pairwise bill shares, personal + each group) − (Σ payments). `+` = they owe me. Overpayment flips the sign — there is **no "general credit"** concept (removed 2026-07-11; the old clamp/credit apparatus and `computePairwiseNet`/`buildPersonalReconcilePlan`/`applyGeneralCreditToSelection`/`settleUpPersonalBills` are gone).
+
+- `computePairwiseNetPersonalOnly(meId, otherId)` — personal-only net (non-group bills + personal payments), plain signed, per currency
+- `computePairwiseNetBreakdown(meId, otherId)` — `{ personal, groups[], total }`; `total` = personal + Σ group pairwise nets. Powers the Person page hero + "Right now" drill-down + `computePairwiseNetAllContexts`
+- `computePairwiseNetAllContexts(meId, otherId)` — the combined tab (`= breakdown.total`); People list, hero, bill status, exports all read this
+- `computePairwiseNetForBill(billId, meId, otherId)` — one bill's pairwise contribution (informational; bill "settled" status is derived from the person tab via `isPersonalBillFullySettled`, not per-bill)
+- `computePersonalNetRollup(meId)` / `computeCombinedNetRollup(meId)` — personal-only / combined (personal+group) totals across contacts; Home uses the combined one for its headline
+
+**Payments:** `recordPersonPayment` (`operations.ts`) writes one atomic payment; multi-context allocations share a `bundle_id` (partition the total, never duplicate). "Settle up" = a `RecordPaymentDialog` prefilled to the full balance. The Person page statement (`buildPersonMoneyFlow` + `PersonStatement.tsx`) is the running-balance timeline (the standalone `/ledger` route is retired).
+
+**Data repair:** `src/lib/kwenta-data-repair.ts` (`planKwentaDataRepair` / `applyKwentaDataRepair`, surfaced in Settings via `RepairDataPanel`) safely removes orphaned/duplicate settlements and canonicalizes stale party ids; migration `047` is the server-authoritative backstop.
 
 ---
 
@@ -346,6 +353,8 @@ Migrations are numbered; there are two `021_` files. Core RPCs:
 | `032` | `paid_by` column on bills (uuid, non-null, defaults to `created_by`); update `kwenta_push_bills` to rewrite `paid_by` to linked profile id on push |
 | `033` | Fix bill deletion fanout: remove `is_deleted` filter in `kwenta_fanout_personal_bill_participants` so deletion events reach all historical split participants |
 | `034` | `kwenta_on_profile_linked` trigger: when `linked_profile_id` is set on a profile, emit a `profile_changed` user event to the remote user so they immediately pull historical data |
+| `046` | `settlements.payment_method` column; thread it through `kwenta_push_settlements` (pull bundle already uses `to_jsonb`) |
+| `047` | `kwenta_repair_orphan_settlements()` RPC — server-authoritative soft-delete of orphaned settlements, self-scoped by `auth.uid()` (companion to `src/lib/kwenta-data-repair.ts`) |
 
 The `kwenta_sync` RPC is the single entry point for all sync: accepts push payload, applies it server-side, returns pull bundle for `p_since`. Push validators enforce the same RLS rules the client filters apply.
 

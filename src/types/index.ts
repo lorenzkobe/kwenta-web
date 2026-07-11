@@ -80,6 +80,8 @@ export interface Settlement extends SyncFields {
   currency: string
   /** Short note (e.g. "Cash", "Dinner") — shown in group & global payment history */
   label: string
+  /** How the money moved (e.g. "Cash", "GCash", "Bank transfer") — optional audit detail. */
+  method?: string | null
   is_settled: boolean
 }
 

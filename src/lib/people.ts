@@ -170,218 +170,9 @@ export async function resolveProfileDisplay(
   }
 }
 
-/** Net balance per currency: positive = you should receive from them, negative = you should pay them. Personal bills use direct payer-split pairwise. Group bills only contribute when the group has exactly 2 members (where pairwise == group net exactly); 3+ member groups are intentionally excluded here because a pairwise figure can't be soundly derived from aggregate group nets — their standing is surfaced per-group by listSharedGroupsWithBalance. */
-export async function computePairwiseNet(
-  meId: string,
-  otherId: string,
-): Promise<Map<string, number>> {
-  const meIds = await expandProfileIdsForSplitMatching(meId, meId)
-  const otherIds = await expandProfileIdsForSplitMatching(otherId, meId)
-
-  const byCurrency = new Map<string, number>()
-
-  // Personal bills (group_id = null): direct payer-split pairwise approach
-  const participantIds = [...new Set([...meIds, ...otherIds])]
-  const createdByEither = await db.bills.where('created_by').anyOf(participantIds).toArray()
-  const participantSplits = await db.item_splits.where('user_id').anyOf(participantIds).toArray()
-  const participantItemIds = [
-    ...new Set(participantSplits.filter((split) => !split.is_deleted).map((split) => split.item_id)),
-  ]
-  const participantItems =
-    participantItemIds.length > 0
-      ? await db.bill_items.where('id').anyOf(participantItemIds).toArray()
-      : []
-  const participantBillIds = [
-    ...new Set(participantItems.filter((item) => !item.is_deleted).map((item) => item.bill_id)),
-  ]
-  const participantBills =
-    participantBillIds.length > 0 ? await db.bills.where('id').anyOf(participantBillIds).toArray() : []
-  const personalBills = [
-    ...new Map(
-      [...createdByEither, ...participantBills]
-        .filter((bill) => !bill.is_deleted && bill.group_id === null)
-        .map((bill) => [bill.id, bill]),
-    ).values(),
-  ]
-  const personalBillIds = personalBills.map((bill) => bill.id)
-  const personalItems =
-    personalBillIds.length > 0
-      ? await db.bill_items.where('bill_id').anyOf(personalBillIds).toArray()
-      : []
-  const activePersonalItems = personalItems.filter((item) => !item.is_deleted)
-  const personalItemsByBillId = new Map<string, typeof activePersonalItems>()
-  for (const item of activePersonalItems) {
-    const rows = personalItemsByBillId.get(item.bill_id) ?? []
-    rows.push(item)
-    personalItemsByBillId.set(item.bill_id, rows)
-  }
-
-  const personalItemIds = activePersonalItems.map((item) => item.id)
-  const personalSplits =
-    personalItemIds.length > 0
-      ? await db.item_splits.where('item_id').anyOf(personalItemIds).toArray()
-      : []
-  const activePersonalSplits = personalSplits.filter((split) => !split.is_deleted)
-  const personalSplitsByItemId = new Map<string, typeof activePersonalSplits>()
-  for (const split of activePersonalSplits) {
-    const rows = personalSplitsByItemId.get(split.item_id) ?? []
-    rows.push(split)
-    personalSplitsByItemId.set(split.item_id, rows)
-  }
-
-  for (const bill of personalBills) {
-    const participantUnion = new Set<string>([bill.paid_by])
-    for (const item of personalItemsByBillId.get(bill.id) ?? []) {
-      for (const split of personalSplitsByItemId.get(item.id) ?? []) {
-        participantUnion.add(split.user_id)
-      }
-    }
-    const meOnBill = profileSetTouchesBill(meIds, bill, participantUnion)
-    const otherOnBill = profileSetTouchesBill(otherIds, bill, participantUnion)
-    if (!meOnBill || !otherOnBill) continue
-
-    for (const item of personalItemsByBillId.get(bill.id) ?? []) {
-      const active = personalSplitsByItemId.get(item.id) ?? []
-      const mySplit = active.find((s) => meIds.has(s.user_id))
-      const otherSplit = active.find((s) => otherIds.has(s.user_id))
-      const cur = bill.currency
-      const prev = byCurrency.get(cur) ?? 0
-
-      if (meIds.has(bill.paid_by)) {
-        if (!otherSplit) continue
-        byCurrency.set(cur, prev + otherSplit.computed_amount)
-      } else if (otherIds.has(bill.paid_by)) {
-        if (!mySplit) continue
-        byCurrency.set(cur, prev - mySplit.computed_amount)
-      }
-    }
-  }
-
-  // Personal settlements only (group_id = null)
-  const personalSettlements = await db.settlements
-    .filter((s) => !s.is_deleted && s.is_settled && s.group_id === null)
-    .toArray()
-  for (const s of personalSettlements) {
-    const fromMe = meIds.has(s.from_user_id)
-    const toMe = meIds.has(s.to_user_id)
-    const fromOther = otherIds.has(s.from_user_id)
-    const toOther = otherIds.has(s.to_user_id)
-    if (!((fromMe && toOther) || (fromOther && toMe))) continue
-
-    const cur = s.currency
-    const prev = byCurrency.get(cur) ?? 0
-    if (fromOther && toMe) {
-      byCurrency.set(cur, prev - s.amount)
-    } else if (fromMe && toOther) {
-      byCurrency.set(cur, prev + s.amount)
-    }
-  }
-
-  // Group bills: derive pairwise from each member's group-level net balance.
-  // Group settlements consolidate multi-party debts (e.g. C pays A $80 to cover
-  // both A's $30 direct share and B's $50 indirect share), so applying them at
-  // the bill-level pairwise would produce wrong results. Instead, compute the
-  // full group net for me and other (the same algorithm as computeGroupBalances),
-  // then infer the pairwise amount from the two net balances.
-  const myMemberships = await db.group_members
-    .where('user_id')
-    .anyOf([...meIds])
-    .toArray()
-  const myGroupIds = new Set(myMemberships.filter((m) => !m.is_deleted).map((m) => m.group_id))
-  const otherMemberships = await db.group_members
-    .where('user_id')
-    .anyOf([...otherIds])
-    .toArray()
-  const activeOtherMemberships = otherMemberships.filter((m) => !m.is_deleted)
-  const sharedGroupIds = [
-    ...new Set(activeOtherMemberships.map((m) => m.group_id).filter((gid) => myGroupIds.has(gid))),
-  ]
-
-  for (const groupId of sharedGroupIds) {
-    const group = await db.groups.get(groupId)
-    if (!group || group.is_deleted) continue
-
-    // Deriving a two-person figure from each member's group-level net is only exact in
-    // a 2-member group. With 3+ members, net balances aren't pairwise-additive (another
-    // member's debt can leak into this figure), so we don't fabricate a pairwise number
-    // for the headline. The honest per-group standing is shown separately by
-    // listSharedGroupsWithBalance on the Person page.
-    const groupMembers = await db.group_members.where('group_id').equals(groupId).toArray()
-    const activeMemberCount = groupMembers.filter((m) => !m.is_deleted).length
-    if (activeMemberCount > 2) continue
-
-    const groupBills = await db.bills.where('group_id').equals(groupId).toArray()
-    const activeGroupBills = groupBills.filter((bill) => !bill.is_deleted)
-    const groupBillIds = activeGroupBills.map((bill) => bill.id)
-    const groupItems =
-      groupBillIds.length > 0 ? await db.bill_items.where('bill_id').anyOf(groupBillIds).toArray() : []
-    const activeGroupItems = groupItems.filter((item) => !item.is_deleted)
-    const groupItemsByBillId = new Map<string, typeof activeGroupItems>()
-    for (const item of activeGroupItems) {
-      const rows = groupItemsByBillId.get(item.bill_id) ?? []
-      rows.push(item)
-      groupItemsByBillId.set(item.bill_id, rows)
-    }
-
-    const groupItemIds = activeGroupItems.map((item) => item.id)
-    const groupSplits =
-      groupItemIds.length > 0 ? await db.item_splits.where('item_id').anyOf(groupItemIds).toArray() : []
-    const activeGroupSplits = groupSplits.filter((split) => !split.is_deleted)
-    const groupSplitsByItemId = new Map<string, typeof activeGroupSplits>()
-    for (const split of activeGroupSplits) {
-      const rows = groupSplitsByItemId.get(split.item_id) ?? []
-      rows.push(split)
-      groupSplitsByItemId.set(split.item_id, rows)
-    }
-
-    let meGroupNet = 0
-    let otherGroupNet = 0
-
-    for (const bill of activeGroupBills) {
-      for (const item of groupItemsByBillId.get(bill.id) ?? []) {
-        const active = groupSplitsByItemId.get(item.id) ?? []
-        if (active.length === 0) continue
-        const totalSplit = active.reduce((sum, s) => sum + s.computed_amount, 0)
-
-        if (meIds.has(bill.paid_by)) meGroupNet += totalSplit
-        if (otherIds.has(bill.paid_by)) otherGroupNet += totalSplit
-        for (const split of active) {
-          if (meIds.has(split.user_id)) meGroupNet -= split.computed_amount
-          if (otherIds.has(split.user_id)) otherGroupNet -= split.computed_amount
-        }
-      }
-    }
-
-    const groupSettlements = await db.settlements.where('group_id').equals(groupId).toArray()
-    for (const s of groupSettlements) {
-      if (s.is_deleted || !s.is_settled) continue
-      if (meIds.has(s.from_user_id)) meGroupNet += s.amount
-      if (meIds.has(s.to_user_id)) meGroupNet -= s.amount
-      if (otherIds.has(s.from_user_id)) otherGroupNet += s.amount
-      if (otherIds.has(s.to_user_id)) otherGroupNet -= s.amount
-    }
-
-    meGroupNet = Math.round(meGroupNet * 100) / 100
-    otherGroupNet = Math.round(otherGroupNet * 100) / 100
-
-    const cur = group.currency
-    const prev = byCurrency.get(cur) ?? 0
-
-    if (meGroupNet > MONEY_EPSILON && otherGroupNet < -MONEY_EPSILON) {
-      // I should receive from the group, other should pay — other owes me up to min of both
-      byCurrency.set(cur, prev + Math.min(meGroupNet, Math.abs(otherGroupNet)))
-    } else if (meGroupNet < -MONEY_EPSILON && otherGroupNet > MONEY_EPSILON) {
-      // I should pay to the group, other should receive — I owe other up to min of both
-      byCurrency.set(cur, prev - Math.min(Math.abs(meGroupNet), otherGroupNet))
-    }
-    // Same sign or both ~0: no direct pairwise obligation between the two of us
-  }
-
-  return byCurrency
-}
 
 /**
- * Pairwise net for a single bill only (same line rules as `computePairwiseNet`),
+ * Pairwise net for a single bill only (payer's counterparties owe their split),
  * minus settlements tagged with `bill_id` for this bill. One currency (the bill's).
  */
 export async function computePairwiseNetForBill(
@@ -427,536 +218,6 @@ export async function computePairwiseNetForBill(
   return Math.round(net * 100) / 100
 }
 
-export interface PersonalBillAllocationSlice {
-  billId: string
-  billTitle: string
-  amount: number
-  currency: string
-  createdAt: string
-}
-
-export interface PersonalBillAllocationPlan {
-  allocatableTotal: number
-  appliedAmount: number
-  remainderAmount: number
-  affectedBillCount: number
-  slices: PersonalBillAllocationSlice[]
-}
-
-type PersonalDirectionContext = {
-  meId: string
-  otherId: string
-  fromUserId: string
-  toUserId: string
-}
-
-function resolvePersonalDirection(ctx: PersonalDirectionContext): 'other_to_me' | 'me_to_other' | null {
-  const otherToMe = ctx.fromUserId === ctx.otherId && ctx.toUserId === ctx.meId
-  if (otherToMe) return 'other_to_me'
-  const meToOther = ctx.fromUserId === ctx.meId && ctx.toUserId === ctx.otherId
-  if (meToOther) return 'me_to_other'
-  return null
-}
-
-async function listEligiblePersonalBillBalances(params: {
-  meId: string
-  otherId: string
-  currency: string
-  direction: 'other_to_me' | 'me_to_other'
-}): Promise<PersonalBillAllocationSlice[]> {
-  const bills = await listBillsInvolvingPair(params.meId, params.otherId)
-  const personal = bills
-    .filter((b) => b.group_id === null && b.currency === params.currency)
-    .sort((a, b) => a.created_at.localeCompare(b.created_at))
-
-  const out: PersonalBillAllocationSlice[] = []
-  for (const bill of personal) {
-    const net = await computePairwiseNetForBill(bill.id, params.meId, params.otherId)
-    let due = 0
-    if (params.direction === 'other_to_me' && net > MONEY_EPSILON) {
-      due = net
-    } else if (params.direction === 'me_to_other' && net < -MONEY_EPSILON) {
-      due = Math.abs(net)
-    }
-    if (due <= MONEY_EPSILON) continue
-    out.push({
-      billId: bill.id,
-      billTitle: bill.title,
-      amount: Math.round(due * 100) / 100,
-      currency: bill.currency,
-      createdAt: bill.created_at,
-    })
-  }
-  return out
-}
-
-export async function buildPersonalBillAllocationPlan(params: {
-  meId: string
-  otherId: string
-  fromUserId: string
-  toUserId: string
-  currency: string
-  amountToApply: number
-}): Promise<PersonalBillAllocationPlan> {
-  const amountToApply = Math.max(0, params.amountToApply)
-  const direction = resolvePersonalDirection({
-    meId: params.meId,
-    otherId: params.otherId,
-    fromUserId: params.fromUserId,
-    toUserId: params.toUserId,
-  })
-  if (!direction) {
-    return {
-      allocatableTotal: 0,
-      appliedAmount: 0,
-      remainderAmount: Math.round(amountToApply * 100) / 100,
-      affectedBillCount: 0,
-      slices: [],
-    }
-  }
-
-  const eligible = await listEligiblePersonalBillBalances({
-    meId: params.meId,
-    otherId: params.otherId,
-    currency: params.currency,
-    direction,
-  })
-
-  const allocatableTotalRaw = eligible.reduce((sum, row) => sum + row.amount, 0)
-  const allocatableTotal = Math.round(allocatableTotalRaw * 100) / 100
-
-  let remaining = amountToApply
-  const slices: PersonalBillAllocationSlice[] = []
-  for (const row of eligible) {
-    if (remaining <= MONEY_EPSILON) break
-    const applied = Math.min(remaining, row.amount)
-    if (applied <= MONEY_EPSILON) continue
-    slices.push({ ...row, amount: Math.round(applied * 100) / 100 })
-    remaining -= applied
-  }
-
-  const appliedAmount = Math.round((amountToApply - Math.max(remaining, 0)) * 100) / 100
-  const remainderAmount = Math.round(Math.max(remaining, 0) * 100) / 100
-  return {
-    allocatableTotal,
-    appliedAmount,
-    remainderAmount,
-    affectedBillCount: slices.length,
-    slices,
-  }
-}
-
-export type ReconcileDirection = 'other_to_me' | 'me_to_other'
-
-export interface PersonalReconcileSlice {
-  billId: string
-  billTitle: string
-  amount: number
-  currency: string
-  createdAt: string
-  direction: ReconcileDirection
-  source: 'offset' | 'credit'
-}
-
-export interface PersonalReconcilePlan {
-  currency: string
-  theyOweMeTotal: number
-  iOweThemTotal: number
-  offsetCap: number
-  creditCap: number
-  availableCreditOtherToMe: number
-  availableCreditMeToOther: number
-  maxApplicable: number
-  appliedAmount: number
-  offsetSlices: PersonalReconcileSlice[]
-  creditSlices: PersonalReconcileSlice[]
-  fullySettled: boolean
-  residualRemaining: number
-  residualDirection: ReconcileDirection | null
-}
-
-/**
- * Two-sided "Settle up" plan for personal bills between two people.
- *
- * Reconciles outstanding personal bills in BOTH directions at once:
- *  - the mutual offset (their debt cancels yours) is free — no cash credit consumed;
- *  - any remaining net on the larger side is covered by available general credit.
- *
- * Each outstanding bill becomes a slice so the write path can record a settlement
- * (with an explanatory note) against it, marking it individually settled.
- * `amountToApply` defaults to the full reconcilable amount; lowering it peels the
- * cash-credit portion off first, keeping the free offset as long as possible.
- */
-export async function buildPersonalReconcilePlan(params: {
-  meId: string
-  otherId: string
-  currency: string
-  amountToApply?: number
-}): Promise<PersonalReconcilePlan> {
-  const round2 = (n: number) => Math.round(n * 100) / 100
-
-  const bills = await listBillsInvolvingPair(params.meId, params.otherId)
-  const personal = bills
-    .filter((b) => b.group_id === null && b.currency === params.currency)
-    .sort((a, b) => a.created_at.localeCompare(b.created_at))
-
-  type Row = { billId: string; billTitle: string; createdAt: string; amount: number; remaining: number }
-  const theyOweMe: Row[] = []
-  const iOweThem: Row[] = []
-  for (const bill of personal) {
-    const net = await computePairwiseNetForBill(bill.id, params.meId, params.otherId)
-    if (net > MONEY_EPSILON) {
-      const amount = round2(net)
-      theyOweMe.push({ billId: bill.id, billTitle: bill.title, createdAt: bill.created_at, amount, remaining: amount })
-    } else if (net < -MONEY_EPSILON) {
-      const amount = round2(Math.abs(net))
-      iOweThem.push({ billId: bill.id, billTitle: bill.title, createdAt: bill.created_at, amount, remaining: amount })
-    }
-  }
-
-  const theyOweMeTotal = round2(theyOweMe.reduce((n, r) => n + r.amount, 0))
-  const iOweThemTotal = round2(iOweThem.reduce((n, r) => n + r.amount, 0))
-  const offsetCap = round2(Math.min(theyOweMeTotal, iOweThemTotal))
-
-  const [availableCreditOtherToMe, availableCreditMeToOther] = await Promise.all([
-    computeAvailableGeneralCredit({
-      meId: params.meId,
-      otherId: params.otherId,
-      fromUserId: params.otherId,
-      toUserId: params.meId,
-      currency: params.currency,
-    }),
-    computeAvailableGeneralCredit({
-      meId: params.meId,
-      otherId: params.otherId,
-      fromUserId: params.meId,
-      toUserId: params.otherId,
-      currency: params.currency,
-    }),
-  ])
-
-  // Residual side = the direction with outstanding net after the offset cancels.
-  let residualDirection: ReconcileDirection | null = null
-  let residualSide: Row[] = []
-  let residualNet = 0
-  let availableCreditOnResidual = 0
-  if (theyOweMeTotal - iOweThemTotal > MONEY_EPSILON) {
-    residualDirection = 'other_to_me'
-    residualSide = theyOweMe
-    residualNet = round2(theyOweMeTotal - iOweThemTotal)
-    availableCreditOnResidual = availableCreditOtherToMe
-  } else if (iOweThemTotal - theyOweMeTotal > MONEY_EPSILON) {
-    residualDirection = 'me_to_other'
-    residualSide = iOweThem
-    residualNet = round2(iOweThemTotal - theyOweMeTotal)
-    availableCreditOnResidual = availableCreditMeToOther
-  }
-
-  const creditCap = round2(Math.min(residualNet, availableCreditOnResidual))
-  const maxApplicable = round2(offsetCap + creditCap)
-  const requested = params.amountToApply === undefined ? maxApplicable : Math.max(0, params.amountToApply)
-  const appliedAmount = round2(Math.min(requested, maxApplicable))
-
-  // Offset first (free), then credit on the residual side.
-  const offsetApplied = round2(Math.min(appliedAmount, offsetCap))
-  const creditApplied = round2(Math.max(0, appliedAmount - offsetApplied))
-
-  const take = (
-    rows: Row[],
-    want: number,
-    direction: ReconcileDirection,
-    source: 'offset' | 'credit',
-  ): PersonalReconcileSlice[] => {
-    const slices: PersonalReconcileSlice[] = []
-    let remaining = want
-    for (const row of rows) {
-      if (remaining <= MONEY_EPSILON) break
-      if (row.remaining <= MONEY_EPSILON) continue
-      const use = round2(Math.min(remaining, row.remaining))
-      slices.push({
-        billId: row.billId,
-        billTitle: row.billTitle,
-        amount: use,
-        currency: params.currency,
-        createdAt: row.createdAt,
-        direction,
-        source,
-      })
-      row.remaining = round2(row.remaining - use)
-      remaining = round2(remaining - use)
-    }
-    return slices
-  }
-
-  const offsetSlices = [
-    ...take(theyOweMe, offsetApplied, 'other_to_me', 'offset'),
-    ...take(iOweThem, offsetApplied, 'me_to_other', 'offset'),
-  ]
-  const creditSlices =
-    residualDirection && creditApplied > MONEY_EPSILON
-      ? take(residualSide, creditApplied, residualDirection, 'credit')
-      : []
-
-  const residualRemaining = round2(Math.max(0, residualNet - creditApplied))
-  const fullySettled = appliedAmount >= maxApplicable - MONEY_EPSILON && residualRemaining <= MONEY_EPSILON
-
-  return {
-    currency: params.currency,
-    theyOweMeTotal,
-    iOweThemTotal,
-    offsetCap,
-    creditCap,
-    availableCreditOtherToMe: round2(availableCreditOtherToMe),
-    availableCreditMeToOther: round2(availableCreditMeToOther),
-    maxApplicable,
-    appliedAmount,
-    offsetSlices,
-    creditSlices,
-    fullySettled,
-    residualRemaining,
-    residualDirection: residualRemaining > MONEY_EPSILON ? residualDirection : null,
-  }
-}
-
-export async function computeAvailableGeneralCredit(params: {
-  meId: string
-  otherId: string
-  fromUserId: string
-  toUserId: string
-  currency: string
-}): Promise<number> {
-  const fromIds = await expandProfileIdsForSplitMatching(params.fromUserId, params.meId)
-  const toIds = await expandProfileIdsForSplitMatching(params.toUserId, params.meId)
-  const all = await db.settlements.filter((s) => !s.is_deleted && s.is_settled).toArray()
-  let total = 0
-  for (const s of all) {
-    if (s.group_id !== null || s.bill_id !== null) continue
-    if (s.currency !== params.currency) continue
-    if (!fromIds.has(s.from_user_id) || !toIds.has(s.to_user_id)) continue
-    total += s.amount
-  }
-  return Math.round(total * 100) / 100
-}
-
-export interface ManualGeneralCreditApplyPlan extends PersonalBillAllocationPlan {
-  fromUserId: string
-  toUserId: string
-  availableGeneralCredit: number
-}
-
-export interface GeneralCreditEligibleGroupOption {
-  groupId: string
-  groupName: string
-  currency: string
-  yourNet: number
-  theirNet: number
-  allocatableAmount: number
-}
-
-export interface ManualGeneralCreditSelectionPlan {
-  fromUserId: string
-  toUserId: string
-  currency: string
-  availableGeneralCredit: number
-  personalPlan: PersonalBillAllocationPlan
-  eligibleGroups: GeneralCreditEligibleGroupOption[]
-  personalAllocatableAmount: number
-  groupAllocatableAmount: number
-  totalAllocatableAmount: number
-  maxApplicableAmount: number
-}
-
-export async function listEligibleSharedGroupsForGeneralCredit(params: {
-  meId: string
-  otherId: string
-  fromUserId: string
-  toUserId: string
-  currency: string
-}): Promise<GeneralCreditEligibleGroupOption[]> {
-  const direction = resolvePersonalDirection({
-    meId: params.meId,
-    otherId: params.otherId,
-    fromUserId: params.fromUserId,
-    toUserId: params.toUserId,
-  })
-  if (!direction) return []
-
-  const sharedGroups = await listSharedGroupsWithBalance(params.meId, params.otherId)
-  const eligible: GeneralCreditEligibleGroupOption[] = []
-
-  for (const row of sharedGroups) {
-    if (row.currency !== params.currency) continue
-
-    const summary = await computeGroupBalances(row.groupId, params.meId)
-    if (!summary) continue
-
-    let allocatableAmount = 0
-    if (direction === 'other_to_me' && summary.totalToReceive > MONEY_EPSILON && row.theirNet < -MONEY_EPSILON) {
-      allocatableAmount = Math.min(summary.totalToReceive, Math.abs(row.theirNet))
-    } else if (direction === 'me_to_other' && summary.totalToPay > MONEY_EPSILON && row.theirNet > MONEY_EPSILON) {
-      allocatableAmount = Math.min(summary.totalToPay, row.theirNet)
-    }
-
-    const roundedAllocatableAmount = Math.round(allocatableAmount * 100) / 100
-    if (roundedAllocatableAmount <= MONEY_EPSILON) continue
-
-    eligible.push({
-      groupId: row.groupId,
-      groupName: row.groupName,
-      currency: row.currency,
-      yourNet:
-        direction === 'other_to_me'
-          ? Math.round(summary.totalToReceive * 100) / 100
-          : Math.round(summary.totalToPay * 100) / 100,
-      theirNet: Math.round(row.theirNet * 100) / 100,
-      allocatableAmount: roundedAllocatableAmount,
-    })
-  }
-
-  return eligible
-}
-
-function buildManualGeneralCreditSelectionPlanResult(params: {
-  fromUserId: string
-  toUserId: string
-  currency: string
-  availableGeneralCredit: number
-  personalPlan: PersonalBillAllocationPlan
-  eligibleGroups: GeneralCreditEligibleGroupOption[]
-}): ManualGeneralCreditSelectionPlan {
-  const personalAllocatableAmount = Math.round(params.personalPlan.allocatableTotal * 100) / 100
-  const groupAllocatableAmount = Math.round(
-    params.eligibleGroups.reduce((sum, group) => sum + group.allocatableAmount, 0) * 100,
-  ) / 100
-  const totalAllocatableAmount = Math.round((personalAllocatableAmount + groupAllocatableAmount) * 100) / 100
-  const maxApplicableAmount = Math.min(
-    Math.round(params.availableGeneralCredit * 100) / 100,
-    totalAllocatableAmount,
-  )
-
-  return {
-    fromUserId: params.fromUserId,
-    toUserId: params.toUserId,
-    currency: params.currency,
-    availableGeneralCredit: Math.round(params.availableGeneralCredit * 100) / 100,
-    personalPlan: params.personalPlan,
-    eligibleGroups: params.eligibleGroups,
-    personalAllocatableAmount,
-    groupAllocatableAmount,
-    totalAllocatableAmount,
-    maxApplicableAmount: Math.round(maxApplicableAmount * 100) / 100,
-  }
-}
-
-async function buildManualGeneralCreditSelectionPlanForDirection(params: {
-  meId: string
-  otherId: string
-  fromUserId: string
-  toUserId: string
-  currency: string
-}): Promise<ManualGeneralCreditSelectionPlan> {
-  const availableGeneralCredit = await computeAvailableGeneralCredit({
-    meId: params.meId,
-    otherId: params.otherId,
-    fromUserId: params.fromUserId,
-    toUserId: params.toUserId,
-    currency: params.currency,
-  })
-  const [personalPlan, eligibleGroups] = await Promise.all([
-    buildPersonalBillAllocationPlan({
-      meId: params.meId,
-      otherId: params.otherId,
-      fromUserId: params.fromUserId,
-      toUserId: params.toUserId,
-      currency: params.currency,
-      amountToApply: availableGeneralCredit,
-    }),
-    listEligibleSharedGroupsForGeneralCredit({
-      meId: params.meId,
-      otherId: params.otherId,
-      fromUserId: params.fromUserId,
-      toUserId: params.toUserId,
-      currency: params.currency,
-    }),
-  ])
-
-  return buildManualGeneralCreditSelectionPlanResult({
-    fromUserId: params.fromUserId,
-    toUserId: params.toUserId,
-    currency: params.currency,
-    availableGeneralCredit,
-    personalPlan,
-    eligibleGroups,
-  })
-}
-
-export async function buildManualGeneralCreditSelectionPlan(params: {
-  meId: string
-  otherId: string
-  currency: string
-}): Promise<ManualGeneralCreditSelectionPlan | null> {
-  const [receiveDirectionPlan, payDirectionPlan] = await Promise.all([
-    buildManualGeneralCreditSelectionPlanForDirection({
-      meId: params.meId,
-      otherId: params.otherId,
-      fromUserId: params.otherId,
-      toUserId: params.meId,
-      currency: params.currency,
-    }),
-    buildManualGeneralCreditSelectionPlanForDirection({
-      meId: params.meId,
-      otherId: params.otherId,
-      fromUserId: params.meId,
-      toUserId: params.otherId,
-      currency: params.currency,
-    }),
-  ])
-
-  if (receiveDirectionPlan.maxApplicableAmount <= MONEY_EPSILON && payDirectionPlan.maxApplicableAmount <= MONEY_EPSILON) {
-    return null
-  }
-
-  if (receiveDirectionPlan.maxApplicableAmount >= payDirectionPlan.maxApplicableAmount) {
-    return receiveDirectionPlan
-  }
-  return payDirectionPlan
-}
-
-export async function buildManualGeneralCreditApplyPlan(params: {
-  meId: string
-  otherId: string
-  currency: string
-}): Promise<ManualGeneralCreditApplyPlan | null> {
-  const [receiveDirectionPlan, payDirectionPlan] = await Promise.all([
-    buildManualGeneralCreditSelectionPlanForDirection({
-      meId: params.meId,
-      otherId: params.otherId,
-      fromUserId: params.otherId,
-      toUserId: params.meId,
-      currency: params.currency,
-    }),
-    buildManualGeneralCreditSelectionPlanForDirection({
-      meId: params.meId,
-      otherId: params.otherId,
-      fromUserId: params.meId,
-      toUserId: params.otherId,
-      currency: params.currency,
-    }),
-  ])
-
-  const receiveApplied = receiveDirectionPlan.personalPlan.appliedAmount
-  const payApplied = payDirectionPlan.personalPlan.appliedAmount
-  if (receiveApplied <= MONEY_EPSILON && payApplied <= MONEY_EPSILON) return null
-
-  const chosenPlan = receiveApplied >= payApplied ? receiveDirectionPlan : payDirectionPlan
-  return {
-    ...chosenPlan.personalPlan,
-    fromUserId: chosenPlan.fromUserId,
-    toUserId: chosenPlan.toUserId,
-    availableGeneralCredit: chosenPlan.availableGeneralCredit,
-  }
-}
-
 /** Like `computePairwiseNet` but only bills with `group_id == null` (personal). */
 export async function computePairwiseNetPersonalOnly(
   meId: string,
@@ -965,12 +226,9 @@ export async function computePairwiseNetPersonalOnly(
   const meIds = await expandProfileIdsForSplitMatching(meId, meId)
   const otherIds = await expandProfileIdsForSplitMatching(otherId, meId)
 
-  // Debt from bills, net of bill-tagged settlements (+ they owe me / − I owe them).
+  // Debt from bills + every personal payment, as a plain signed sum
+  // (+ they owe me / − I owe them). Overpayment simply flips the sign — no "credit".
   const billNet = new Map<string, number>()
-  // Untargeted "general" payments are prepaid credit, not debt. Held per direction so
-  // they can offset same-direction debt but never manufacture a reverse balance.
-  const genMeToOther = new Map<string, number>() // I prepaid them
-  const genOtherToMe = new Map<string, number>() // they prepaid me
 
   const bills = await db.bills.filter((b) => !b.is_deleted && b.group_id === null).toArray()
 
@@ -1010,49 +268,50 @@ export async function computePairwiseNetPersonalOnly(
     if (!((fromMe && toOther) || (fromOther && toMe))) continue
 
     const cur = s.currency
-    if (s.bill_id !== null) {
-      // Targeted payment against a specific bill's debt — part of the real balance.
-      const prev = billNet.get(cur) ?? 0
-      if (fromOther && toMe) billNet.set(cur, prev - s.amount)
-      else if (fromMe && toOther) billNet.set(cur, prev + s.amount)
-    } else {
-      // Untargeted general payment = available credit.
-      if (fromOther && toMe) genOtherToMe.set(cur, (genOtherToMe.get(cur) ?? 0) + s.amount)
-      else if (fromMe && toOther) genMeToOther.set(cur, (genMeToOther.get(cur) ?? 0) + s.amount)
-    }
+    const prev = billNet.get(cur) ?? 0
+    // Every personal payment moves the tab toward (and past) zero, bill-tagged or not.
+    if (fromOther && toMe) billNet.set(cur, prev - s.amount)
+    else if (fromMe && toOther) billNet.set(cur, prev + s.amount)
   }
 
-  // Apply general payments as credit: they draw down same-direction debt toward zero,
-  // but any overshoot stays as available credit rather than flipping into reverse debt.
   const byCurrency = new Map<string, number>()
-  const currencies = new Set<string>([
-    ...billNet.keys(),
-    ...genMeToOther.keys(),
-    ...genOtherToMe.keys(),
-  ])
-  for (const cur of currencies) {
-    let net = billNet.get(cur) ?? 0
-    const gMe = genMeToOther.get(cur) ?? 0 // my prepayment offsets what I owe them (net < 0)
-    const gOther = genOtherToMe.get(cur) ?? 0 // their prepayment offsets what they owe me (net > 0)
-    if (net < 0) net += Math.min(-net, gMe)
-    if (net > 0) net -= Math.min(net, gOther)
+  for (const [cur, net] of billNet) {
     byCurrency.set(cur, Math.round(net * 100) / 100)
   }
 
   return byCurrency
 }
 
+export interface PairwiseGroupNet {
+  groupId: string
+  groupName: string
+  currency: string
+  /** + they owe me / − I owe them, in this group. */
+  net: number
+}
+
+export interface PairwiseNetBreakdown {
+  /** Personal-only net (non-group bills + personal payments), per currency. */
+  personal: Map<string, number>
+  /** One entry per shared group with a non-zero pairwise net. */
+  groups: PairwiseGroupNet[]
+  /** personal + Σ groups, per currency — equals `computePairwiseNetAllContexts`. */
+  total: Map<string, number>
+}
+
 /**
- * Full pairwise standing with a person across every context — personal bills/payments
- * (credit-clamped) plus their net in every shared group, including 3+ member groups
- * that the headline `computePairwiseNet` intentionally drops. This is what the People
- * list and Person page headline show: "even" here means even everywhere.
+ * Per-context decomposition of the full pairwise standing with a person: the personal
+ * net plus their net in every shared group (including 3+ member groups the headline
+ * `computePairwiseNet` drops). `total` is a plain signed sum of the parts, so the Person
+ * page hero, its "Right now" drill-down, exports, and the People list all share one source.
  */
-export async function computePairwiseNetAllContexts(
+export async function computePairwiseNetBreakdown(
   meId: string,
   otherId: string,
-): Promise<Map<string, number>> {
-  const result = new Map<string, number>(await computePairwiseNetPersonalOnly(meId, otherId))
+): Promise<PairwiseNetBreakdown> {
+  const personal = await computePairwiseNetPersonalOnly(meId, otherId)
+  const total = new Map<string, number>(personal)
+  const groups: PairwiseGroupNet[] = []
 
   const meIds = await expandProfileIdsForSplitMatching(meId, meId)
   const otherIds = await expandProfileIdsForSplitMatching(otherId, meId)
@@ -1070,10 +329,29 @@ export async function computePairwiseNetAllContexts(
     const net = await computeGroupPairwiseNet(gid, meId, otherMember.user_id)
     if (Math.abs(net) <= MONEY_EPSILON) continue
     const cur = group.currency
-    result.set(cur, Math.round(((result.get(cur) ?? 0) + net) * 100) / 100)
+    groups.push({
+      groupId: gid,
+      groupName: group.name,
+      currency: cur,
+      net: Math.round(net * 100) / 100,
+    })
+    total.set(cur, Math.round(((total.get(cur) ?? 0) + net) * 100) / 100)
   }
 
-  return result
+  return { personal, groups, total }
+}
+
+/**
+ * Full pairwise standing with a person across every context — personal bills/payments
+ * plus their net in every shared group. This is what the People list and Person page
+ * headline show: "even" here means even everywhere.
+ */
+export async function computePairwiseNetAllContexts(
+  meId: string,
+  otherId: string,
+): Promise<Map<string, number>> {
+  const { total } = await computePairwiseNetBreakdown(meId, otherId)
+  return total
 }
 
 /** One logical peer per person (dedupes local contact + linked remote). */
@@ -1133,6 +411,32 @@ export async function computePersonalNetRollup(meId: string): Promise<{
 
   for (const oid of peers) {
     const m = await computePairwiseNetPersonalOnly(meId, oid)
+    for (const [cur, v] of m) {
+      if (v > MONEY_EPSILON) {
+        toReceiveByCurrency.set(cur, (toReceiveByCurrency.get(cur) ?? 0) + v)
+      } else if (v < -MONEY_EPSILON) {
+        toPayByCurrency.set(cur, (toPayByCurrency.get(cur) ?? 0) + Math.abs(v))
+      }
+    }
+  }
+
+  return { toReceiveByCurrency, toPayByCurrency }
+}
+
+/**
+ * Aggregate COMBINED (personal + every shared group) pairwise nets across all contacts,
+ * netting per person before bucketing so the Home rollup matches the person pages.
+ */
+export async function computeCombinedNetRollup(meId: string): Promise<{
+  toReceiveByCurrency: Map<string, number>
+  toPayByCurrency: Map<string, number>
+}> {
+  const peers = await iterCanonicalPeerIds(meId)
+  const toReceiveByCurrency = new Map<string, number>()
+  const toPayByCurrency = new Map<string, number>()
+
+  for (const oid of peers) {
+    const m = await computePairwiseNetAllContexts(meId, oid)
     for (const [cur, v] of m) {
       if (v > MONEY_EPSILON) {
         toReceiveByCurrency.set(cur, (toReceiveByCurrency.get(cur) ?? 0) + v)

@@ -43,7 +43,7 @@ import {
   type PinnedSplits,
 } from '@/lib/bill-split-form'
 import { BILL_BACK_QUERY, parseSafeAppPath, withBillBackQuery } from '@/lib/bill-navigation'
-import { computePairwiseNet, listCanonicalRelatedProfileIds } from '@/lib/people'
+import { computePairwiseNetAllContexts, listCanonicalRelatedProfileIds } from '@/lib/people'
 import { normalizeAmountInput, stripLeadingZerosAmount } from '@/lib/amount-input'
 import { cn, formatCurrency } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
@@ -730,7 +730,7 @@ export function AddBillPage() {
         const payerId = input.paidBy
         if (payerId && payerId !== userId) {
           try {
-            const globalByCurrency = await computePairwiseNet(userId, payerId)
+            const globalByCurrency = await computePairwiseNetAllContexts(userId, payerId)
             const gNet = globalByCurrency.get(input.currency) ?? 0
             if (gNet > 0.005) {
               toast.info(

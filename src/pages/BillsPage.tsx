@@ -116,7 +116,7 @@ export function BillsPage() {
         await fetchRemoteProfileIntoDexie(bill.paid_by)
         payor = await db.profiles.get(bill.paid_by)
       }
-      const settled = await isPersonalBillFullySettled(bill.id, currentUserId)
+      const settled = await isPersonalBillFullySettled(bill.id, currentUserId, settledTabCache)
       return {
         id: bill.id,
         title: bill.title,
@@ -132,6 +132,8 @@ export function BillsPage() {
       }
     }
 
+    // Shared across bills so each distinct counterparty's tab is computed once, not per bill.
+    const settledTabCache = new Map<string, Map<string, number>>()
     const [myBills, sharedBills] = await Promise.all([
       Promise.all(myRaw.map((bill) => enrichBill(bill))),
       Promise.all(sharedRaw.map((bill) => enrichBill(bill))),

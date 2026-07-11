@@ -1,0 +1,268 @@
+import { db } from '@/db/db'
+import { generateId, getDeviceId, now } from '@/lib/utils'
+import { resolveGroupMemberUserId } from '@/db/operations'
+import { finalizeMutationSync } from '@/sync/cloud-first-mutations'
+import type { Profile, Settlement } from '@/types'
+
+/**
+ * One-time, non-destructive data repair for settlements. Fixes artifacts that can accumulate
+ * from earlier bugs/migrations — never removes a real money movement. Balances only get MORE
+ * correct. Runs client-side (respects RLS) and propagates to the cloud via normal sync.
+ *
+ * Three classes, mirroring the id-canonicalization migrations 043/045:
+ *  - orphan: settlement references a bill/group that no longer exists (or is deleted), or a
+ *    party id that resolves to no known person at all
+ *  - duplicate: exact-match row (same CANONICAL parties/amount/currency/bill/group/created_at/
+ *    bundle/label/method) — keep earliest
+ *  - non-canonical: from/to id points at a local contact that has a linked account (or, in a
+ *    group, isn't the roster id) — rewrite to the canonical id so RLS/sync/balance-match agree
+ */
+
+export interface RepairOrphan {
+  id: string
+  reason: 'missing_bill' | 'missing_group' | 'missing_profile'
+  amount: number
+  currency: string
+}
+export interface RepairDuplicate {
+  id: string
+  keptId: string
+  amount: number
+  currency: string
+}
+export interface RepairNonCanonical {
+  id: string
+  field: 'from_user_id' | 'to_user_id'
+  from: string
+  to: string
+}
+export interface KwentaDataRepairPlan {
+  orphanSettlements: RepairOrphan[]
+  duplicateSettlements: RepairDuplicate[]
+  nonCanonicalSettlements: RepairNonCanonical[]
+  summary: { orphans: number; duplicates: number; nonCanonical: number; total: number }
+}
+
+/** Dedup key over CANONICAL parties + every field that distinguishes a real payment. Only
+ * byte-identical rows (down to created_at, bundle, note/label, and method) collapse — two
+ * genuinely distinct payments differing in any of these are kept. */
+function dupKey(s: Settlement, canon: { from: string; to: string }): string {
+  return [
+    canon.from,
+    canon.to,
+    s.amount,
+    s.currency,
+    s.bill_id ?? '',
+    s.group_id ?? '',
+    s.created_at,
+    s.bundle_id ?? '',
+    s.label ?? '',
+    s.method ?? '',
+  ].join('|')
+}
+
+/** Canonical party id: linked account id when the local contact is linked, then the group
+ * roster id. `profilesById` is a preloaded map so this does no per-call profile query. */
+async function canonicalPartyId(
+  id: string,
+  groupId: string | null,
+  profilesById: Map<string, Profile>,
+): Promise<string> {
+  // Inline of resolveSettlementPartyId against the preloaded profiles map.
+  const p = profilesById.get(id)
+  let resolved = p && !p.is_deleted && p.linked_profile_id ? p.linked_profile_id : id
+  if (groupId) resolved = await resolveGroupMemberUserId(groupId, resolved)
+  return resolved
+}
+
+/** Read-only: analyze the user's pushable settlements and report what a repair would change. */
+export async function planKwentaDataRepair(userId: string): Promise<KwentaDataRepairPlan> {
+  const all = await db.settlements.filter((s) => !s.is_deleted).toArray()
+
+  // Preload reference data once — avoids O(N) serial IndexedDB round trips (was one membership
+  // query per settlement plus a bill/group/profile get per row).
+  const [profilesArr, membersArr, billsArr, groupsArr] = await Promise.all([
+    db.profiles.toArray(),
+    db.group_members.toArray(),
+    db.bills.toArray(),
+    db.groups.toArray(),
+  ])
+  const profilesById = new Map(profilesArr.map((p) => [p.id, p]))
+  const billsById = new Map(billsArr.map((b) => [b.id, b]))
+  const groupsById = new Map(groupsArr.map((g) => [g.id, g]))
+  const memberGroupUser = new Set<string>() // `${group_id}|${user_id}`
+  const userHasMembership = new Set<string>()
+  for (const m of membersArr) {
+    memberGroupUser.add(`${m.group_id}|${m.user_id}`)
+    userHasMembership.add(m.user_id)
+  }
+
+  // A settlement is "mine to repair" if I'm a party or I'm in its group.
+  const isMine = (s: Settlement): boolean => {
+    if (s.group_id === null) return s.from_user_id === userId || s.to_user_id === userId
+    return memberGroupUser.has(`${s.group_id}|${userId}`)
+  }
+  const mine = all.filter(isMine)
+
+  // A party id is "real" (never orphan it) when it has a live profile OR appears in ANY group
+  // roster. Co-members' accounts and other users' local contacts are NOT synced into this
+  // device's profiles table (the pull-bundle privacy boundary), so profile-absence alone must
+  // never condemn a settlement — that would delete a real group payment cloud-wide.
+  const partyResolvable = (id: string): boolean => {
+    const p = profilesById.get(id)
+    if (p && !p.is_deleted) return true
+    return userHasMembership.has(id)
+  }
+
+  const orphanSettlements: RepairOrphan[] = []
+  const orphanIds = new Set<string>()
+  for (const s of mine) {
+    let reason: RepairOrphan['reason'] | null = null
+    if (s.bill_id) {
+      const bill = billsById.get(s.bill_id)
+      if (!bill || bill.is_deleted) reason = 'missing_bill'
+    }
+    if (!reason && s.group_id) {
+      const group = groupsById.get(s.group_id)
+      if (!group || group.is_deleted) reason = 'missing_group'
+    }
+    if (!reason && (!partyResolvable(s.from_user_id) || !partyResolvable(s.to_user_id))) {
+      reason = 'missing_profile'
+    }
+    if (reason) {
+      orphanIds.add(s.id)
+      orphanSettlements.push({ id: s.id, reason, amount: s.amount, currency: s.currency })
+    }
+  }
+
+  // Canonicalize each surviving row's parties ONCE, up front, so dedup can key on canonical
+  // ids. Two rows that are the same payment differing only by a stale local-vs-linked party id
+  // would otherwise hash to different keys, escape dedup, then both get rewritten to identical
+  // ids — leaving an exact-duplicate pair that double-counts. Canonicalize-then-dedup fixes it
+  // in a single apply.
+  const canonById = new Map<string, { from: string; to: string }>()
+  for (const s of mine) {
+    if (orphanIds.has(s.id)) continue
+    canonById.set(s.id, {
+      from: await canonicalPartyId(s.from_user_id, s.group_id, profilesById),
+      to: await canonicalPartyId(s.to_user_id, s.group_id, profilesById),
+    })
+  }
+
+  // Duplicates — earliest created_at (then id) kept; scan only non-orphans, key on canonical ids.
+  const duplicateSettlements: RepairDuplicate[] = []
+  const byKey = new Map<string, Settlement[]>()
+  for (const s of mine) {
+    if (orphanIds.has(s.id)) continue
+    const k = dupKey(s, canonById.get(s.id)!)
+    ;(byKey.get(k) ?? byKey.set(k, []).get(k)!).push(s)
+  }
+  for (const group of byKey.values()) {
+    if (group.length < 2) continue
+    const sorted = [...group].sort(
+      (a, b) => a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id),
+    )
+    const kept = sorted[0]
+    for (const dup of sorted.slice(1)) {
+      duplicateSettlements.push({ id: dup.id, keptId: kept.id, amount: dup.amount, currency: dup.currency })
+    }
+  }
+  const dupIds = new Set(duplicateSettlements.map((d) => d.id))
+
+  // Non-canonical parties — canonicalize surviving rows (incl. a kept duplicate).
+  const nonCanonicalSettlements: RepairNonCanonical[] = []
+  for (const s of mine) {
+    if (orphanIds.has(s.id) || dupIds.has(s.id)) continue
+    const canon = canonById.get(s.id)!
+    if (canon.from !== s.from_user_id) {
+      nonCanonicalSettlements.push({ id: s.id, field: 'from_user_id', from: s.from_user_id, to: canon.from })
+    }
+    if (canon.to !== s.to_user_id) {
+      nonCanonicalSettlements.push({ id: s.id, field: 'to_user_id', from: s.to_user_id, to: canon.to })
+    }
+  }
+
+  return {
+    orphanSettlements,
+    duplicateSettlements,
+    nonCanonicalSettlements,
+    summary: {
+      orphans: orphanSettlements.length,
+      duplicates: duplicateSettlements.length,
+      nonCanonical: nonCanonicalSettlements.length,
+      total: orphanSettlements.length + duplicateSettlements.length + nonCanonicalSettlements.length,
+    },
+  }
+}
+
+/**
+ * Apply a plan: soft-delete orphans/duplicates and rewrite non-canonical parties, all marked
+ * unsynced so the next round trip pushes them to the cloud. Idempotent — safe to re-run.
+ */
+export async function applyKwentaDataRepair(
+  userId: string,
+  plan: KwentaDataRepairPlan,
+): Promise<{ softDeleted: number; rewritten: number }> {
+  const ts = now()
+  let softDeleted = 0
+  let rewritten = 0
+
+  await db.transaction('rw', [db.settlements, db.activity_log], async () => {
+    for (const o of [...plan.orphanSettlements, ...plan.duplicateSettlements]) {
+      const row = await db.settlements.get(o.id)
+      if (!row || row.is_deleted) continue
+      await db.settlements.update(o.id, { is_deleted: true, updated_at: ts, synced_at: null })
+      softDeleted++
+    }
+    // Group per-settlement so both fields are applied in one update.
+    const patchById = new Map<string, Partial<Settlement>>()
+    const deletedIds = new Set([
+      ...plan.orphanSettlements.map((o) => o.id),
+      ...plan.duplicateSettlements.map((d) => d.id),
+    ])
+    for (const nc of plan.nonCanonicalSettlements) {
+      if (deletedIds.has(nc.id)) continue
+      const patch = patchById.get(nc.id) ?? {}
+      patch[nc.field] = nc.to
+      patchById.set(nc.id, patch)
+    }
+    for (const [id, patch] of patchById) {
+      const row = await db.settlements.get(id)
+      if (!row || row.is_deleted) continue
+      await db.settlements.update(id, { ...patch, updated_at: ts, synced_at: null })
+      rewritten++
+    }
+    if (softDeleted + rewritten > 0) {
+      await db.activity_log.add({
+        // entity_id is a UUID NOT NULL column the sync push casts server-side — a non-UUID
+        // literal (the old 'data-repair') aborts kwenta_sync and, staying unsynced, poisons
+        // every future push. Use a fresh UUID; the description carries the human label.
+        id: generateId(),
+        created_at: ts,
+        updated_at: ts,
+        synced_at: null,
+        is_deleted: false,
+        device_id: getDeviceId(),
+        group_id: null,
+        user_id: userId,
+        action: 'updated',
+        entity_type: 'settlement',
+        entity_id: generateId(),
+        description: `Data repair: removed ${softDeleted}, canonicalized ${rewritten}`,
+      })
+    }
+  })
+
+  if (softDeleted + rewritten > 0) {
+    await finalizeMutationSync({
+      actorUserId: userId,
+      operation: 'kwenta_data_repair',
+      entityType: 'settlement',
+      entityId: null,
+      payload: { softDeleted, rewritten },
+      routeHint: '/app/settings',
+    })
+  }
+
+  return { softDeleted, rewritten }
+}

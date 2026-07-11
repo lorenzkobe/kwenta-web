@@ -13,11 +13,13 @@ import {
   getBillWithDetails,
   linkProfileToRemote,
   recordDecomposedSettlement,
+  recordPersonPayment,
   removeGroupMember,
   resolveGroupMemberUserId,
   updateBill,
 } from '@/db/operations'
 import { computeGroupBalances, computeGroupPairwiseBalances } from '@/lib/settlement'
+import { computePairwiseNetAllContexts, computePairwiseNetPersonalOnly } from '@/lib/people'
 import {
   makeBill,
   makeGroup,
@@ -27,6 +29,7 @@ import {
   makeSettlement,
   makeSplit,
   resetDb,
+  seedSimpleBill,
 } from '../helpers/db'
 
 // operations.ts fires sync + notifications as side effects. Stub them so each
@@ -41,6 +44,7 @@ vi.mock('@/lib/kwenta-notifications', () => ({
   notifyProfileLinked: vi.fn(async () => {}),
   resolveRecipientProfileIdForNotify: vi.fn(async () => null),
 }))
+import { notifyPaymentsRecorded } from '@/lib/kwenta-notifications'
 // people.ts loads supabase; give it a benign client so the missing-profile
 // fetch path returns false instead of hitting the network.
 vi.mock('@/lib/supabase', () => ({
@@ -937,5 +941,147 @@ describe('recordDecomposedSettlement', () => {
         legs: [{ fromUserId: 'Ana', toUserId: 'Carlo', amount: 0.004 }],
       }),
     ).rejects.toThrow()
+  })
+})
+
+describe('recordPersonPayment', () => {
+  beforeEach(async () => {
+    await db.profiles.bulkAdd([makeProfile({ id: 'me' }), makeProfile({ id: 'other' })])
+  })
+
+  it('a personal payment reduces the personal tab and syncs exactly once', async () => {
+    await seedSimpleBill({ groupId: null, paidBy: 'me', shares: { other: 100 } }) // they owe me 100
+    const before = vi.mocked(finalizeMutationSync).mock.calls.length
+    const { settlementIds, bundleId } = await recordPersonPayment({
+      meId: 'me',
+      otherId: 'other',
+      direction: 'they_paid_me',
+      totalAmount: 100,
+      allocations: [{ context: 'personal', amount: 100 }],
+      currency: 'PHP',
+      markedBy: 'me',
+    })
+    expect(settlementIds).toHaveLength(1)
+    expect(bundleId).toBeNull()
+    expect((await computePairwiseNetPersonalOnly('me', 'other')).get('PHP') ?? 0).toBe(0)
+    expect(vi.mocked(finalizeMutationSync).mock.calls.length - before).toBe(1)
+  })
+
+  it('a group-tagged payment reduces that group pairwise net', async () => {
+    await db.groups.add(makeGroup({ id: 'G', created_by: 'me', currency: 'PHP' }))
+    await db.group_members.bulkAdd([
+      makeMember({ group_id: 'G', user_id: 'me' }),
+      makeMember({ group_id: 'G', user_id: 'other' }),
+    ])
+    await seedSimpleBill({ groupId: 'G', paidBy: 'me', shares: { other: 100 } }) // owe me 100 in group
+    await recordPersonPayment({
+      meId: 'me',
+      otherId: 'other',
+      direction: 'they_paid_me',
+      totalAmount: 100,
+      allocations: [{ context: { groupId: 'G' }, amount: 100 }],
+      currency: 'PHP',
+      markedBy: 'me',
+    })
+    const summary = await computeGroupPairwiseBalances('G', 'me')
+    expect(summary?.entries.find((e) => e.memberUserId === 'other')?.net ?? 0).toBe(0)
+  })
+
+  it('attributes the notification to the group when every leg is that one group', async () => {
+    await db.groups.add(makeGroup({ id: 'G', created_by: 'me', currency: 'PHP' }))
+    await db.group_members.bulkAdd([
+      makeMember({ group_id: 'G', user_id: 'me' }),
+      makeMember({ group_id: 'G', user_id: 'other' }),
+    ])
+    await seedSimpleBill({ groupId: 'G', paidBy: 'me', shares: { other: 100 } })
+    vi.mocked(notifyPaymentsRecorded).mockClear()
+    await recordPersonPayment({
+      meId: 'me',
+      otherId: 'other',
+      direction: 'they_paid_me',
+      totalAmount: 100,
+      allocations: [{ context: { groupId: 'G' }, amount: 100 }],
+      currency: 'PHP',
+      markedBy: 'other', // recipient is 'me'; a real notification is emitted
+    })
+    expect(vi.mocked(notifyPaymentsRecorded)).toHaveBeenCalledWith(
+      expect.objectContaining({ groupId: 'G' }),
+    )
+  })
+
+  it('leaves the notification un-grouped for a personal payment', async () => {
+    await seedSimpleBill({ groupId: null, paidBy: 'me', shares: { other: 100 } })
+    vi.mocked(notifyPaymentsRecorded).mockClear()
+    await recordPersonPayment({
+      meId: 'me',
+      otherId: 'other',
+      direction: 'they_paid_me',
+      totalAmount: 100,
+      allocations: [{ context: 'personal', amount: 100 }],
+      currency: 'PHP',
+      markedBy: 'other',
+    })
+    expect(vi.mocked(notifyPaymentsRecorded)).toHaveBeenCalledWith(
+      expect.objectContaining({ groupId: null }),
+    )
+  })
+
+  it('splits across personal + group into one bundle, reducing both contexts', async () => {
+    await db.groups.add(makeGroup({ id: 'G2', created_by: 'me', currency: 'PHP' }))
+    await db.group_members.bulkAdd([
+      makeMember({ group_id: 'G2', user_id: 'me' }),
+      makeMember({ group_id: 'G2', user_id: 'other' }),
+    ])
+    await seedSimpleBill({ groupId: null, paidBy: 'me', shares: { other: 60 } }) // personal: owe me 60
+    await seedSimpleBill({ groupId: 'G2', paidBy: 'me', shares: { other: 40 } }) // group: owe me 40
+    const { settlementIds, bundleId } = await recordPersonPayment({
+      meId: 'me',
+      otherId: 'other',
+      direction: 'they_paid_me',
+      totalAmount: 100,
+      allocations: [
+        { context: 'personal', amount: 60 },
+        { context: { groupId: 'G2' }, amount: 40 },
+      ],
+      currency: 'PHP',
+      markedBy: 'me',
+    })
+    expect(settlementIds).toHaveLength(2)
+    expect(bundleId).not.toBeNull()
+    const legs = await db.settlements.where('bundle_id').equals(bundleId as string).toArray()
+    expect(legs).toHaveLength(2)
+    // Combined tab clears; both contexts consistent.
+    expect((await computePairwiseNetAllContexts('me', 'other')).get('PHP') ?? 0).toBe(0)
+  })
+
+  it('an overpayment flips the tab — no credit banked', async () => {
+    await seedSimpleBill({ groupId: null, paidBy: 'me', shares: { other: 100 } }) // they owe me 100
+    await recordPersonPayment({
+      meId: 'me',
+      otherId: 'other',
+      direction: 'they_paid_me',
+      totalAmount: 150,
+      allocations: [{ context: 'personal', amount: 150 }],
+      currency: 'PHP',
+      markedBy: 'me',
+    })
+    expect((await computePairwiseNetPersonalOnly('me', 'other')).get('PHP') ?? 0).toBe(-50)
+  })
+
+  it('stores the method and note on the payment for the audit', async () => {
+    const { settlementIds } = await recordPersonPayment({
+      meId: 'me',
+      otherId: 'other',
+      direction: 'they_paid_me',
+      totalAmount: 50,
+      allocations: [{ context: 'personal', amount: 50 }],
+      currency: 'PHP',
+      markedBy: 'me',
+      method: 'GCash',
+      note: 'lunch',
+    })
+    const row = await db.settlements.get(settlementIds[0])
+    expect(row?.method).toBe('GCash')
+    expect(row?.label).toBe('lunch')
   })
 })

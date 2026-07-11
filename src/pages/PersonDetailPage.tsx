@@ -3,11 +3,9 @@ import { Link, useNavigate, useParams } from 'react-router-dom'
 import {
   ArrowLeft,
   Banknote,
-  ChevronRight,
   Link2,
   Loader2,
   MoreVertical,
-  ReceiptText,
   Share2,
   Trash2,
   Unlink,
@@ -16,45 +14,37 @@ import {
 import { useLiveQuery } from 'dexie-react-hooks'
 import { db } from '@/db/db'
 import {
-  buildManualGeneralCreditSelectionPlan,
-  buildPersonalBillAllocationPlan,
-  buildPersonalReconcilePlan,
   computePairwiseNetForBill,
-  computePairwiseNetPersonalOnly,
+  computePairwiseNetBreakdown,
   fetchRemoteProfileIntoDexie,
   findRemoteProfileIdForLinking,
   formatPairwiseSummary,
   listBillsInvolvingPair,
-  listEligibleSharedGroupsForGeneralCredit,
   listPairwiseSettlementsBetween,
   resolveFallbackIdentityForViewer,
   listSharedGroupsWithBalance,
   resolveProfileDisplay,
 } from '@/lib/people'
-import { computeGroupPairwiseNet } from '@/lib/settlement'
+import { buildPersonMoneyFlow } from '@/lib/money-flow'
 import {
   addProfilePeerLink,
-  applyGeneralCreditToSelection,
-  createPersonalPaymentWithDistribution,
   deletePerson,
   getBillWithDetails,
   linkProfileToRemote,
   removeProfilePeerLink,
-  resolveGroupMemberUserId,
-  settleUpPersonalBills,
 } from '@/db/operations'
 import { ConfirmDialog } from '@/components/common/ConfirmDialog'
-import { useConfirmDialog } from '@/hooks/useConfirmDialog'
 import { useCurrentUser } from '@/hooks/useCurrentUser'
-import { withBillBackQuery } from '@/lib/bill-navigation'
-import { cn, formatCurrency } from '@/lib/utils'
+import { cn, formatCurrency, MONEY_EPSILON } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import { SettlementHistoryList } from '@/components/common/SettlementHistoryList'
 import { EditSettlementDialog } from '@/components/common/EditSettlementDialog'
-import { RecordSettlementDialog } from '@/components/common/RecordSettlementDialog'
-import { ApplyGeneralCreditDialog } from '@/components/common/ApplyGeneralCreditDialog'
-import { SettleUpDialog } from '@/components/common/SettleUpDialog'
+import {
+  RecordPaymentDialog,
+  type PaymentContext,
+  type PaymentDirection,
+} from '@/components/common/RecordPaymentDialog'
+import { PersonStatement } from '@/components/common/PersonStatement'
 import { ExportImageDialog } from '@/components/export/ExportImageDialog'
 import { PersonExportCard, type PersonBillEntry } from '@/components/export/PersonExportCard'
 import { exportPersonToCSV } from '@/lib/export-csv'
@@ -337,12 +327,10 @@ export function PersonDetailPage() {
   const navigate = useNavigate()
   const { userId, profile: meProfile } = useCurrentUser()
   const [editing, setEditing] = useState<SettlementHistoryItem | null>(null)
-  const [record, setRecord] = useState<{ currency: string } | null>(null)
-  const [paymentMode, setPaymentMode] = useState<'general' | 'distributed'>('general')
-  const [applyingGeneralCredit, setApplyingGeneralCredit] = useState(false)
-  const [applyCreditOpen, setApplyCreditOpen] = useState(false)
-  const [settleUpOpen, setSettleUpOpen] = useState(false)
-  const [settlingUp, setSettlingUp] = useState(false)
+  const [paymentOpen, setPaymentOpen] = useState(false)
+  const [settlePrefill, setSettlePrefill] = useState<{ amount: number; direction: PaymentDirection } | null>(
+    null,
+  )
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false)
   const [showOptionsMenu, setShowOptionsMenu] = useState(false)
   const [linkByIdInput, setLinkByIdInput] = useState('')
@@ -354,9 +342,7 @@ export function PersonDetailPage() {
     null,
   )
   const [peerLinkToUnlink, setPeerLinkToUnlink] = useState<ProfilePeerLink | null>(null)
-  const [billsScope, setBillsScope] = useState<'personal' | 'groups'>('personal')
   const [exportOpen, setExportOpen] = useState(false)
-  const { confirm: confirmFlow, dialog: flowConfirmDialog } = useConfirmDialog()
 
   const profile = useLiveQuery(
     async (): Promise<Profile | null | undefined> => {
@@ -394,45 +380,23 @@ export function PersonDetailPage() {
 
   const breakdown = useLiveQuery(async () => {
     if (!userId || !personId) return null
-    // Personal-only pairwise (personal bills + personal settlements), per currency.
-    const personalMap = await computePairwiseNetPersonalOnly(userId, personId)
-
-    // Pairwise net with this person in every shared group (incl. 3+ member groups).
-    const memberships = await db.group_members.where('user_id').equals(userId).toArray()
-    const myGroupIds = [...new Set(memberships.filter((m) => !m.is_deleted).map((m) => m.group_id))]
-    const groupNetById = new Map<string, number>()
+    // Shared helper: personal net + net in every shared group (incl. 3+ member groups), with
+    // the counterparty resolved through the peer-link cluster — so this hero matches the People
+    // list, exports, and bill status instead of dropping peer-linked-only groups.
+    const { personal, groups, total } = await computePairwiseNetBreakdown(userId, personId)
     const sources: { key: string; label: string; net: number; currency: string }[] = []
-
-    for (const [currency, net] of personalMap) {
-      if (Math.abs(net) > 0.005) {
+    for (const [currency, net] of personal) {
+      if (Math.abs(net) > MONEY_EPSILON) {
         sources.push({ key: `personal-${currency}`, label: 'Personal', net, currency })
       }
     }
-
-    for (const gid of myGroupIds) {
-      const group = await db.groups.get(gid)
-      if (!group || group.is_deleted) continue
-      // Is the person actually in this group? Resolve to the group's roster id.
-      const rosterPersonId = await resolveGroupMemberUserId(gid, personId)
-      const member = await db.group_members
-        .where('[group_id+user_id]')
-        .equals([gid, rosterPersonId])
-        .first()
-      if (!member) continue // not a shared group with this person
-      const net = await computeGroupPairwiseNet(gid, userId, rosterPersonId)
-      groupNetById.set(gid, net)
-      if (Math.abs(net) > 0.005) {
-        sources.push({ key: `group-${gid}`, label: group.name, net, currency: group.currency })
-      }
+    for (const g of groups) {
+      sources.push({ key: `group-${g.groupId}`, label: g.groupName, net: g.net, currency: g.currency })
     }
-
-    const overall = new Map<string, number>()
-    for (const s of sources) overall.set(s.currency, (overall.get(s.currency) ?? 0) + s.net)
-
-    return { sources, overall, groupNetById }
+    return { sources, overall: total }
   }, [userId, personId])
 
-  // Overall standing (personal + every shared group, credit-clamped). Single source of
+  // Overall standing (personal + every shared group) as a plain signed sum. Single source of
   // truth for the headline, export card, and per-bill "covered" hint so they never disagree.
   const netByCurrency = useMemo(
     () => breakdown?.overall ?? new Map<string, number>(),
@@ -443,9 +407,6 @@ export function PersonDetailPage() {
     if (!userId || !personId) return []
     return listPairwiseSettlementsBetween(userId, personId)
   }, [userId, personId])
-  const billsLoading = bills === undefined
-  const sharedGroupsLoading = sharedGroups === undefined
-  const settlementsLoading = settlements === undefined
 
   const linkableRemotes = useLiveQuery(async () => {
     if (!userId || !personId) return []
@@ -540,9 +501,14 @@ export function PersonDetailPage() {
 
   const exportBillDetails = useLiveQuery(async () => {
     if (!exportOpen || !userId || !personId) return [] as PersonBillEntry[]
-    const unsettled = personalBills.filter(
-      (b) => Math.abs(personalBillDirection?.get(b.id) ?? 0) > 0.005,
-    )
+    // A personal bill is "open" only when you're not square in its currency (tab-derived,
+    // matching the hero). Untagged settle-ups clear the whole tab, not individual bills, so a
+    // per-bill net never reflects a payment on its own — gate on the overall standing so a
+    // settled person never exports bills as still outstanding (which contradicts the header).
+    const unsettled = personalBills.filter((b) => {
+      if (Math.abs(personalBillDirection?.get(b.id) ?? 0) <= 0.005) return false
+      return Math.abs(netByCurrency.get(b.currency) ?? 0) > 0.005
+    })
     const results = await Promise.all(
       unsettled.map(async (b) => {
         const details = await getBillWithDetails(b.id)
@@ -557,7 +523,7 @@ export function PersonDetailPage() {
       }),
     )
     return results.filter((r) => r !== null) as PersonBillEntry[]
-  }, [exportOpen, userId, personId, personalBills, personalBillDirection])
+  }, [exportOpen, userId, personId, personalBills, personalBillDirection, netByCurrency])
 
   const defaultCurrency = useMemo(() => {
     const pb = personalBills[0]
@@ -570,71 +536,33 @@ export function PersonDetailPage() {
     return sharedGroupCurrency ?? 'PHP'
   }, [personalBills, bills, settlements, sharedGroups])
 
-  const manualGeneralCreditPlan = useLiveQuery(async () => {
-    if (!userId || !personId) return null
-    const candidateCurrencies = [
-      ...new Set(
-        [
-          ...personalBills.map((bill) => bill.currency),
-          ...(bills ?? []).map((bill) => bill.currency),
-          ...(settlements ?? []).map((settlement) => settlement.currency),
-          ...(sharedGroups ?? []).map((group) => group.currency),
-        ].filter(Boolean),
-      ),
-    ]
-
-    const currencies = candidateCurrencies.length > 0 ? candidateCurrencies : [defaultCurrency]
-    const plans = await Promise.all(
-      currencies.map((currency) =>
-        buildManualGeneralCreditSelectionPlan({
-          meId: userId,
-          otherId: personId,
-          currency,
-        }),
-      ),
-    )
-    return plans
-      .filter((plan): plan is NonNullable<typeof plan> => Boolean(plan))
-      .sort((a, b) => b.maxApplicableAmount - a.maxApplicableAmount)[0] ?? null
-  }, [userId, personId, defaultCurrency, bills, settlements, sharedGroups, personalBills, personalBillDirection])
-
-  // Two-sided "Settle up" plan for personal bills (both directions, offset + credit).
-  const personalReconcilePlan = useLiveQuery(async () => {
-    if (!userId || !personId) return null
-    const candidateCurrencies = [
-      ...new Set(
-        [
-          ...personalBills.map((bill) => bill.currency),
-          ...(settlements ?? []).map((settlement) => settlement.currency),
-        ].filter(Boolean),
-      ),
-    ]
-    const currencies = candidateCurrencies.length > 0 ? candidateCurrencies : [defaultCurrency]
-    const plans = await Promise.all(
-      currencies.map((currency) => buildPersonalReconcilePlan({ meId: userId, otherId: personId, currency })),
-    )
-    return plans.filter((plan) => plan.maxApplicable > 0.005).sort((a, b) => b.maxApplicable - a.maxApplicable)[0] ?? null
-  }, [userId, personId, defaultCurrency, personalBills, settlements])
-
-  const settlementParties = useMemo((): { id: string; label: string }[] | undefined => {
+  const statement = useLiveQuery(async () => {
     if (!userId || !personId) return undefined
-    return [
-      { id: userId, label: meProfile?.display_name?.trim() || 'You' },
-      {
-        id: personId,
-        label:
-          (display?.displayName ?? profile?.display_name ?? fallbackIdentity?.displayName ?? 'Contact')
-            .trim() || 'Contact',
-      },
-    ]
-  }, [
-    userId,
-    personId,
-    meProfile?.display_name,
-    display?.displayName,
-    profile?.display_name,
-    fallbackIdentity?.displayName,
-  ])
+    return buildPersonMoneyFlow(userId, personId)
+  }, [userId, personId])
+
+  const primaryNet = useMemo(() => netByCurrency.get(defaultCurrency) ?? 0, [netByCurrency, defaultCurrency])
+  const meName = meProfile?.display_name?.trim() || 'You'
+
+  // Personal + each shared group (for the chosen currency) as payment "apply to" buckets.
+  const paymentContexts = useMemo<PaymentContext[]>(() => {
+    if (!breakdown) return []
+    return breakdown.sources
+      .filter((s) => s.currency === defaultCurrency)
+      .map((s) => ({
+        key: s.key.startsWith('group-') ? s.key.slice('group-'.length) : 'personal',
+        label: s.label,
+        net: s.net,
+      }))
+  }, [breakdown, defaultCurrency])
+
+  // Any settlement leg id → its (possibly bundled) history item, so statement rows can edit.
+  const settlementByLegId = useMemo(() => {
+    const map = new Map<string, SettlementHistoryItem>()
+    for (const item of settlements ?? []) for (const id of item.settlementIds) map.set(id, item)
+    return map
+  }, [settlements])
+  const editableSettlementIds = useMemo(() => new Set(settlementByLegId.keys()), [settlementByLegId])
 
   useEffect(() => {
     if (personId && userId && personId === userId) {
@@ -807,182 +735,6 @@ export function PersonDetailPage() {
     setDeleteConfirmOpen(true)
   }
 
-  async function handleRecordPaymentSubmit(args: {
-    groupId: string | null
-    billId: string | null
-    fromUserId: string
-    toUserId: string
-    amount: number
-    currency: string
-    label?: string
-    markedBy: string
-  }) {
-    if (!userId || !personId) return
-    if (paymentMode === 'general') {
-      await createPersonalPaymentWithDistribution({
-        fromUserId: args.fromUserId,
-        toUserId: args.toUserId,
-        totalAmount: args.amount,
-        currency: args.currency,
-        markedBy: args.markedBy,
-        label: args.label,
-        slices: [],
-        remainderAmount: args.amount,
-        routeHint: `/app/people/${personId}`,
-      })
-      return true
-    }
-
-    const plan = await buildPersonalBillAllocationPlan({
-      meId: userId,
-      otherId: personId,
-      fromUserId: args.fromUserId,
-      toUserId: args.toUserId,
-      currency: args.currency,
-      amountToApply: args.amount,
-    })
-
-    const fullSettle = plan.allocatableTotal > 0.005 && args.amount >= plan.allocatableTotal - 0.005
-    if (fullSettle) {
-      const ok = await confirmFlow({
-        title: 'This can clear your balance',
-        description: 'This payment can settle all unpaid personal bills between you two.',
-        confirmLabel: 'Apply payment',
-      })
-      if (!ok) return false
-    }
-
-    if (plan.remainderAmount > 0.005) {
-      const ok = await confirmFlow({
-        title: 'This is more than unpaid bills',
-        description: `${formatCurrency(plan.appliedAmount, args.currency)} will settle unpaid bills. ${formatCurrency(
-          plan.remainderAmount,
-          args.currency,
-        )} will be saved as a general payment.`,
-        confirmLabel: 'Continue',
-      })
-      if (!ok) return false
-    }
-
-    await createPersonalPaymentWithDistribution({
-      fromUserId: args.fromUserId,
-      toUserId: args.toUserId,
-      totalAmount: args.amount,
-      currency: args.currency,
-      markedBy: args.markedBy,
-      label: args.label,
-      slices: plan.slices.map((s) => ({ billId: s.billId, amount: s.amount })),
-      remainderAmount: plan.remainderAmount,
-      routeHint: `/app/people/${personId}`,
-    })
-    return true
-  }
-
-  async function handleSettleUpSubmit(amount: number) {
-    if (!personalReconcilePlan || !userId || !personId) return
-    setSettlingUp(true)
-    try {
-      // Re-derive against current balances for the chosen amount before writing.
-      const fresh = await buildPersonalReconcilePlan({
-        meId: userId,
-        otherId: personId,
-        currency: personalReconcilePlan.currency,
-        amountToApply: amount,
-      })
-      if (fresh.appliedAmount <= 0.005) {
-        throw new Error('Nothing left to settle. Refresh and try again.')
-      }
-      await settleUpPersonalBills({
-        meId: userId,
-        otherId: personId,
-        currency: fresh.currency,
-        markedBy: userId,
-        offsetSlices: fresh.offsetSlices.map((s) => ({ billId: s.billId, amount: s.amount, direction: s.direction })),
-        creditSlices: fresh.creditSlices.map((s) => ({ billId: s.billId, amount: s.amount, direction: s.direction })),
-        routeHint: `/app/people/${personId}`,
-      })
-      setSettleUpOpen(false)
-      toast.success(fresh.fullySettled ? 'Settled up.' : 'Recorded your settle up.')
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Could not settle up right now.'
-      toast.error(message)
-    } finally {
-      setSettlingUp(false)
-    }
-  }
-
-  async function handleApplyGeneralCredit() {
-    if (!manualGeneralCreditPlan || !userId || !personId) return
-    if (manualGeneralCreditPlan.maxApplicableAmount <= 0.005) {
-      toast.info('No eligible bills or groups to apply credit to.')
-      return
-    }
-    setApplyCreditOpen(true)
-  }
-
-  async function handleApplyGeneralCreditSubmit(args: {
-    appliedAmount: number
-    personalAmount: number
-    groupAllocations: { groupId: string; amount: number }[]
-  }) {
-    if (!manualGeneralCreditPlan || !userId || !personId) return
-    setApplyingGeneralCredit(true)
-    try {
-      let personalSlices: { billId: string; amount: number }[] = []
-      if (args.personalAmount > 0.005) {
-        const personalPlan = await buildPersonalBillAllocationPlan({
-          meId: userId,
-          otherId: personId,
-          fromUserId: manualGeneralCreditPlan.fromUserId,
-          toUserId: manualGeneralCreditPlan.toUserId,
-          currency: manualGeneralCreditPlan.currency,
-          amountToApply: args.personalAmount,
-        })
-        if (personalPlan.appliedAmount + 0.005 < args.personalAmount) {
-          throw new Error('Personal bill balances changed. Refresh and try again.')
-        }
-        personalSlices = personalPlan.slices.map((slice) => ({ billId: slice.billId, amount: slice.amount }))
-      }
-
-      if (args.groupAllocations.length > 0) {
-        const currentEligibleGroups = await listEligibleSharedGroupsForGeneralCredit({
-          meId: userId,
-          otherId: personId,
-          fromUserId: manualGeneralCreditPlan.fromUserId,
-          toUserId: manualGeneralCreditPlan.toUserId,
-          currency: manualGeneralCreditPlan.currency,
-        })
-        const currentAmountByGroupId = new Map(
-          currentEligibleGroups.map((group) => [group.groupId, group.allocatableAmount]),
-        )
-        for (const group of args.groupAllocations) {
-          const currentAmount = currentAmountByGroupId.get(group.groupId) ?? 0
-          if (group.amount > currentAmount + 0.005) {
-            throw new Error('A selected group balance changed. Refresh and try again.')
-          }
-        }
-      }
-
-      await applyGeneralCreditToSelection({
-        fromUserId: manualGeneralCreditPlan.fromUserId,
-        toUserId: manualGeneralCreditPlan.toUserId,
-        currency: manualGeneralCreditPlan.currency,
-        markedBy: userId,
-        appliedAmount: args.appliedAmount,
-        personalSlices,
-        groupAllocations: args.groupAllocations,
-        routeHint: `/app/people/${personId}`,
-      })
-      setApplyCreditOpen(false)
-      toast.success('Applied available general credit.')
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Could not apply credit right now.'
-      toast.error(message)
-    } finally {
-      setApplyingGeneralCredit(false)
-    }
-  }
-
   return (
     <div className="space-y-5">
       <div className="flex items-center justify-between gap-2">
@@ -1059,7 +811,7 @@ export function PersonDetailPage() {
         )}
         {breakdown && breakdown.sources.length > 0 && (
           <div className="mt-4 rounded-2xl border border-stone-200 bg-stone-50/60 p-4">
-            <p className="text-xs font-medium uppercase tracking-wide text-stone-400">Where this stands</p>
+            <p className="text-xs font-medium uppercase tracking-wide text-stone-400">Right now</p>
             <ul className="mt-2 space-y-1.5">
               {breakdown.sources.map((s) => (
                 <li key={s.key} className="flex items-center justify-between text-sm">
@@ -1136,321 +888,78 @@ export function PersonDetailPage() {
           </div>
         )}
 
-        <div className="mt-4">
-          <div className="flex flex-wrap items-center gap-2">
-            <Button
-              size="sm"
-              className="rounded-full"
-              type="button"
-              onClick={() => {
-                setPaymentMode('general')
-                setRecord({ currency: defaultCurrency })
-              }}
-            >
-              Add payment
-            </Button>
+        <div className="mt-4 flex flex-wrap items-center gap-2">
+          <Button
+            size="sm"
+            className="rounded-full"
+            type="button"
+            onClick={() => {
+              setSettlePrefill(null)
+              setPaymentOpen(true)
+            }}
+          >
+            Record a payment
+          </Button>
+          {Math.abs(primaryNet) > 0.005 && (
             <Button
               size="sm"
               variant="outline"
               className="rounded-full"
               type="button"
-              disabled={settlingUp || !personalReconcilePlan || personalReconcilePlan.maxApplicable <= 0.005}
-              onClick={() => setSettleUpOpen(true)}
+              onClick={() => {
+                setSettlePrefill({
+                  amount: Math.abs(primaryNet),
+                  direction: primaryNet >= 0 ? 'they_paid_me' : 'i_paid_them',
+                })
+                setPaymentOpen(true)
+              }}
             >
-              {settlingUp ? 'Settling…' : 'Settle up'}
+              Settle up
             </Button>
-            {manualGeneralCreditPlan && manualGeneralCreditPlan.groupAllocatableAmount > 0.005 && (
-              <Button
-                size="sm"
-                variant="outline"
-                className="rounded-full"
-                type="button"
-                disabled={applyingGeneralCredit}
-                onClick={() => void handleApplyGeneralCredit()}
-              >
-                {applyingGeneralCredit ? 'Applying…' : 'Apply credit to groups'}
-              </Button>
-            )}
-          </div>
-          <p className="mt-2 text-xs text-stone-500">
-            Settle up reconciles your personal bills both ways — what you each owe cancels out, and any
-            leftover is covered by available credit, recording a payment on every covered bill. General
-            payments reduce your total balance only.
-          </p>
-          {manualGeneralCreditPlan && manualGeneralCreditPlan.maxApplicableAmount > 0.005 && (
-            <p className="mt-1 text-xs text-stone-500">
-              Available general credit you can apply now:{' '}
-              {formatCurrency(manualGeneralCreditPlan.maxApplicableAmount, manualGeneralCreditPlan.currency)}
-              {manualGeneralCreditPlan.personalPlan.affectedBillCount > 0 &&
-                ` across ${manualGeneralCreditPlan.personalPlan.affectedBillCount} bill${
-                  manualGeneralCreditPlan.personalPlan.affectedBillCount === 1 ? '' : 's'
-                }`}
-              {manualGeneralCreditPlan.eligibleGroups.length > 0 &&
-                `${manualGeneralCreditPlan.personalPlan.affectedBillCount > 0 ? ' and ' : ' across '}${
-                  manualGeneralCreditPlan.eligibleGroups.length
-                } group${manualGeneralCreditPlan.eligibleGroups.length === 1 ? '' : 's'}`}
-              .
-            </p>
           )}
         </div>
       </div>
 
       <div className="rounded-3xl border border-stone-200 bg-white p-5 shadow-sm">
-        <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
-          <div className="flex items-center gap-2">
-            <ReceiptText className="size-4 text-teal-800" />
-            <h2 className="text-lg font-semibold">Bills &amp; groups</h2>
-          </div>
+        <div className="flex items-center gap-2">
+          <Banknote className="size-4 text-teal-800" />
+          <h2 className="text-lg font-semibold">Statement</h2>
         </div>
-
-        <div className="mt-3 grid grid-cols-2 gap-1 rounded-2xl border border-stone-200 bg-stone-100/80 p-1">
-          <button
-            type="button"
-            onClick={() => setBillsScope('personal')}
-            className={cn(
-              'flex items-center justify-center gap-2 rounded-xl px-3 py-2.5 text-sm font-medium transition-colors',
-              billsScope === 'personal'
-                ? 'bg-white text-stone-900 shadow-sm'
-                : 'text-stone-500 hover:text-stone-800',
-            )}
-          >
-            <ReceiptText className="size-3.5" />
-            Personal
-            {!billsLoading && personalBills.length > 0 && (
-              <span className="rounded-full bg-stone-200/80 px-1.5 text-[0.65rem] font-semibold text-stone-600">
-                {personalBills.length}
-              </span>
-            )}
-          </button>
-          <button
-            type="button"
-            onClick={() => setBillsScope('groups')}
-            className={cn(
-              'flex items-center justify-center gap-2 rounded-xl px-3 py-2.5 text-sm font-medium transition-colors',
-              billsScope === 'groups'
-                ? 'bg-white text-stone-900 shadow-sm'
-                : 'text-stone-500 hover:text-stone-800',
-            )}
-          >
-            <Users className="size-3.5" />
-            Groups
-            {!sharedGroupsLoading && (sharedGroups?.length ?? 0) > 0 && (
-              <span className="rounded-full bg-stone-200/80 px-1.5 text-[0.65rem] font-semibold text-stone-600">
-                {sharedGroups?.length}
-              </span>
-            )}
-          </button>
-        </div>
-
-        {billsScope === 'personal' && (
-          <>
-            {billsLoading ? (
-              <div className="mt-3 space-y-2">
-                {Array.from({ length: 3 }).map((_, i) => (
-                  <div
-                    key={`person-personal-skeleton-${i}`}
-                    className="rounded-xl border border-stone-200 bg-stone-100/60 px-4 py-3"
-                  >
-                    <div className="h-4 w-40 animate-pulse rounded bg-stone-200" />
-                    <div className="mt-2 h-3 w-24 animate-pulse rounded bg-stone-100" />
-                  </div>
-                ))}
-              </div>
-            ) : personalBills.length === 0 ? (
-              <p className="mt-3 text-sm text-stone-500">
-                No personal bills yet where you’re both on the bill (selected on a line and/or as payer).
-                Group trips are under <strong>Groups</strong>.
-              </p>
-            ) : (
-              <ul className="mt-3 space-y-2">
-                {personalBills.map((bill) => (
-                  <li key={bill.id}>
-                    {(() => {
-                      const net = personalBillDirection?.get(bill.id) ?? 0
-                      const settled = Math.abs(net) < 0.005
-                      const globalNet = netByCurrency?.get(bill.currency) ?? 0
-                      const autoOffset = net < 0 && globalNet >= 0
-                      const direction = net > 0 ? 'Receive' : autoOffset ? 'Covered' : 'Pay'
-                      const amountForDisplay = settled ? 0 : Math.abs(net)
-                      const badgeClass = settled
-                        ? 'bg-stone-200 text-stone-600'
-                        : net > 0
-                          ? 'bg-emerald-100 text-emerald-800'
-                          : autoOffset
-                            ? 'bg-stone-200 text-stone-600'
-                            : 'bg-amber-100 text-amber-800'
-                      return (
-                    <Link
-                      to={withBillBackQuery(`/app/bills/${bill.id}`, `/app/people/${personId}`)}
-                      className="flex items-center justify-between rounded-xl border border-stone-200 bg-stone-100/60 px-4 py-3 transition-colors hover:bg-stone-100"
-                    >
-                      <div className="min-w-0">
-                        <p className="font-medium text-stone-800">{bill.title}</p>
-                        <p className="mt-0.5 flex items-center gap-2 text-xs text-stone-500">
-                          <span>Personal · Paid by {bill.payorName}</span>
-                          <span
-                            className={cn(
-                              'rounded-full px-2 py-0.5 text-[0.65rem] font-semibold uppercase tracking-wide',
-                              badgeClass,
-                            )}
-                          >
-                            {settled ? 'Even' : direction}
-                          </span>
-                        </p>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <span className="text-sm font-semibold text-stone-800">
-                          {formatCurrency(amountForDisplay, bill.currency)}
-                        </span>
-                        <ChevronRight className="size-4 text-stone-400" />
-                      </div>
-                    </Link>
-                      )
-                    })()}
-                  </li>
-                ))}
-              </ul>
-            )}
-          </>
-        )}
-
-        {billsScope === 'groups' && (
-          <>
-            {sharedGroupsLoading ? (
-              <div className="mt-3 space-y-2">
-                {Array.from({ length: 3 }).map((_, i) => (
-                  <div
-                    key={`person-groups-skeleton-${i}`}
-                    className="rounded-xl border border-stone-200 bg-stone-100/60 px-4 py-3"
-                  >
-                    <div className="h-4 w-36 animate-pulse rounded bg-stone-200" />
-                    <div className="mt-2 h-3 w-52 animate-pulse rounded bg-stone-100" />
-                  </div>
-                ))}
-              </div>
-            ) : !sharedGroups || sharedGroups.length === 0 ? (
-              <p className="mt-3 text-sm text-stone-500">
-                You’re not in any group with this person yet.
-              </p>
-            ) : (
-              <ul className="mt-3 space-y-2">
-                {sharedGroups.map((g) => {
-                  const net = breakdown?.groupNetById.get(g.groupId) ?? 0
-                  const settled = Math.abs(net) < 0.005
-                  return (
-                    <li key={g.groupId}>
-                      <Link
-                        to={`/app/groups/${g.groupId}`}
-                        className="flex items-center justify-between gap-3 rounded-xl border border-stone-200 bg-stone-100/60 px-4 py-3 transition-colors hover:bg-stone-100"
-                      >
-                        <div className="min-w-0 flex-1">
-                          <p className="font-medium text-stone-800">{g.groupName}</p>
-                          <p className="mt-0.5 text-xs text-stone-500">
-                            {settled ? (
-                              <span className="text-stone-400">Even in this group</span>
-                            ) : net > 0 ? (
-                              <span className="font-medium text-emerald-700">
-                                {resolvedDisplayName} owes you {formatCurrency(net, g.currency)} in this group
-                              </span>
-                            ) : (
-                              <span className="font-medium text-amber-700">
-                                You owe {resolvedDisplayName} {formatCurrency(Math.abs(net), g.currency)} in this group
-                              </span>
-                            )}
-                          </p>
-                        </div>
-                        <div className="flex shrink-0 items-center gap-2">
-                          {!settled && (
-                            <span
-                              className={cn(
-                                'rounded-full px-2 py-0.5 text-[0.65rem] font-semibold uppercase tracking-wide',
-                                net > 0 ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-800',
-                              )}
-                              title={
-                                net > 0
-                                  ? 'On net, they owe you this much in this group'
-                                  : 'On net, you owe them this much in this group'
-                              }
-                            >
-                              {net > 0 ? 'Owes you' : 'You owe'}
-                            </span>
-                          )}
-                          <ChevronRight className="size-4 text-stone-400" />
-                        </div>
-                      </Link>
-                    </li>
-                  )
-                })}
-              </ul>
-            )}
-            <p className="mt-3 text-xs text-stone-400">
-              Your pairwise balance with this person in each group, from bills and settlements.
-            </p>
-          </>
-        )}
+        <p className="mt-1 text-xs text-stone-500">
+          Every bill and payment between you, in order, with a running balance.
+        </p>
+        <PersonStatement
+          result={statement}
+          editableSettlementIds={editableSettlementIds}
+          onEditPayment={(id) => {
+            const item = settlementByLegId.get(id)
+            if (item) setEditing(item)
+          }}
+        />
       </div>
 
-      <div className="rounded-3xl border border-stone-200 bg-white p-5 shadow-sm">
-        <div className="flex items-center justify-between gap-2">
-          <div className="flex items-center gap-2">
-            <Banknote className="size-4 text-teal-800" />
-            <h2 className="text-lg font-semibold">Payments between you</h2>
-          </div>
-          <Link
-            to={`/app/people/${personId}/ledger`}
-            className="shrink-0 text-sm font-medium text-teal-800 hover:underline"
-          >
-            View money flow →
-          </Link>
-        </div>
-        {settlementsLoading ? (
-          <div className="mt-3 flex items-center gap-2 text-sm text-stone-500">
-            <Loader2 className="size-4 animate-spin text-teal-800" />
-            Loading payments…
-          </div>
-        ) : (!settlements || settlements.length === 0) ? (
-          <p className="mt-3 text-sm text-stone-500">No recorded payments yet.</p>
-        ) : (
-          <div className="mt-3">
-            <SettlementHistoryList
-              items={settlements}
-              currentUserId={userId}
-              showGroupName
-              onEdit={(item) => setEditing(item)}
-            />
-          </div>
-        )}
-      </div>
-
-      {record && settlementParties && (
-        <RecordSettlementDialog
+      {paymentOpen && userId && personId && (
+        <RecordPaymentDialog
           open
           onOpenChange={(o) => {
-            if (!o) setRecord(null)
+            if (!o) {
+              setPaymentOpen(false)
+              setSettlePrefill(null)
+            }
           }}
-          title="Add payment"
-          confirmLabel="Add payment"
-          groupId={null}
-          currency={record.currency}
-          fromUserId={personId}
-          toUserId={userId}
-          defaultAmount={0}
-          amountEditable
-          fromName={resolvedDisplayName}
-          toName={meProfile?.display_name ?? 'You'}
-          partyPicker={settlementParties}
+          meId={userId}
+          otherId={personId}
+          meName={meName}
+          otherName={resolvedDisplayName}
+          currency={defaultCurrency}
           markedBy={userId}
-          showPaymentModeToggle
-          paymentMode={paymentMode}
-          onPaymentModeChange={setPaymentMode}
-          helperLines={
-            paymentMode === 'distributed'
-              ? ['We split this payment to your oldest unpaid bills first.']
-              : ['General payments reduce your total balance only.']
-          }
-          onSubmit={handleRecordPaymentSubmit}
+          contexts={paymentContexts}
+          defaultDirection={settlePrefill?.direction}
+          defaultAmount={settlePrefill?.amount}
+          title={settlePrefill ? 'Settle up' : 'Record a payment'}
           onRecorded={() => {
-            setRecord(null)
+            setPaymentOpen(false)
+            setSettlePrefill(null)
           }}
         />
       )}
@@ -1520,27 +1029,6 @@ export function PersonDetailPage() {
         />
       )}
 
-      {applyCreditOpen && manualGeneralCreditPlan && (
-        <ApplyGeneralCreditDialog
-          open
-          onOpenChange={setApplyCreditOpen}
-          plan={manualGeneralCreditPlan}
-          saving={applyingGeneralCredit}
-          onSubmit={handleApplyGeneralCreditSubmit}
-        />
-      )}
-
-      {settleUpOpen && personalReconcilePlan && (
-        <SettleUpDialog
-          open
-          onOpenChange={setSettleUpOpen}
-          plan={personalReconcilePlan}
-          personName={settlementParties?.[1]?.label ?? 'them'}
-          saving={settlingUp}
-          onSubmit={handleSettleUpSubmit}
-        />
-      )}
-
       <ConfirmDialog
         open={deleteConfirmOpen}
         onOpenChange={setDeleteConfirmOpen}
@@ -1550,7 +1038,6 @@ export function PersonDetailPage() {
         variant="danger"
         onConfirm={handleDeletePerson}
       />
-      {flowConfirmDialog}
 
       {exportOpen && userId && personId && (
         <ExportImageDialog
