@@ -12,7 +12,8 @@ import type { Profile, Settlement } from '@/types'
  *
  * Three classes, mirroring the id-canonicalization migrations 043/045:
  *  - orphan: settlement references a bill/group that no longer exists (or is deleted), or a
- *    party id that resolves to no known person at all
+ *    party whose profile this device can SEE is deleted (absence is never treated as proof —
+ *    see `partyResolvable`)
  *  - duplicate: exact-match row (same CANONICAL parties/amount/currency/bill/group/created_at/
  *    bundle/label/method) — keep earliest
  *  - non-canonical: from/to id points at a local contact that has a linked account (or, in a
@@ -92,10 +93,8 @@ export async function planKwentaDataRepair(userId: string): Promise<KwentaDataRe
   const billsById = new Map(billsArr.map((b) => [b.id, b]))
   const groupsById = new Map(groupsArr.map((g) => [g.id, g]))
   const memberGroupUser = new Set<string>() // `${group_id}|${user_id}`
-  const userHasMembership = new Set<string>()
   for (const m of membersArr) {
     memberGroupUser.add(`${m.group_id}|${m.user_id}`)
-    userHasMembership.add(m.user_id)
   }
 
   // A settlement is "mine to repair" if I'm a party or I'm in its group.
@@ -105,14 +104,18 @@ export async function planKwentaDataRepair(userId: string): Promise<KwentaDataRe
   }
   const mine = all.filter(isMine)
 
-  // A party id is "real" (never orphan it) when it has a live profile OR appears in ANY group
-  // roster. Co-members' accounts and other users' local contacts are NOT synced into this
-  // device's profiles table (the pull-bundle privacy boundary), so profile-absence alone must
-  // never condemn a settlement — that would delete a real group payment cloud-wide.
+  // A party id is condemned ONLY on positive proof that the person is gone: a profile row this
+  // device can actually see, marked deleted. Absence is NOT proof — the pull-bundle privacy
+  // boundary means another user's account profile is never synced here unless we linked or share
+  // a group (`WHERE p.id = uid OR (p.is_local AND p.owner_id = uid)`). Treating an invisible
+  // counterparty as an orphan soft-deletes a real payment and pushes that deletion cloud-wide,
+  // wiping it for the other side too (the "payments disappeared after they linked back" bug).
+  // Only the server (migration 047) can see every profile, so only it may judge absence.
   const partyResolvable = (id: string): boolean => {
+    if (id === userId) return true
     const p = profilesById.get(id)
-    if (p && !p.is_deleted) return true
-    return userHasMembership.has(id)
+    if (p) return !p.is_deleted
+    return true // no row here ⇒ unknown, not absent
   }
 
   const orphanSettlements: RepairOrphan[] = []

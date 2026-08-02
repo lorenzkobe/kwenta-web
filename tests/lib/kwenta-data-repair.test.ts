@@ -98,9 +98,26 @@ describe('planKwentaDataRepair', () => {
     expect(plan.summary.total).toBe(0)
   })
 
-  it('orphans a settlement whose party resolves to no known person', async () => {
+  it('never orphans a personal payment whose counterparty account is invisible to this device', async () => {
+    // Privacy boundary: another user's ACCOUNT profile is never synced into my Dexie unless I
+    // linked them or we share a group (kwenta_build_pull_bundle scopes profiles to me + my own
+    // local contacts). Their id therefore has no profile row and no group roster row here — but
+    // the payment is real, and soft-deleting it propagates the deletion to them cloud-wide.
     await db.settlements.add(
-      makeSettlement({ id: 'S', from_user_id: 'phantom', to_user_id: 'me', amount: 10 }),
+      makeSettlement({ id: 'S', from_user_id: 'invisibleAccount', to_user_id: 'me', amount: 10 }),
+    )
+    const plan = await planKwentaDataRepair('me')
+    expect(plan.orphanSettlements.map((o) => o.id)).not.toContain('S')
+    expect(plan.summary.total).toBe(0)
+  })
+
+  it('orphans a settlement whose party is a profile this device can see is deleted', async () => {
+    // Presence of a deleted profile row is positive proof (unlike absence, which is ambiguous).
+    await db.profiles.add(
+      makeProfile({ id: 'deadContact', is_local: true, owner_id: 'me', is_deleted: true }),
+    )
+    await db.settlements.add(
+      makeSettlement({ id: 'S', from_user_id: 'deadContact', to_user_id: 'me', amount: 10 }),
     )
     const plan = await planKwentaDataRepair('me')
     expect(plan.orphanSettlements.find((o) => o.id === 'S')?.reason).toBe('missing_profile')
@@ -228,6 +245,21 @@ describe('maybeAutoRepairData', () => {
     )
     await maybeAutoRepairData('me')
     expect((await db.settlements.get('REAL'))?.is_deleted).toBe(false)
+  })
+
+  it('does not delete a personal payment recorded by the other side before I link back', async () => {
+    // Reported regression: A records "B paid me", links their local contact to B's account and
+    // pushes. B pulls the settlement but NOT A's profile (privacy boundary). B's auto-repair
+    // then condemned it as missing_profile and pushed the soft-delete — the payment vanished for
+    // both and B's balance jumped back up.
+    await db.profiles.clear()
+    await db.profiles.add(makeProfile({ id: 'me' })) // only my own profile is synced to me
+    await db.settlements.add(
+      makeSettlement({ id: 'PAYMENT', from_user_id: 'me', to_user_id: 'theirAccount', amount: 500 }),
+    )
+
+    await maybeAutoRepairData('me')
+    expect((await db.settlements.get('PAYMENT'))?.is_deleted).toBe(false)
   })
 
   it('runs only once per session — a later artifact is not repaired until the next session', async () => {
