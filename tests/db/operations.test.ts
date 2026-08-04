@@ -739,14 +739,75 @@ describe('linkProfileToRemote', () => {
     expect((await db.settlements.get('SET'))?.from_user_id).toBe('REMOTE')
   })
 
-  it('refuses to link a non-owned or non-local profile', async () => {
+  it('reports the write mode so the caller can tell a local-only link from a confirmed one', async () => {
+    // 'queued' is the state that puts the same person on /app/people twice: the server collapses a
+    // contact into its account only when it can see `linked_profile_id`, so until this reaches the
+    // server the two are unrelated people to it.
+    await db.profiles.bulkAdd([
+      makeProfile({ id: 'ME' }),
+      makeProfile({ id: 'LOCAL', is_local: true, owner_id: 'ME', linked_profile_id: null }),
+      makeProfile({ id: 'REMOTE', is_local: false, email: 'remote@example.com' }),
+    ])
+
+    const result = await linkProfileToRemote('LOCAL', 'REMOTE', 'ME')
+
+    expect(result.mode).toBe('cloud')
+  })
+
+  /**
+   * Each of these used to `return` silently. A link that does nothing and says nothing is
+   * indistinguishable from one that worked — and the visible consequence is the duplicate entry on
+   * /app/people, with nothing on screen to explain it. The refusal itself is unchanged; what is
+   * pinned here is that the caller is TOLD, and that nothing was written either way.
+   */
+  it('refuses to link a non-owned or non-local profile, and says so', async () => {
     await db.profiles.bulkAdd([
       makeProfile({ id: 'ME' }),
       makeProfile({ id: 'NOTLOCAL', is_local: false }),
       makeProfile({ id: 'REMOTE', email: 'r@example.com' }),
     ])
-    await linkProfileToRemote('NOTLOCAL', 'REMOTE', 'ME')
+
+    await expect(linkProfileToRemote('NOTLOCAL', 'REMOTE', 'ME')).rejects.toThrow(
+      /only your own local contacts/i,
+    )
     expect((await db.profiles.get('NOTLOCAL'))?.linked_profile_id).toBeNull()
+  })
+
+  it('refuses an account with no email, and says so', async () => {
+    // Only signed-in accounts can be linked; a local contact belonging to someone else has no
+    // email and would make the link unresolvable on the other device.
+    await db.profiles.bulkAdd([
+      makeProfile({ id: 'ME' }),
+      makeProfile({ id: 'LOCAL', is_local: true, owner_id: 'ME', linked_profile_id: null }),
+      makeProfile({ id: 'NOEMAIL', is_local: false, email: '' }),
+    ])
+
+    await expect(linkProfileToRemote('LOCAL', 'NOEMAIL', 'ME')).rejects.toThrow(/no email/i)
+    expect((await db.profiles.get('LOCAL'))?.linked_profile_id).toBeNull()
+  })
+
+  it('refuses a target profile this device does not hold, and says so', async () => {
+    // The pull bundle does not deliver every account, so this is the common real failure: the
+    // person exists, but not here, and the old code silently did nothing about it.
+    await db.profiles.bulkAdd([
+      makeProfile({ id: 'ME' }),
+      makeProfile({ id: 'LOCAL', is_local: true, owner_id: 'ME', linked_profile_id: null }),
+    ])
+
+    await expect(linkProfileToRemote('LOCAL', 'MISSING', 'ME')).rejects.toThrow(
+      /could not load that account/i,
+    )
+    expect((await db.profiles.get('LOCAL'))?.linked_profile_id).toBeNull()
+  })
+
+  it('refuses linking a contact to the actor’s own account, and says so', async () => {
+    await db.profiles.bulkAdd([
+      makeProfile({ id: 'ME', email: 'me@example.com' }),
+      makeProfile({ id: 'LOCAL', is_local: true, owner_id: 'ME', linked_profile_id: null }),
+    ])
+
+    await expect(linkProfileToRemote('LOCAL', 'ME', 'ME')).rejects.toThrow(/your own kwenta account/i)
+    expect((await db.profiles.get('LOCAL'))?.linked_profile_id).toBeNull()
   })
 })
 

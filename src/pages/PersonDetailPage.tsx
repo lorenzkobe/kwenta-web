@@ -687,14 +687,17 @@ export function PersonDetailPage() {
     if (remoteId === userId) return
     setLinkByIdError(null)
     try {
-      await linkProfileToRemote(personId, remoteId, userId)
+      const { mode } = await linkProfileToRemote(personId, remoteId, userId)
+      setLinkAccountOpen(false)
+      if (mode === 'queued') {
+        // Until this reaches the server the contact and the account are two different people to
+        // it, so /app/people shows both. Say that, rather than let it look finished.
+        toast.info('Linked on this device. It will apply everywhere once you are back online.')
+      } else {
+        toast.success('Contact linked to their Kwenta account.')
+      }
     } catch (error) {
       toast.error(error instanceof Error ? error.message : 'Could not link this contact right now.')
-      return
-    }
-    const updated = await db.profiles.get(personId)
-    if (updated?.linked_profile_id === remoteId) {
-      setLinkAccountOpen(false)
     }
   }
 
@@ -761,12 +764,20 @@ export function PersonDetailPage() {
         setLinkByIdError('That profile has no email — only signed-in accounts can be linked.')
         return
       }
-      await linkProfileToRemote(personId, remoteId, userId)
-      const updated = await db.profiles.get(personId)
-      if (updated?.linked_profile_id === remoteId) {
-        setLinkByIdInput('')
-        setLinkAccountOpen(false)
+      const { mode } = await linkProfileToRemote(personId, remoteId, userId)
+      setLinkByIdInput('')
+      setLinkAccountOpen(false)
+      if (mode === 'queued') {
+        toast.info('Linked on this device. It will apply everywhere once you are back online.')
+      } else {
+        toast.success('Contact linked to their Kwenta account.')
       }
+    } catch (error) {
+      // Previously this had no catch: `linkProfileToRemote` returned silently on every invalid
+      // case, so there was nothing to catch and nothing to show. Now it says which guard failed.
+      setLinkByIdError(
+        error instanceof Error ? error.message : 'Could not link this contact right now.',
+      )
     } finally {
       setLinkByIdPending(false)
     }

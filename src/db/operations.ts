@@ -48,12 +48,12 @@ async function commitRows(input: {
     payload: unknown
     routeHint: string
   }
-}): Promise<void> {
+}): Promise<{ mode: 'cloud' | 'queued' }> {
   const tables = (Object.keys(input.payload) as (keyof CloudWritePayload)[]).filter(
     (t) => (input.payload[t]?.length ?? 0) > 0,
   )
 
-  await commitCloudFirstWrite({
+  return commitCloudFirstWrite({
     actorUserId: input.actorUserId,
     payload: input.payload,
     stageOffline: async () => {
@@ -939,14 +939,34 @@ export async function linkProfileToRemote(
   localProfileId: string,
   remoteProfileId: string,
   actorUserId: string,
-): Promise<void> {
+): Promise<{ mode: 'cloud' | 'queued' }> {
+  // These used to `return` silently. A link that does nothing and says nothing is indistinguishable
+  // from one that worked, and the consequence is not cosmetic: the People list is the SERVER's
+  // answer, and the server collapses a contact into its account only when it can see
+  // `linked_profile_id` — so a link that never happened leaves the same person on screen twice,
+  // with nothing to explain why. Each guard now says which one it is.
   const local = await db.profiles.get(localProfileId)
   const remote = await db.profiles.get(remoteProfileId)
-  if (!local || local.is_deleted || !remote || remote.is_deleted) return
-  if (local.id === remote.id) return
-  if (remoteProfileId === actorUserId) return
-  if (local.owner_id !== actorUserId || !local.is_local) return
-  if (!remote.email?.trim()) return
+  if (!local || local.is_deleted) {
+    throw new Error('That contact no longer exists on this device.')
+  }
+  if (!remote || remote.is_deleted) {
+    throw new Error(
+      'Could not load that account’s profile. Check your connection, or make sure you share a group with them.',
+    )
+  }
+  if (local.id === remote.id) {
+    throw new Error('That’s the same record — pick the other person’s account.')
+  }
+  if (remoteProfileId === actorUserId) {
+    throw new Error('You can’t link a contact to your own Kwenta account.')
+  }
+  if (local.owner_id !== actorUserId || !local.is_local) {
+    throw new Error('Only your own local contacts can be linked to an account.')
+  }
+  if (!remote.email?.trim()) {
+    throw new Error('That profile has no email — only signed-in accounts can be linked.')
+  }
 
   const timestamp = now()
 
@@ -1035,7 +1055,7 @@ export async function linkProfileToRemote(
     })
   }
 
-  await commitRows({
+  const { mode } = await commitRows({
     actorUserId,
     payload: collectorToPayload(collect),
     pending: {
@@ -1056,6 +1076,11 @@ export async function linkProfileToRemote(
     recipientId: remoteProfileId,
     linkedAsName: local.display_name,
   })
+
+  // 'queued' means the link exists on THIS device only. That is the state that shows the person
+  // twice on /app/people, because the server cannot collapse a pair whose link it has not been
+  // told about — so the caller has to be able to say so rather than report a plain success.
+  return { mode }
 }
 
 /**
