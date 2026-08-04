@@ -30,6 +30,14 @@ interface AppState {
   runtimeFlags: RuntimeFlags
   initialCloudHydration: InitialCloudHydration
   pullStale: boolean
+  /**
+   * Bumped whenever server-held data may have changed — a manual refresh, a completed sync, a
+   * realtime event, or a local write. Server-backed screens re-fetch when it changes.
+   *
+   * With reads moving to scoped endpoints, `useLiveQuery` no longer sees a change: nothing wrote
+   * to Dexie. This counter is the invalidation signal that replaces it.
+   */
+  dataVersion: number
 
   setOnline: (online: boolean) => void
   setSyncStatus: (status: SyncStatus) => void
@@ -39,6 +47,7 @@ interface AppState {
   setRuntimeFlag: (key: RuntimeFlagKey, enabled: boolean) => void
   setInitialCloudHydration: (state: InitialCloudHydration) => void
   setPullStale: (stale: boolean) => void
+  bumpDataVersion: () => void
 }
 
 export const useAppStore = create<AppState>((set) => ({
@@ -49,6 +58,7 @@ export const useAppStore = create<AppState>((set) => ({
   realtimeNotice: null,
   initialCloudHydration: initialCloudHydrationFromStorage(),
   pullStale: false,
+  dataVersion: 0,
   runtimeFlags: {
     dedupeSyncEnabled: true,
     realtimeCatchupSingleRun: true,
@@ -67,4 +77,5 @@ export const useAppStore = create<AppState>((set) => ({
     set((state) => ({ runtimeFlags: { ...state.runtimeFlags, [key]: enabled } })),
   setInitialCloudHydration: (initialCloudHydration) => set({ initialCloudHydration }),
   setPullStale: (pullStale) => set({ pullStale }),
+  bumpDataVersion: () => set((state) => ({ dataVersion: state.dataVersion + 1 })),
 }))

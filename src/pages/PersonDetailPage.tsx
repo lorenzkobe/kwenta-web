@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect } from 'react'
+import { useState, useMemo, useEffect, useCallback } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import {
   ArrowLeft,
@@ -14,26 +14,29 @@ import {
 import { useLiveQuery } from 'dexie-react-hooks'
 import { db } from '@/db/db'
 import {
-  computePairwiseNetForBill,
-  computePairwiseNetBreakdown,
   fetchRemoteProfileIntoDexie,
   findRemoteProfileIdForLinking,
   formatPairwiseSummary,
-  listBillsInvolvingPair,
-  listPairwiseSettlementsBetween,
   resolveFallbackIdentityForViewer,
-  listSharedGroupsWithBalance,
   resolveProfileDisplay,
 } from '@/lib/people'
-import { buildPersonMoneyFlow } from '@/lib/money-flow'
+import { buildMoneyFlowRows } from '@/lib/money-flow'
+import { loadBillExportItems } from '@/lib/export-splits'
+import {
+  fetchPersonSettlementHistory,
+  fetchPersonStatement,
+  fetchPersonSummary,
+  totalsToMap,
+} from '@/api/balances'
+import { useServerData } from '@/hooks/useServerData'
 import {
   addProfilePeerLink,
   deletePerson,
-  getBillWithDetails,
   linkProfileToRemote,
   removeProfilePeerLink,
 } from '@/db/operations'
 import { ConfirmDialog } from '@/components/common/ConfirmDialog'
+import { SavedCopyNotice } from '@/components/common/SavedCopyNotice'
 import { useCurrentUser } from '@/hooks/useCurrentUser'
 import { cn, formatCurrency, MONEY_EPSILON } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
@@ -50,7 +53,7 @@ import { PersonExportCard, type PersonBillEntry } from '@/components/export/Pers
 import { exportPersonToCSV } from '@/lib/export-csv'
 import { generatePersonPDF } from '@/lib/export-pdf'
 import { makeExportFilename } from '@/lib/export-utils'
-import type { SettlementHistoryItem } from '@/lib/settlement'
+import type { SettlementHistoryItem } from '@/api/balances'
 import type { Profile, ProfilePeerLink } from '@/types'
 import {
   Select,
@@ -366,33 +369,54 @@ export function PersonDetailPage() {
     return resolveFallbackIdentityForViewer(userId, personId)
   }, [userId, personId])
 
-  const bills = useLiveQuery(async () => {
-    if (!userId || !personId) return []
-    return listBillsInvolvingPair(userId, personId)
-  }, [userId, personId])
+  // Personal net + net in every shared group, computed by the server (053/063). The counterparty
+  // is resolved through the peer-link cluster there, so this hero agrees with the People list,
+  // exports and bill status instead of dropping peer-linked-only groups.
+  const loadSummary = useCallback(
+    () =>
+      userId && personId
+        ? fetchPersonSummary(userId, personId)
+        : Promise.reject(new Error('no user')),
+    [userId, personId],
+  )
+  const personSummary = useServerData(
+    userId && personId ? loadSummary : null,
+    [userId, personId, loadSummary],
+  )
 
-  const sharedGroups = useLiveQuery(async () => {
-    if (!userId || !personId) return []
-    return listSharedGroupsWithBalance(userId, personId)
-  }, [userId, personId])
+  // The events come from the server (migration 062); the running-balance walk stays local. The
+  // last running number has to equal the hero above it — the SQL suite pins that invariant.
+  const loadStatement = useCallback(
+    () =>
+      userId && personId
+        ? fetchPersonStatement(userId, personId)
+        : Promise.reject(new Error('no user')),
+    [userId, personId],
+  )
+  const statementQuery = useServerData(
+    userId && personId ? loadStatement : null,
+    [userId, personId, loadStatement],
+  )
+  const statement = useMemo(
+    () => (statementQuery.data ? buildMoneyFlowRows(statementQuery.data) : undefined),
+    [statementQuery.data],
+  )
 
-  const breakdown = useLiveQuery(async () => {
-    if (!userId || !personId) return null
-    // Shared helper: personal net + net in every shared group (incl. 3+ member groups), with
-    // the counterparty resolved through the peer-link cluster — so this hero matches the People
-    // list, exports, and bill status instead of dropping peer-linked-only groups.
-    const { personal, groups, total } = await computePairwiseNetBreakdown(userId, personId)
+  const breakdown = useMemo(() => {
+    if (!personSummary.data) return null
+    const { personal, groups, total } = personSummary.data
     const sources: { key: string; label: string; net: number; currency: string }[] = []
-    for (const [currency, net] of personal) {
+    for (const [currency, net] of Object.entries(personal)) {
       if (Math.abs(net) > MONEY_EPSILON) {
         sources.push({ key: `personal-${currency}`, label: 'Personal', net, currency })
       }
     }
+    // Effectively-zero groups are already dropped server-side (kwenta_pairwise_breakdown).
     for (const g of groups) {
       sources.push({ key: `group-${g.groupId}`, label: g.groupName, net: g.net, currency: g.currency })
     }
-    return { sources, overall: total }
-  }, [userId, personId])
+    return { sources, overall: totalsToMap(total) }
+  }, [personSummary.data])
 
   // Overall standing (personal + every shared group) as a plain signed sum. Single source of
   // truth for the headline, export card, and per-bill "covered" hint so they never disagree.
@@ -401,10 +425,22 @@ export function PersonDetailPage() {
     [breakdown],
   )
 
-  const settlements = useLiveQuery(async () => {
-    if (!userId || !personId) return []
-    return listPairwiseSettlementsBetween(userId, personId)
-  }, [userId, personId])
+  // Every payment between the two of you, across personal and each shared group (migration 064).
+  // Deliberately per-row rather than bundled: a settle-up spanning several people is not one
+  // payment *to this person*, and its total would credit them money that went elsewhere.
+  const loadPayments = useCallback(
+    () =>
+      userId && personId
+        ? fetchPersonSettlementHistory(userId, personId)
+        : Promise.reject(new Error('no user')),
+    [userId, personId],
+  )
+  const paymentsQuery = useServerData(userId && personId ? loadPayments : null, [userId, personId])
+  const settlements = useMemo(
+    () =>
+      paymentsQuery.loading && !paymentsQuery.data ? undefined : (paymentsQuery.data ?? []),
+    [paymentsQuery.loading, paymentsQuery.data],
+  )
 
   const linkableRemotes = useLiveQuery(async () => {
     if (!userId || !personId) return []
@@ -482,20 +518,26 @@ export function PersonDetailPage() {
     return formatPairwiseSummary(breakdown.overall)
   }, [breakdown])
 
+  // The statement already carries every bill between these two with its signed effect on the
+  // tab, so the personal-bill rows and their directions come from it rather than from a second
+  // pass over the local mirror — which is also what stops the two disagreeing.
   const personalBills = useMemo(
-    () => (bills ?? []).filter((b) => !b.group_id),
-    [bills],
+    () =>
+      (statementQuery.data ?? [])
+        .filter((e) => e.type === 'personal_bill')
+        .map((e) => ({ id: e.id, title: e.title, currency: e.currency, net: e.delta })),
+    [statementQuery.data],
   )
 
-  const personalBillDirection = useLiveQuery(async () => {
-    if (!userId || !personId) return new Map<string, number>()
-    const out = new Map<string, number>()
-    for (const bill of personalBills) {
-      const net = await computePairwiseNetForBill(bill.id, userId, personId)
-      out.set(bill.id, net)
-    }
-    return out
-  }, [userId, personId, personalBills])
+  const personalBillDirection = useMemo(
+    () => new Map(personalBills.map((b) => [b.id, b.net])),
+    [personalBills],
+  )
+
+  const sharedGroups = useMemo(
+    () => personSummary.data?.groups ?? [],
+    [personSummary.data],
+  )
 
   const exportBillDetails = useLiveQuery(async () => {
     if (!exportOpen || !userId || !personId) return [] as PersonBillEntry[]
@@ -507,37 +549,44 @@ export function PersonDetailPage() {
       if (Math.abs(personalBillDirection?.get(b.id) ?? 0) <= 0.005) return false
       return Math.abs(netByCurrency.get(b.currency) ?? 0) > 0.005
     })
-    const results = await Promise.all(
-      unsettled.map(async (b) => {
-        const details = await getBillWithDetails(b.id)
-        if (!details) return null
-        return {
-          title: details.title,
-          note: details.note ?? null,
-          currency: details.currency,
-          net: personalBillDirection?.get(b.id) ?? 0,
-          items: details.items,
-        }
-      }),
+    // Two queries plus one name lookup per distinct person, rather than a full
+    // getBillWithDetails fan-out per bill.
+    const itemsByBill = await loadBillExportItems(
+      unsettled.map((b) => b.id),
+      userId,
     )
-    return results.filter((r) => r !== null) as PersonBillEntry[]
+    const bills = await db.bills.bulkGet(unsettled.map((b) => b.id))
+    return unsettled.flatMap((b, i) => {
+      const row = bills[i]
+      if (!row || row.is_deleted) return []
+      return [
+        {
+          title: row.title,
+          note: row.note ?? null,
+          currency: row.currency,
+          net: personalBillDirection?.get(b.id) ?? 0,
+          items: itemsByBill.get(b.id) ?? [],
+        },
+      ]
+    })
   }, [exportOpen, userId, personId, personalBills, personalBillDirection, netByCurrency])
 
   const defaultCurrency = useMemo(() => {
-    const pb = personalBills[0]
+    // The MOST RECENT personal bill. `personalBills` comes from `kwenta_person_statement`, whose
+    // events are ordered ASCENDING, while the query this replaced sorted descending — so `[0]`
+    // silently became the oldest bill and prefilled the payment dialog with a currency the user
+    // last used years ago. Every balance is currency-scoped, so a payment recorded under the
+    // wrong one does not reduce the tab it was meant to settle.
+    const pb = personalBills[personalBills.length - 1]
     if (pb) return pb.currency
-    const anyBillCurrency = bills?.[0]?.currency
-    if (anyBillCurrency) return anyBillCurrency
+    // Also the newest, for the same reason: statement events are ascending.
+    const events = statementQuery.data ?? []
+    const anyEventCurrency = events[events.length - 1]?.currency
+    if (anyEventCurrency) return anyEventCurrency
     const settlementCurrency = settlements?.[0]?.currency
     if (settlementCurrency) return settlementCurrency
-    const sharedGroupCurrency = sharedGroups?.[0]?.currency
-    return sharedGroupCurrency ?? 'PHP'
-  }, [personalBills, bills, settlements, sharedGroups])
-
-  const statement = useLiveQuery(async () => {
-    if (!userId || !personId) return undefined
-    return buildPersonMoneyFlow(userId, personId)
-  }, [userId, personId])
+    return sharedGroups[0]?.currency ?? 'PHP'
+  }, [personalBills, statementQuery.data, settlements, sharedGroups])
 
   const meName = meProfile?.display_name?.trim() || 'You'
 
@@ -794,6 +843,25 @@ export function PersonDetailPage() {
             </Button>
           ) : null}
         </div>
+        {personSummary.error && !personSummary.data && (
+          // A missing hero must not read as "settled". Say the number is unavailable and offer a
+          // retry rather than leaving the space blank, which looks like a zero balance.
+          <div
+            role="alert"
+            className="mt-3 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2.5 text-sm text-amber-950"
+          >
+            <p className="font-medium">Balance unavailable</p>
+            <p className="mt-0.5 text-xs text-amber-900/80">{personSummary.error}</p>
+            <Button
+              size="xs"
+              variant="ghost"
+              className="mt-2 rounded-full text-amber-900"
+              onClick={personSummary.refresh}
+            >
+              Try again
+            </Button>
+          </div>
+        )}
         {summary && (
           <p
             className={cn(
@@ -831,6 +899,9 @@ export function PersonDetailPage() {
           Totals include bills where one of you paid or the other paid (not when a third person paid for
           both). All recorded payments with this person are included.
         </p>
+        {personSummary.fromCache && personSummary.data && (
+          <SavedCopyNotice fetchedAt={personSummary.fetchedAt} className="mt-1" />
+        )}
 
         {isMyLocal && (
           <div className="mt-5 rounded-2xl border border-stone-200 bg-stone-50/80 p-4">
@@ -905,6 +976,25 @@ export function PersonDetailPage() {
         <p className="mt-1 text-xs text-stone-500">
           Every bill and payment between you, in order, with a running balance.
         </p>
+        {statementQuery.error && !statementQuery.data && (
+          // An empty statement reads as "nothing has happened between you"; a failed request is
+          // not that, and the running balance below the hero would be missing without saying why.
+          <div
+            role="alert"
+            className="mt-3 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2.5 text-sm text-amber-950"
+          >
+            <p className="font-medium">Statement unavailable</p>
+            <p className="mt-0.5 text-xs text-amber-900/80">{statementQuery.error}</p>
+            <Button
+              size="xs"
+              variant="ghost"
+              className="mt-2 rounded-full text-amber-900"
+              onClick={statementQuery.refresh}
+            >
+              Try again
+            </Button>
+          </div>
+        )}
         <PersonStatement
           result={statement}
           editableSettlementIds={editableSettlementIds}
@@ -1024,15 +1114,26 @@ export function PersonDetailPage() {
       {exportOpen && userId && personId && (
         <ExportImageDialog
           filename={makeExportFilename('Person', 'png').replace('.png', '')}
-          onExportPDF={() => generatePersonPDF(personId, userId)}
-          onExportCSV={() => exportPersonToCSV(personId, userId)}
+          // Gated on the statement having actually loaded. `?? []` produced a file with an empty
+          // Bills and Payments section whenever the fetch had failed — which reads as "you have
+          // never shared an expense with this person" and understates the tab to zero.
+          onExportPDF={
+            statementQuery.data
+              ? () => generatePersonPDF(personId, statementQuery.data!, settlements ?? [])
+              : undefined
+          }
+          onExportCSV={
+            statementQuery.data
+              ? () => exportPersonToCSV(personId, userId, statementQuery.data!, settlements ?? [])
+              : undefined
+          }
           onClose={() => setExportOpen(false)}
         >
           <PersonExportCard
             displayName={resolvedDisplayName}
             netByCurrency={netByCurrency ?? new Map()}
             unsettledPersonalBills={exportBillDetails ?? []}
-            sharedGroups={(sharedGroups ?? []).map((g) => ({
+            sharedGroups={sharedGroups.map((g) => ({
               groupName: g.groupName,
               currency: g.currency,
               theirNet: g.theirNet,

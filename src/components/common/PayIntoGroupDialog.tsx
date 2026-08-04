@@ -20,8 +20,8 @@ import {
   type OwedParty,
 } from '@/lib/group-payments'
 import { createBundledGroupSettlement } from '@/db/operations'
-import { computeMemberPaymentBreakdown } from '@/lib/settlement'
-import { formatCurrency } from '@/lib/utils'
+import { loadGroupMemberBreakdownFresh } from '@/api/balances'
+import { describeError, formatCurrency } from '@/lib/utils'
 
 export interface PayIntoGroupMember {
   userId: string
@@ -87,12 +87,26 @@ export function PayIntoGroupDialog({
     setLockedPct(new Set())
     setCustomAmounts({})
     void (async () => {
-      const breakdown = await computeMemberPaymentBreakdown(groupId, payerId)
-      if (token !== recomputeToken.current) return
-      setOwed(owedPartiesFromBreakdown(breakdown))
-      setLoadingOwed(false)
+      try {
+        // Uncached on purpose, and the same loader the write guard uses. These amounts are not
+        // a display: they seed the payment inputs and the per-recipient overpayment clamps, so a
+        // cached copy would let the user pay against a balance that has already been settled —
+        // and `createBundledGroupSettlement` skips its cap when it cannot reach the server, so
+        // nothing downstream would catch it.
+        const data = await loadGroupMemberBreakdownFresh(groupId, payerId)
+        if (token !== recomputeToken.current) return
+        setOwed(owedPartiesFromBreakdown(data))
+      } catch (err) {
+        if (token !== recomputeToken.current) return
+        // An empty owed list disables the whole form, so the user must be told why rather than
+        // being shown a dialog that silently claims they owe no one.
+        setOwed([])
+        toast.error(describeError(err, 'Could not load who you owe in this group.'))
+      } finally {
+        if (token === recomputeToken.current) setLoadingOwed(false)
+      }
     })()
-  }, [open, payerId, groupId])
+  }, [open, payerId, groupId, currentUserId])
 
   const owedIds = useMemo(() => owed.map((p) => p.userId), [owed])
 

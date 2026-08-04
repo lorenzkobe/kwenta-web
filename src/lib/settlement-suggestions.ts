@@ -240,3 +240,38 @@ export function groupTransfersByPayer(transfers: SuggestedTransfer[]): RawPayerG
   }
   return [...byPayer.values()]
 }
+
+/**
+ * The whole suggestion pipeline: a directed debt graph in, named payer groups out.
+ *
+ * Kept here rather than inline in the page because it is the composition that matters — the
+ * middleman-cutting behaviour only appears once build → decompose → group run together, and a
+ * page component is not somewhere that can be tested.
+ *
+ * `nameOf` is injected because names live behind the pull-bundle privacy boundary: on the server
+ * they come from the group roster, and only the caller knows which resolver applies.
+ */
+export function buildSuggestedPayers(
+  rawDebts: { from: string; to: string; amount: number }[],
+  nameOf: (userId: string) => string,
+): {
+  fromUserId: string
+  fromName: string
+  total: number
+  recipients: { toUserId: string; toName: string; amount: number }[]
+  legs: SettlementLeg[]
+}[] {
+  return groupTransfersByPayer(decomposeDebtGraph(buildDebtGraph(rawDebts)))
+    .map((g) => ({
+      fromUserId: g.fromUserId,
+      fromName: nameOf(g.fromUserId),
+      total: g.total,
+      recipients: g.recipients.map((r) => ({
+        toUserId: r.toUserId,
+        toName: nameOf(r.toUserId),
+        amount: r.amount,
+      })),
+      legs: g.legs,
+    }))
+    .sort((a, b) => a.fromName.localeCompare(b.fromName))
+}

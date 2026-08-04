@@ -1,6 +1,7 @@
 import { supabase } from '@/lib/supabase'
 import { withMetric } from '@/lib/client-metrics'
 import { generateId } from '@/lib/utils'
+import { useAppStore } from '@/store/app-store'
 import {
   PULL_SINCE_EPOCH,
   TABLE_NAMES,
@@ -302,6 +303,9 @@ export async function commitCloudFirstWrite(input: {
   if (!isOnline) {
     await input.stageOffline()
     await input.queueOffline()
+    // A queued write changes what the user should see (pending count, staged rows), and
+    // server-backed screens have no Dexie subscription to notice it.
+    useAppStore.getState().bumpDataVersion()
     return { mode: 'queued' }
   }
 
@@ -310,5 +314,8 @@ export async function commitCloudFirstWrite(input: {
     payload: input.payload,
     submissionId: input.submissionId ?? generateId(),
   })
+  // Balances are computed on the server now, so a saved bill only reaches the screen when the
+  // server-backed reads run again. Without this the user saves and nothing visibly changes.
+  useAppStore.getState().bumpDataVersion()
   return { mode: 'cloud' }
 }

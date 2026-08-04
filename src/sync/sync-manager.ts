@@ -152,6 +152,7 @@ async function runSync(reason: SyncRunReason): Promise<boolean> {
         resetBackoff()
         useAppStore.getState().setSyncStatus('idle')
         useAppStore.getState().setPullStale(false)
+        useAppStore.getState().bumpDataVersion()
         await flushQueuedKwentaNotifications({ assumeCloudAck: true })
         void maybeAutoRepairData(userId)
         return true
@@ -173,6 +174,9 @@ async function runSync(reason: SyncRunReason): Promise<boolean> {
       resetBackoff()
       useAppStore.getState().setSyncStatus('idle')
       useAppStore.getState().setPullStale(false)
+      // Server-backed screens read through RPCs, not Dexie, so `useLiveQuery` sees nothing when
+      // a sync brings in remote changes. This is the signal that makes them re-fetch.
+      useAppStore.getState().bumpDataVersion()
       await flushQueuedKwentaNotifications({ assumeCloudAck: true })
       await hydrateLinkedRemoteProfilesForActor(userId)
       void maybeAutoRepairData(userId)

@@ -1,11 +1,11 @@
+import { useCallback } from 'react'
 import { ChevronRight, Loader2, Plus, ReceiptText, Sparkles } from 'lucide-react'
 import { Link } from 'react-router-dom'
-import { useLiveQuery } from 'dexie-react-hooks'
-import { db } from '@/db/db'
+import { fetchBalancesOverview, fetchRecentBills, totalsToMap } from '@/api/balances'
+import { useServerData } from '@/hooks/useServerData'
 import { useCurrentUser } from '@/hooks/useCurrentUser'
-import { useOverallBalanceRollups } from '@/hooks/useOverallBalanceRollups'
-import { mapById, uniqueStrings } from '@/lib/db-query-helpers'
 import { formatCurrency, timeAgo } from '@/lib/utils'
+import { SavedCopyNotice } from '@/components/common/SavedCopyNotice'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 
@@ -83,39 +83,37 @@ function BreakdownLines({
   )
 }
 
+const EMPTY = new Map<string, number>()
+
 export function HomePage() {
   const { userId, profile } = useCurrentUser()
-  const {
-    loading: balancesLoading,
-    groupReceive,
-    groupPay,
-    personalReceive,
-    personalPay,
-    overallReceive,
-    overallPay,
-  } = useOverallBalanceRollups(userId ?? undefined)
 
-  const recentBills = useLiveQuery(async () => {
-    if (!userId) return []
-    const bills = await db.bills.where('paid_by').equals(userId).toArray()
-    const active = bills.filter((b) => !b.is_deleted)
-    active.sort((a, b) => b.created_at.localeCompare(a.created_at))
-    const slice = active.slice(0, 5)
-    const groupIds = uniqueStrings(slice.map((bill) => bill.group_id))
-    const groups = groupIds.length > 0 ? await db.groups.where('id').anyOf(groupIds).toArray() : []
-    const groupById = mapById(groups.filter((group) => !group.is_deleted))
+  // The server returns each bucket already computed. This used to load every bill, item, split
+  // and settlement the device held and recompute a pairwise net per contact over that snapshot.
+  const loadOverview = useCallback(
+    () => (userId ? fetchBalancesOverview(userId) : Promise.reject(new Error('no user'))),
+    [userId],
+  )
+  const overview = useServerData(userId ? loadOverview : null, [userId, loadOverview])
 
-    return slice.map((b) => ({
-      id: b.id,
-      title: b.title,
-      amount: b.total_amount,
-      currency: b.currency,
-      createdAt: b.created_at,
-      groupName: b.group_id ? groupById.get(b.group_id)?.name : undefined,
-    }))
-  }, [userId])
+  const loadRecentBills = useCallback(
+    () => (userId ? fetchRecentBills(userId, 5) : Promise.reject(new Error('no user'))),
+    [userId],
+  )
+  const recent = useServerData(userId ? loadRecentBills : null, [userId, loadRecentBills])
 
-  const recentBillsLoading = recentBills === undefined
+  // No user yet counts as loading: the zero state is a claim about money, and flashing it before
+  // the session resolves tells the user they are settled up when nothing has been asked yet.
+  const balancesLoading = !userId || (overview.loading && !overview.data)
+  const personalReceive = overview.data ? totalsToMap(overview.data.personalReceive) : EMPTY
+  const personalPay = overview.data ? totalsToMap(overview.data.personalPay) : EMPTY
+  const groupReceive = overview.data ? totalsToMap(overview.data.groupReceive) : EMPTY
+  const groupPay = overview.data ? totalsToMap(overview.data.groupPay) : EMPTY
+  const overallReceive = overview.data ? totalsToMap(overview.data.combinedReceive) : EMPTY
+  const overallPay = overview.data ? totalsToMap(overview.data.combinedPay) : EMPTY
+
+  const recentBills = recent.data
+  const recentBillsLoading = recent.loading && !recent.data
 
   function greeting() {
     const hour = new Date().getHours()
@@ -153,6 +151,24 @@ export function HomePage() {
           <div className="mt-6 flex justify-center py-8">
             <Loader2 className="size-6 animate-spin text-white/60" aria-label="Loading balances" />
           </div>
+        ) : overview.error && !overview.data ? (
+          // Never fall through to the zero state here: "you are all settled up" and "we could not
+          // reach the server" look identical once rendered, and only one of them is safe to act on.
+          <div
+            role="alert"
+            className="mt-6 rounded-2xl border border-amber-400/25 bg-amber-400/10 p-4 text-sm text-amber-100"
+          >
+            <p className="font-medium">Balances unavailable</p>
+            <p className="mt-1 text-amber-100/70">{overview.error}</p>
+            <Button
+              size="sm"
+              variant="ghost"
+              className="mt-3 rounded-full bg-white/10 text-white hover:bg-white/20"
+              onClick={overview.refresh}
+            >
+              Try again
+            </Button>
+          </div>
         ) : (
           <div className="mt-6 grid gap-3 sm:grid-cols-2">
             <div className="rounded-2xl border border-emerald-400/20 bg-emerald-400/10 p-4">
@@ -172,6 +188,10 @@ export function HomePage() {
               </div>
             </div>
           </div>
+        )}
+
+        {overview.fromCache && overview.data && (
+          <SavedCopyNotice fetchedAt={overview.fetchedAt} tone="dark" className="mt-3" />
         )}
       </section>
 
@@ -218,6 +238,13 @@ export function HomePage() {
                 <div className="mt-2 h-3 w-1/4 animate-pulse rounded bg-stone-200" />
               </div>
             ))}
+          </div>
+        ) : recent.error && !recent.data ? (
+          <div role="alert" className="mt-4 rounded-xl border border-stone-200 bg-stone-50 px-4 py-3">
+            <p className="text-sm text-stone-600">{recent.error}</p>
+            <Button size="xs" variant="ghost" className="mt-2 rounded-full text-teal-800" onClick={recent.refresh}>
+              Try again
+            </Button>
           </div>
         ) : (!recentBills || recentBills.length === 0) ? (
           <div className="mt-4 flex flex-col items-center py-8 text-center">

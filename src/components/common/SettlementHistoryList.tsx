@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { Banknote, ChevronRight, Pencil } from 'lucide-react'
-import { buildMovementChains, type SettlementHistoryItem } from '@/lib/settlement'
+import { buildMovementChains } from '@/lib/settlement'
+import type { SettlementHistoryItem } from '@/api/balances'
 import { cn, formatCurrency } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 

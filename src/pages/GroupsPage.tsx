@@ -1,13 +1,13 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { toast } from 'sonner'
 import { ChevronRight, Layers3, Plus, Users, X } from 'lucide-react'
 import { useCurrentUser } from '@/hooks/useCurrentUser'
 import { addExistingGroupMember, createGroup } from '@/db/operations'
-import { useLiveQuery } from 'dexie-react-hooks'
-import { db } from '@/db/db'
-import { computeAllGroupPairwiseBalances, type GroupPairwiseSummary } from '@/lib/settlement'
-import { listCanonicalRelatedProfileIds, resolveProfileDisplay } from '@/lib/people'
+import { fetchGroupsWithBalances, type GroupBalanceRow } from '@/api/balances'
+import { useServerData } from '@/hooks/useServerData'
+import { SavedCopyNotice } from '@/components/common/SavedCopyNotice'
+import { loadPhonebookRows } from '@/lib/people'
 import { formatCurrency, cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -17,8 +17,8 @@ import { MemberMultiPicker } from '@/components/common/MemberMultiPicker'
 type GroupFilter = 'all' | 'has_balance' | 'balanced'
 type GroupSort = 'name_asc' | 'name_desc' | 'updated_desc' | 'updated_asc'
 
-function myBalanceLine(summary: GroupPairwiseSummary) {
-  const { totalToReceive, totalToPay, currency } = summary
+function myBalanceLine(group: GroupBalanceRow) {
+  const { totalToReceive, totalToPay, currency } = group
   const hasReceive = totalToReceive >= 0.01
   const hasPay = totalToPay >= 0.01
   if (!hasReceive && !hasPay) {
@@ -59,13 +59,7 @@ export function GroupsPage() {
     if (!userId || !showCreate) return
     let cancelled = false
     async function run() {
-      const ids = await listCanonicalRelatedProfileIds(userId!)
-      const rows: { id: string; displayName: string; subtitle?: string }[] = []
-      for (const id of ids) {
-        const disp = await resolveProfileDisplay(id, userId!)
-        rows.push({ id, displayName: disp.displayName, subtitle: disp.subtitle })
-      }
-      rows.sort((a, b) => a.displayName.localeCompare(b.displayName))
+      const rows = await loadPhonebookRows(userId!)
       if (!cancelled) setPhonebook(rows)
     }
     void run()
@@ -74,48 +68,23 @@ export function GroupsPage() {
     }
   }, [userId, showCreate])
 
-  const groupsWithBalances = useLiveQuery(async () => {
-    if (!userId) return []
-    const summaries = await computeAllGroupPairwiseBalances(userId)
-    const rows: Array<{
-      id: string
-      name: string
-      currency: string
-      memberCount: number
-      updated_at: string
-      summary: GroupPairwiseSummary
-    }> = []
-    for (const s of summaries) {
-      const g = await db.groups.get(s.groupId)
-      if (!g || g.is_deleted) continue
-      const members = await db.group_members.where('group_id').equals(g.id).toArray()
-      const memberCount = members.filter((m) => !m.is_deleted).length
-      rows.push({
-        id: g.id,
-        name: g.name,
-        currency: g.currency,
-        memberCount,
-        updated_at: g.updated_at,
-        summary: s,
-      })
-    }
-    return rows
-  }, [userId])
+  // One call returns every group with the viewer's own standing already summed. This used to
+  // recompute each group's whole pairwise ledger locally, then re-query its roster per group.
+  const loadGroups = useCallback(
+    () => (userId ? fetchGroupsWithBalances(userId) : Promise.reject(new Error('no user'))),
+    [userId],
+  )
+  const groupsQuery = useServerData(userId ? loadGroups : null, [userId, loadGroups])
+  const groupsWithBalances = groupsQuery.data
 
   const groups = useMemo(() => {
     const list = groupsWithBalances ?? []
     let out = list
     if (filter === 'has_balance') {
-      out = out.filter(({ summary }) => {
-        const { totalToReceive, totalToPay } = summary
-        return totalToReceive >= 0.01 || totalToPay >= 0.01
-      })
+      out = out.filter((g) => g.totalToReceive >= 0.01 || g.totalToPay >= 0.01)
     }
     if (filter === 'balanced') {
-      out = out.filter(({ summary }) => {
-        const { totalToReceive, totalToPay } = summary
-        return totalToReceive < 0.01 && totalToPay < 0.01
-      })
+      out = out.filter((g) => g.totalToReceive < 0.01 && g.totalToPay < 0.01)
     }
     const copy = [...out]
     copy.sort((a, b) => {
@@ -125,16 +94,16 @@ export function GroupsPage() {
         case 'name_desc':
           return b.name.localeCompare(a.name, undefined, { sensitivity: 'base' })
         case 'updated_desc':
-          return b.updated_at.localeCompare(a.updated_at)
+          return b.updatedAt.localeCompare(a.updatedAt)
         case 'updated_asc':
-          return a.updated_at.localeCompare(b.updated_at)
+          return a.updatedAt.localeCompare(b.updatedAt)
         default:
           return 0
       }
     })
     return copy
   }, [groupsWithBalances, filter, sort])
-  const groupsLoading = groupsWithBalances === undefined
+  const groupsLoading = !userId || (groupsQuery.loading && !groupsQuery.data)
 
   async function handleCreate() {
     if (!userId || !name.trim() || creating) return
@@ -276,6 +245,10 @@ export function GroupsPage() {
         </div>
       )}
 
+      {groupsQuery.fromCache && groupsQuery.data && (
+        <SavedCopyNotice fetchedAt={groupsQuery.fetchedAt} />
+      )}
+
       {groupsLoading ? (
         <div className="space-y-3">
           {Array.from({ length: 3 }).map((_, i) => (
@@ -288,6 +261,18 @@ export function GroupsPage() {
               <div className="mt-2 h-3 w-36 animate-pulse rounded bg-stone-100" />
             </div>
           ))}
+        </div>
+      ) : groupsQuery.error && !groupsQuery.data ? (
+        // "No groups yet" and "we could not reach the server" must not render the same.
+        <div
+          role="alert"
+          className="rounded-3xl border border-amber-200 bg-amber-50 p-5 text-sm text-amber-950 shadow-sm"
+        >
+          <p className="font-medium">Groups unavailable</p>
+          <p className="mt-1 text-xs text-amber-900/80">{groupsQuery.error}</p>
+          <Button size="sm" variant="ghost" className="mt-3 rounded-full text-amber-900" onClick={groupsQuery.refresh}>
+            Try again
+          </Button>
         </div>
       ) : (!groupsWithBalances || groupsWithBalances.length === 0) ? (
         <div className="rounded-3xl border border-stone-200 bg-white p-5 shadow-sm">
@@ -308,11 +293,11 @@ export function GroupsPage() {
       ) : (
         <div className="space-y-3">
           {groups.map((group) => {
-            const { text, className } = myBalanceLine(group.summary)
+            const { text, className } = myBalanceLine(group)
             return (
             <Link
-              key={group.id}
-              to={`/app/groups/${group.id}`}
+              key={group.groupId}
+              to={`/app/groups/${group.groupId}`}
               className="flex items-center justify-between rounded-2xl border border-stone-200 bg-white p-4 shadow-sm transition-colors hover:bg-stone-50"
             >
               <div className="flex min-w-0 flex-1 items-center gap-3">

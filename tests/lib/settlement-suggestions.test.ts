@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   buildDebtGraph,
+  buildSuggestedPayers,
   decomposeDebtGraph,
   groupTransfersByPayer,
   type SuggestedTransfer,
@@ -169,5 +170,58 @@ describe('groupTransfersByPayer', () => {
       { fromUserId: 'Ana', toUserId: 'Carlo', amount: 200 },
       { fromUserId: 'Carlo', toUserId: 'John', amount: 100 },
     ])
+  })
+})
+
+describe('buildSuggestedPayers', () => {
+  // Ported from the computeGroupSuggestions coverage when that function was deleted (its data
+  // gathering moved to migration 061). The middleman-cutting behaviour only exists once build →
+  // decompose → group run together, so it has to be tested on the composition, not the parts.
+  it('cuts the middleman and backs each transfer with real pairwise legs', () => {
+    // Ana owes Carlo 200 (Carlo paid), Carlo owes John 100 (John paid).
+    const payers = buildSuggestedPayers(
+      [
+        { from: 'Ana', to: 'Carlo', amount: 200 },
+        { from: 'Carlo', to: 'John', amount: 100 },
+      ],
+      (id) => id,
+    )
+
+    expect(payers).toHaveLength(1)
+    const ana = payers[0]
+    expect(ana.fromUserId).toBe('Ana')
+    expect(ana.total).toBe(200)
+    // Ana pays John directly for the 100 that would otherwise route through Carlo.
+    expect(ana.recipients.map((r) => `${r.toName}:${r.amount}`).sort()).toEqual([
+      'Carlo:100',
+      'John:100',
+    ])
+    // The legs still trace the real debts, so the recorded settlements stay truthful.
+    expect(ana.legs).toEqual([
+      { fromUserId: 'Ana', toUserId: 'Carlo', amount: 200 },
+      { fromUserId: 'Carlo', toUserId: 'John', amount: 100 },
+    ])
+  })
+
+  it('returns no payers when nothing is owed', () => {
+    expect(buildSuggestedPayers([], (id) => id)).toEqual([])
+  })
+
+  it('resolves names through the injected resolver, and sorts by it', () => {
+    const names: Record<string, string> = { u1: 'Zoe', u2: 'Adam', u3: 'Mia' }
+    const payers = buildSuggestedPayers(
+      [
+        { from: 'u1', to: 'u3', amount: 10 },
+        { from: 'u2', to: 'u3', amount: 10 },
+      ],
+      (id) => names[id] ?? 'Unknown',
+    )
+    expect(payers.map((p) => p.fromName)).toEqual(['Adam', 'Zoe'])
+    expect(payers[0].recipients[0].toName).toBe('Mia')
+  })
+
+  it('falls back to Unknown rather than rendering a raw uuid', () => {
+    const payers = buildSuggestedPayers([{ from: 'ghost', to: 'u1', amount: 5 }], () => 'Unknown')
+    expect(payers[0].fromName).toBe('Unknown')
   })
 })

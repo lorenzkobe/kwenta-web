@@ -1,14 +1,22 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 import { db } from '@/db/db'
 import {
-  computePairwiseNetAllContexts,
-  computePairwiseNetBreakdown,
-  computePairwiseNetForBill,
-  computePairwiseNetPersonalOnly,
   expandProfileIdsForSplitMatching,
+  listCanonicalRelatedProfileIds,
   participantUnionForBill,
 } from '@/lib/people'
-import { makeBill, makeGroup, makeItem, makeMember, makeProfile, makeSettlement, makeSplit, resetDb, seedSimpleBill } from '../helpers/db'
+
+/**
+ * What is left here is identity and contact discovery — the part of this module that stays local
+ * because a local contact exists only on the device that created it.
+ *
+ * The pairwise balances this file used to cover moved into SQL with the code (CLAUDE.md rule 10):
+ * personal nets and identity expansion to `052_money_identity_and_personal_net.test.sql`, the
+ * per-context breakdown to `053_money_group_net_and_breakdown.test.sql`, the per-bill net to
+ * `060_bill_detail.test.sql`. The peer-link merge cases live in `055` and `052`; the canonical-peer
+ * rule below is deliberately kept in BOTH places, because the two implementations have to agree.
+ */
+import { makeGroup, makeMember, makeProfile, resetDb, seedSimpleBill } from '../helpers/db'
 
 const ISO = '2026-06-18T00:00:00.000Z'
 function syncFieldsForTest(id: string) {
@@ -92,224 +100,73 @@ describe('participantUnionForBill', () => {
   })
 })
 
-describe('computePairwiseNetForBill', () => {
-  it('is positive when the other person owes me (I paid)', async () => {
-    const billId = await seedSimpleBill({
-      groupId: null,
-      paidBy: 'me',
-      shares: { me: 50, other: 50 },
-    })
-    expect(await computePairwiseNetForBill(billId, 'me', 'other')).toBe(50)
-  })
 
-  it('is negative when I owe the other person (they paid)', async () => {
-    const billId = await seedSimpleBill({
-      groupId: null,
-      paidBy: 'other',
-      shares: { me: 30, other: 70 },
-    })
-    expect(await computePairwiseNetForBill(billId, 'me', 'other')).toBe(-30)
-  })
-
-  it('is reduced by a bill-attributed settlement', async () => {
-    const billId = await seedSimpleBill({
-      groupId: null,
-      paidBy: 'me',
-      shares: { me: 50, other: 50 },
-    })
-    await db.settlements.add(
-      makeSettlement({
-        bill_id: billId,
-        from_user_id: 'other',
-        to_user_id: 'me',
-        amount: 50,
-      }),
-    )
-    expect(await computePairwiseNetForBill(billId, 'me', 'other')).toBe(0)
-  })
-
-  it('ignores settlements attributed to a different bill', async () => {
-    const billId = await seedSimpleBill({
-      groupId: null,
-      paidBy: 'me',
-      shares: { me: 50, other: 50 },
-    })
-    await db.settlements.add(
-      makeSettlement({
-        bill_id: 'other-bill',
-        from_user_id: 'other',
-        to_user_id: 'me',
-        amount: 50,
-      }),
-    )
-    expect(await computePairwiseNetForBill(billId, 'me', 'other')).toBe(50)
-  })
-
-  it('returns 0 for a deleted bill', async () => {
-    const billId = await seedSimpleBill({
-      groupId: null,
-      paidBy: 'me',
-      shares: { me: 50, other: 50 },
-      isDeleted: true,
-    })
-    expect(await computePairwiseNetForBill(billId, 'me', 'other')).toBe(0)
-  })
-})
-
-describe('peer-links fold into viewer-scoped pairwise balances', () => {
+describe('listCanonicalRelatedProfileIds — one row per real person', () => {
   beforeEach(async () => {
     await resetDb()
   })
 
-  it('nets a peer-linked id into the pairwise total so balance matches the deduped display', async () => {
-    // ME paid a 100 personal bill; SAM_A owes 100 on it. A second id SAM_B exists.
+  it('collapses a manual merge of two owned contacts into a single peer', async () => {
     await db.profiles.bulkAdd([
       makeProfile({ id: 'ME' }),
-      makeProfile({ id: 'SAM_A', is_local: true, owner_id: 'ME' }),
-      makeProfile({ id: 'SAM_B', is_local: true, owner_id: 'ME' }),
+      makeProfile({ id: 'A1', is_local: true, owner_id: 'ME' }),
+      makeProfile({ id: 'A2', is_local: true, owner_id: 'ME' }),
     ])
-    const bill = makeBill({ id: 'B', group_id: null, created_by: 'ME', paid_by: 'ME', total_amount: 100, currency: 'PHP' })
-    await db.bills.add(bill)
-    await db.bill_items.add(makeItem({ id: 'I', bill_id: 'B', amount: 100 }))
-    await db.item_splits.add(makeSplit({ id: 'S', item_id: 'I', user_id: 'SAM_A', computed_amount: 100 }))
+    expect((await listCanonicalRelatedProfileIds('ME')).sort()).toEqual(['A1', 'A2'])
 
-    const before = await computePairwiseNetAllContexts('ME', 'SAM_A')
-    expect(before.get('PHP')).toBe(100)
-
-    // Viewer manually marks SAM_A and SAM_B as the same person.
     await db.profile_peer_links.add({
       ...syncFieldsForTest('PL'),
       owner_user_id: 'ME',
-      anchor_profile_id: 'SAM_A',
-      peer_profile_id: 'SAM_B',
+      anchor_profile_id: 'A1',
+      peer_profile_id: 'A2',
     })
 
-    // SAM_B owes 50 on a DIFFERENT bill ME paid. Since the viewer linked the two ids, the
-    // Person detail page dedups them into one row, so the pairwise net must also fold SAM_B's
-    // debt in (-> 150). Leaving balances peer-blind made the displayed amount disagree with the math.
-    const bill2 = makeBill({ id: 'B2', group_id: null, created_by: 'ME', paid_by: 'ME', total_amount: 50, currency: 'PHP' })
-    await db.bills.add(bill2)
-    await db.bill_items.add(makeItem({ id: 'I2', bill_id: 'B2', amount: 50 }))
-    await db.item_splits.add(makeSplit({ id: 'S2', item_id: 'I2', user_id: 'SAM_B', computed_amount: 50 }))
-
-    const after = await computePairwiseNetAllContexts('ME', 'SAM_A')
-    expect(after.get('PHP')).toBe(150) // SAM_B's debt folds in via the viewer's peer-link
-  })
-})
-
-describe('computePairwiseNetPersonalOnly — payments are plain signed (overpayment flips)', () => {
-  beforeEach(async () => {
-    await db.profiles.bulkAdd([makeProfile({ id: 'me' }), makeProfile({ id: 'other' })])
+    // One person, one row. Previously both survived, and because balance math already honoured
+    // the merge, each reported the same amount and the Home rollup added it twice.
+    expect(await listCanonicalRelatedProfileIds('ME')).toEqual(['A1'])
   })
 
-  it('a standalone payment they made with no bill debt flips the tab to my debt', async () => {
-    // They handed me PHP 100 with no underlying bill: I now owe them 100 (real-life tab).
-    await db.settlements.add(
-      makeSettlement({ from_user_id: 'other', to_user_id: 'me', amount: 100, group_id: null, bill_id: null }),
-    )
-    const net = await computePairwiseNetPersonalOnly('me', 'other')
-    expect(net.get('PHP') ?? 0).toBe(-100)
-  })
+  // The other half of the 055 fix — that the Home rollup stops double-counting a merged pair —
+  // is asserted server-side now, in `054_money_contacts_and_rollups.test.sql`. The peer collapse
+  // above is the client's share of it, and the two must agree.
 
-  it('a standalone payment I made with no bill debt flips the tab to their debt', async () => {
-    await db.settlements.add(
-      makeSettlement({ from_user_id: 'me', to_user_id: 'other', amount: 100, group_id: null, bill_id: null }),
-    )
-    const net = await computePairwiseNetPersonalOnly('me', 'other')
-    expect(net.get('PHP') ?? 0).toBe(100)
-  })
-
-  it('a payment settles a same-direction debt down to zero', async () => {
-    await seedSimpleBill({ groupId: null, paidBy: 'other', shares: { other: 0, me: 50 } }) // I owe 50
-    await db.settlements.add(
-      makeSettlement({ from_user_id: 'me', to_user_id: 'other', amount: 50, group_id: null, bill_id: null }),
-    )
-    const net = await computePairwiseNetPersonalOnly('me', 'other')
-    expect(net.get('PHP') ?? 0).toBe(0)
-  })
-
-  it('an overpaying payment flips the tab into their debt', async () => {
-    await seedSimpleBill({ groupId: null, paidBy: 'other', shares: { other: 0, me: 50 } }) // I owe 50
-    await db.settlements.add(
-      makeSettlement({ from_user_id: 'me', to_user_id: 'other', amount: 80, group_id: null, bill_id: null }),
-    )
-    const net = await computePairwiseNetPersonalOnly('me', 'other')
-    // I paid 80 against a 50 debt: clears 50 and flips the extra 30 → they now owe me 30.
-    expect(net.get('PHP') ?? 0).toBe(30)
-  })
-
-  it('a real bill debt still shows when there is no offsetting payment', async () => {
-    await seedSimpleBill({ groupId: null, paidBy: 'me', shares: { me: 0, other: 40 } }) // they owe me 40
-    const net = await computePairwiseNetPersonalOnly('me', 'other')
-    expect(net.get('PHP') ?? 0).toBe(40)
-  })
-})
-
-describe('computePairwiseNetAllContexts — folds in every shared group, including 3+ member groups', () => {
-  beforeEach(async () => {
+  it('collapses a transitive merge chain, which one-hop resolution cannot', async () => {
     await db.profiles.bulkAdd([
-      makeProfile({ id: 'me' }),
-      makeProfile({ id: 'other' }),
-      makeProfile({ id: 'third' }),
+      makeProfile({ id: 'ME' }),
+      makeProfile({ id: 'A1', is_local: true, owner_id: 'ME' }),
+      makeProfile({ id: 'A2', is_local: true, owner_id: 'ME' }),
+      makeProfile({ id: 'A3', is_local: true, owner_id: 'ME' }),
     ])
+    await db.profile_peer_links.bulkAdd([
+      { ...syncFieldsForTest('PL1'), owner_user_id: 'ME', anchor_profile_id: 'A1', peer_profile_id: 'A2' },
+      { ...syncFieldsForTest('PL2'), owner_user_id: 'ME', anchor_profile_id: 'A2', peer_profile_id: 'A3' },
+    ])
+
+    expect(await listCanonicalRelatedProfileIds('ME')).toEqual(['A1'])
   })
 
-  it('includes what they owe me in a 3-member group (which the headline pairwise fn drops)', async () => {
-    const g = makeGroup({ id: 'G', created_by: 'me', currency: 'PHP' })
-    await db.groups.add(g)
-    await db.group_members.bulkAdd([
-      makeMember({ group_id: 'G', user_id: 'me' }),
-      makeMember({ group_id: 'G', user_id: 'other' }),
-      makeMember({ group_id: 'G', user_id: 'third' }),
-    ])
-    // I paid 90 split three ways; other and third each owe me 30.
-    await seedSimpleBill({ groupId: 'G', paidBy: 'me', shares: { me: 30, other: 30, third: 30 } })
-
-    // The all-contexts fn surfaces the real group debt (incl. 3+ member groups).
-    expect((await computePairwiseNetAllContexts('me', 'other')).get('PHP') ?? 0).toBe(30)
-  })
-
-  it('adds personal and group standing together for the same person', async () => {
-    await seedSimpleBill({ groupId: null, paidBy: 'me', shares: { me: 0, other: 20 } }) // personal: they owe me 20
-    const g = makeGroup({ id: 'G2', created_by: 'me', currency: 'PHP' })
-    await db.groups.add(g)
-    await db.group_members.bulkAdd([
-      makeMember({ group_id: 'G2', user_id: 'me' }),
-      makeMember({ group_id: 'G2', user_id: 'other' }),
-      makeMember({ group_id: 'G2', user_id: 'third' }),
-    ])
-    await seedSimpleBill({ groupId: 'G2', paidBy: 'me', shares: { me: 30, other: 30, third: 30 } }) // group: they owe me 30
-    expect((await computePairwiseNetAllContexts('me', 'other')).get('PHP') ?? 0).toBe(50)
-  })
-})
-
-describe('computePairwiseNetBreakdown — per-context decomposition sums to the total', () => {
-  beforeEach(async () => {
+  it('keeps a local contact and the account it links to as one peer', async () => {
     await db.profiles.bulkAdd([
-      makeProfile({ id: 'me' }),
-      makeProfile({ id: 'other' }),
-      makeProfile({ id: 'third' }),
+      makeProfile({ id: 'ME' }),
+      makeProfile({ id: 'BOB' }),
+      makeProfile({ id: 'C_BOB', is_local: true, owner_id: 'ME', linked_profile_id: 'BOB' }),
     ])
+    await db.groups.add(makeGroup({ id: 'G', created_by: 'ME' }))
+    await db.group_members.bulkAdd([
+      makeMember({ id: 'M1', group_id: 'G', user_id: 'ME' }),
+      makeMember({ id: 'M2', group_id: 'G', user_id: 'BOB' }),
+    ])
+
+    // The viewer's own contact wins, so they keep the name they filed him under.
+    expect(await listCanonicalRelatedProfileIds('ME')).toEqual(['C_BOB'])
   })
 
-  it('splits into personal + per-group rows whose signed sum equals total', async () => {
-    // Personal: they owe me 20.
-    await seedSimpleBill({ groupId: null, paidBy: 'me', shares: { me: 0, other: 20 } })
-    // Group A (2-member): I owe them 30.
-    const gA = makeGroup({ id: 'GA', created_by: 'me', currency: 'PHP' })
-    await db.groups.add(gA)
-    await db.group_members.bulkAdd([
-      makeMember({ group_id: 'GA', user_id: 'me' }),
-      makeMember({ group_id: 'GA', user_id: 'other' }),
+  it('keeps genuinely different people separate', async () => {
+    await db.profiles.bulkAdd([
+      makeProfile({ id: 'ME' }),
+      makeProfile({ id: 'A1', is_local: true, owner_id: 'ME' }),
+      makeProfile({ id: 'B1', is_local: true, owner_id: 'ME' }),
     ])
-    await seedSimpleBill({ groupId: 'GA', paidBy: 'other', shares: { me: 30, other: 0 } })
-
-    const { personal, groups, total } = await computePairwiseNetBreakdown('me', 'other')
-    expect(personal.get('PHP') ?? 0).toBe(20)
-    const ga = groups.find((g) => g.groupId === 'GA')
-    expect(ga?.net).toBe(-30)
-    // total = personal + Σ groups = 20 - 30 = -10, and equals computePairwiseNetAllContexts.
-    expect(total.get('PHP') ?? 0).toBe(-10)
-    expect((await computePairwiseNetAllContexts('me', 'other')).get('PHP') ?? 0).toBe(-10)
+    expect((await listCanonicalRelatedProfileIds('ME')).sort()).toEqual(['A1', 'B1'])
   })
 })

@@ -1,16 +1,15 @@
 import { db } from '@/db/db'
 import { CATEGORY_LABELS } from '@/lib/bill-categories'
 import type { BillCategory } from '@/lib/bill-categories'
-import { isPersonalBillFullySettled } from '@/lib/personal-bill-status'
-import { loadBalanceSnapshot } from '@/lib/people'
-import {
-  computePairwiseNetForBill,
-  listBillsInvolvingPair,
-  listPairwiseSettlementsBetween,
-} from '@/lib/people'
-import { computeGroupBalances, computeGroupPairwiseBalances } from '@/lib/settlement'
-import { getBillWithDetails } from '@/db/operations'
+import type {
+  BillDetail,
+  GroupDetail,
+  PersonalBillRow,
+  SettlementHistoryItem,
+  StatementEvent,
+} from '@/api/balances'
 import { makeExportFilename } from '@/lib/export-utils'
+import { loadSplitsByBill } from '@/lib/export-splits'
 
 // A4 Portrait: 210 × 297 mm
 const PW = 210
@@ -232,24 +231,14 @@ function catLabel(category: string | null | undefined): string {
 
 // ── Export functions ───────────────────────────────────────────────────────
 
-export async function generateBillsPDF(userId: string): Promise<void> {
+/** `rows` is the screen's own server-computed list — see the note on `exportBillsToCSV`. */
+export async function generateBillsPDF(userId: string, rows: PersonalBillRow[]): Promise<void> {
   const { jsPDF } = await import('jspdf')
   const doc = new jsPDF({ orientation: 'p', unit: 'mm', format: 'a4' })
 
   let y = drawPageHeader(doc, 'Personal Bills', 'Your bills and shared expenses')
 
-  const allBills = await db.bills.toArray()
-  const myBills = allBills.filter((b) => !b.is_deleted && b.group_id === null && b.created_by === userId)
-
-  const mySplits = (await db.item_splits.where('user_id').equals(userId).toArray()).filter((s) => !s.is_deleted)
-  const splitItemIds = new Set(mySplits.map((s) => s.item_id))
-  const splitItemsArr = splitItemIds.size > 0 ? await db.bill_items.where('id').anyOf([...splitItemIds]).toArray() : []
-  const splitBillIds = new Set(splitItemsArr.filter((i) => !i.is_deleted).map((i) => i.bill_id))
-  const splitBillsRaw = splitBillIds.size > 0 ? await db.bills.where('id').anyOf([...splitBillIds]).toArray() : []
-  const sharedBills = splitBillsRaw.filter((b) => !b.is_deleted && b.group_id === null && b.created_by !== userId)
-
-  const bills = [...myBills, ...sharedBills]
-  bills.sort((a, b) => a.created_at.localeCompare(b.created_at))
+  const bills = [...rows].sort((a, b) => a.createdAt.localeCompare(b.createdAt))
 
   // Cols: 22+68+28+32+32 = 182
   const cols: ColDef[] = [
@@ -260,41 +249,37 @@ export async function generateBillsPDF(userId: string): Promise<void> {
     { label: 'My Share', w: 32, align: 'right' },
   ]
 
-  const rows: (string | number | null | undefined)[][] = []
-  // One bulk load + one tab per counterparty for the whole export. Without these, each bill
-  // re-loaded the entire working set once per participant.
-  const snapshot = await loadBalanceSnapshot()
-  const settledTabCache = new Map<string, Map<string, number>>()
+  // Two queries for the whole export rather than two per bill; see `loadSplitsByBill`.
+  const splitsByBill = await loadSplitsByBill(bills.map((b) => b.id))
+
+  const tableRows: (string | number | null | undefined)[][] = []
   for (const bill of bills) {
-    const items = (await db.bill_items.where('bill_id').equals(bill.id).toArray()).filter((i) => !i.is_deleted)
-    let myShare = 0
-    for (const item of items) {
-      const splits = (await db.item_splits.where('item_id').equals(item.id).toArray()).filter((s) => !s.is_deleted)
-      for (const s of splits) if (s.user_id === userId) myShare += s.computed_amount
-    }
-    const settled = await isPersonalBillFullySettled(bill.id, userId, settledTabCache, snapshot)
-    rows.push([
-      shortDate(bill.created_at),
-      `${bill.title}${settled ? ' ✓' : ''}`,
+    // The viewer's own share is a sum of their own split rows — a record, not a balance.
+    const myShare = (splitsByBill.get(bill.id) ?? [])
+      .filter((s) => s.userId === userId)
+      .reduce((sum, s) => sum + s.amount, 0)
+    tableRows.push([
+      shortDate(bill.createdAt),
+      `${bill.title}${bill.settled ? ' ✓' : ''}`,
       catLabel(bill.category),
-      fmt(bill.total_amount, bill.currency),
+      fmt(bill.totalAmount, bill.currency),
       myShare > 0 ? fmt(myShare, bill.currency) : '—',
     ])
   }
 
   y = drawSectionTitle(doc, 'Bills', y)
-  drawTable(doc, cols, rows, y)
+  drawTable(doc, cols, tableRows, y)
   doc.save(makeExportFilename('Bills', 'pdf'))
 }
 
-export async function generateBillDetailPDF(billId: string): Promise<void> {
+/** `detail` is the screen's own payload — see the note on `exportBillsToCSV`. */
+export async function generateBillDetailPDF(detail: BillDetail): Promise<void> {
   const { jsPDF } = await import('jspdf')
   const doc = new jsPDF({ orientation: 'p', unit: 'mm', format: 'a4' })
 
-  const bill = await getBillWithDetails(billId)
-  if (!bill) return
+  const bill = { ...detail.bill, items: detail.items }
 
-  const dateStr = new Date(bill.created_at).toLocaleDateString('en-US', {
+  const dateStr = new Date(bill.createdAt).toLocaleDateString('en-US', {
     month: 'long', day: 'numeric', year: 'numeric',
   })
   const sub = `Paid by ${bill.payorName} · ${bill.currency} · ${dateStr}${bill.note ? ` · ${bill.note}` : ''}`
@@ -305,9 +290,9 @@ export async function generateBillDetailPDF(billId: string): Promise<void> {
   const participantNames: Record<string, string> = {}
   for (const item of bill.items) {
     for (const split of item.splits) {
-      if (!participantIds.includes(split.user_id)) {
-        participantIds.push(split.user_id)
-        participantNames[split.user_id] = split.displayName
+      if (!participantIds.includes(split.userId)) {
+        participantIds.push(split.userId)
+        participantNames[split.userId] = split.displayName
       }
     }
   }
@@ -336,8 +321,8 @@ export async function generateBillDetailPDF(billId: string): Promise<void> {
   for (const item of bill.items) {
     const splitMap: Record<string, number> = {}
     for (const split of item.splits) {
-      splitMap[split.user_id] = split.computed_amount
-      personTotals[split.user_id] = (personTotals[split.user_id] ?? 0) + split.computed_amount
+      splitMap[split.userId] = split.computedAmount
+      personTotals[split.userId] = (personTotals[split.userId] ?? 0) + split.computedAmount
     }
     const row: (string | number | null | undefined)[] = [item.name, fmt(item.amount, bill.currency)]
     if (showPerPerson) {
@@ -347,7 +332,7 @@ export async function generateBillDetailPDF(billId: string): Promise<void> {
   }
 
   // Totals row
-  const totalRow: (string | number | null | undefined)[] = ['Total', fmt(bill.total_amount, bill.currency)]
+  const totalRow: (string | number | null | undefined)[] = ['Total', fmt(bill.totalAmount, bill.currency)]
   if (showPerPerson) {
     for (const uid of participantIds) totalRow.push(personTotals[uid] ? fmt(personTotals[uid], bill.currency) : '—')
   }
@@ -358,33 +343,35 @@ export async function generateBillDetailPDF(billId: string): Promise<void> {
   doc.save(makeExportFilename('Bills', 'pdf'))
 }
 
-export async function generateGroupPDF(groupId: string, currentUserId: string): Promise<void> {
+/**
+ * `detail` and `payments` are the screen's own server payloads — see `exportGroupToCSV` for why
+ * the roster, bills and payment log must not come from the local mirror.
+ */
+export async function generateGroupPDF(
+  detail: GroupDetail,
+  payments: SettlementHistoryItem[],
+): Promise<void> {
   const { jsPDF } = await import('jspdf')
   const doc = new jsPDF({ orientation: 'p', unit: 'mm', format: 'a4' })
 
-  const group = await db.groups.get(groupId)
-  if (!group) return
-
-  const members = (await db.group_members.where('group_id').equals(groupId).toArray()).filter((m) => !m.is_deleted)
+  const group = detail.group
+  const members = detail.members
   const memberNames: Record<string, string> = {}
-  for (const m of members) {
-    const p = await db.profiles.get(m.user_id)
-    memberNames[m.user_id] = p?.display_name ?? m.display_name
-  }
+  for (const m of members) memberNames[m.userId] = m.profileName
 
-  const balanceSummary = await computeGroupBalances(groupId, currentUserId)
-  const pairwise = await computeGroupPairwiseBalances(groupId, currentUserId)
-  const bills = (await db.bills.where('group_id').equals(groupId).toArray()).filter((b) => !b.is_deleted)
-  bills.sort((a, b) => a.created_at.localeCompare(b.created_at))
-  const settlements = (await db.settlements.where('group_id').equals(groupId).toArray()).filter((s) => !s.is_deleted)
-  settlements.sort((a, b) => a.created_at.localeCompare(b.created_at))
+  const memberBalances = detail.memberBalances
+  const pairwiseEntries = detail.pairwise
+  const bills = [...detail.bills].sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+  const settlements = payments
+    .flatMap((p) => p.legs.map((l) => ({ ...l, createdAt: p.createdAt, label: p.label })))
+    .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
 
   let y = drawPageHeader(
     doc, group.name,
     `${group.currency} · ${members.length} member${members.length !== 1 ? 's' : ''}`,
   )
 
-  if (balanceSummary) {
+  {
     // Member balances — 82+48+52 = 182
     y = drawSectionTitle(doc, 'Member Balances', y)
     const balCols: ColDef[] = [
@@ -392,14 +379,14 @@ export async function generateGroupPDF(groupId: string, currentUserId: string): 
       { label: 'Balance', w: 48, align: 'right' },
       { label: 'Status', w: 52 },
     ]
-    const balRows = balanceSummary.balances.map((b) => {
+    const balRows = memberBalances.map((b) => {
       const amt = Math.round(b.amount * 100) / 100
       const status = Math.abs(amt) <= 0.01 ? 'Settled up' : amt > 0 ? 'Receives' : 'Owes'
       return [b.displayName, fmtSigned(amt, group.currency), status]
     })
     y = drawTable(doc, balCols, balRows, y)
 
-    if (pairwise && pairwise.entries.some((e) => Math.abs(e.net) > 0.005)) {
+    if (pairwiseEntries.some((e) => Math.abs(e.net) > 0.005)) {
       // Your Balances — 104+52+26 = 182
       y = drawSectionTitle(doc, 'Your Balances', y)
       const balCols: ColDef[] = [
@@ -408,7 +395,7 @@ export async function generateGroupPDF(groupId: string, currentUserId: string): 
         { label: 'Amount', w: 26, align: 'right' },
       ]
       const balRows: (string | number | null | undefined)[][] = []
-      for (const e of pairwise.entries) {
+      for (const e of pairwiseEntries) {
         if (Math.abs(e.net) <= 0.005) continue
         balRows.push([e.displayName, e.net > 0 ? 'Owes you' : 'You owe', fmt(Math.abs(e.net), group.currency)])
       }
@@ -418,8 +405,11 @@ export async function generateGroupPDF(groupId: string, currentUserId: string): 
 
   // Bills — per-member split columns shown when group has ≤ 5 members.
   // With 6+ members portrait width can't fit readable columns; layout stays fixed.
-  const memberIds = members.map((m) => m.user_id)
+  const memberIds = members.map((m) => m.userId)
   const showMemberSplits = memberIds.length > 0 && memberIds.length <= 5
+  const splitsByBill = showMemberSplits
+    ? await loadSplitsByBill(bills.map((b) => b.id))
+    : new Map<string, { userId: string; amount: number }[]>()
 
   // Allocate 74 mm pool for member columns; distribute evenly.
   const memberColW = showMemberSplits ? Math.floor(74 / memberIds.length) : 0
@@ -449,20 +439,15 @@ export async function generateGroupPDF(groupId: string, currentUserId: string): 
 
   const billRows: (string | number | null | undefined)[][] = []
   for (const bill of bills) {
-    const paidBy = memberNames[bill.paid_by] ?? 'Unknown'
     const shareByUser: Record<string, number> = {}
-    if (showMemberSplits) {
-      const items = (await db.bill_items.where('bill_id').equals(bill.id).toArray()).filter((i) => !i.is_deleted)
-      for (const item of items) {
-        const splits = (await db.item_splits.where('item_id').equals(item.id).toArray()).filter((s) => !s.is_deleted)
-        for (const s of splits) shareByUser[s.user_id] = (shareByUser[s.user_id] ?? 0) + s.computed_amount
-      }
+    for (const s of splitsByBill.get(bill.id) ?? []) {
+      shareByUser[s.userId] = (shareByUser[s.userId] ?? 0) + s.amount
     }
     billRows.push([
-      shortDate(bill.created_at),
+      shortDate(bill.createdAt),
       bill.title,
-      fmt(bill.total_amount, bill.currency),
-      paidBy,
+      fmt(bill.totalAmount, bill.currency),
+      bill.payorName,
       ...(showMemberSplits
         ? memberIds.map((uid) => (shareByUser[uid] ? fmt(shareByUser[uid], bill.currency) : '—'))
         : []),
@@ -480,20 +465,24 @@ export async function generateGroupPDF(groupId: string, currentUserId: string): 
       { label: 'Amount', w: 36, align: 'right' },
       { label: 'Note', w: 28 },
     ]
-    const payRows = await Promise.all(settlements.map(async (s) => [
-      shortDate(s.created_at),
-      memberNames[s.from_user_id] ?? 'Unknown',
-      memberNames[s.to_user_id] ?? 'Unknown',
-      fmt(s.amount, s.currency),
+    const payRows = settlements.map((s) => [
+      shortDate(s.createdAt),
+      s.fromName,
+      s.toName,
+      fmt(s.amount, group.currency),
       s.label,
-    ]))
+    ])
     drawTable(doc, payCols, payRows, y)
   }
 
   doc.save(makeExportFilename(group.name, 'pdf'))
 }
 
-export async function generatePersonPDF(personId: string, viewerId: string): Promise<void> {
+export async function generatePersonPDF(
+  personId: string,
+  events: StatementEvent[],
+  payments: SettlementHistoryItem[],
+): Promise<void> {
   const { jsPDF } = await import('jspdf')
   const doc = new jsPDF({ orientation: 'p', unit: 'mm', format: 'a4' })
 
@@ -502,9 +491,19 @@ export async function generatePersonPDF(personId: string, viewerId: string): Pro
 
   let y = drawPageHeader(doc, personName, 'Balance summary and shared bills')
 
-  const bills = await listBillsInvolvingPair(viewerId, personId)
-  bills.sort((a, b) => a.created_at.localeCompare(b.created_at))
-  const settlements = await listPairwiseSettlementsBetween(viewerId, personId)
+  // The same events the statement on screen renders (migration 062), so the two agree by
+  // construction rather than by two implementations happening to match.
+  const ordered = [...events].sort(
+    (a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id),
+  )
+  const statementBills = ordered.filter((e) => e.type !== 'payment')
+  // From the stored payment rows, not the statement events: only these carry the From/To parties
+  // and the user's own note.
+  const settlements = payments
+    .flatMap((p) =>
+      p.legs.map((l) => ({ ...l, createdAt: p.createdAt, label: p.label, currency: p.currency })),
+    )
+    .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
 
   // Bills — 22+68+32+30+30 = 182
   y = drawSectionTitle(doc, 'Shared Bills', y)
@@ -517,27 +516,26 @@ export async function generatePersonPDF(personId: string, viewerId: string): Pro
   ]
 
   const billRows: (string | number | null | undefined)[][] = []
-  for (const bill of bills) {
-    const net = await computePairwiseNetForBill(bill.id, viewerId, personId)
+  for (const ev of statementBills) {
     billRows.push([
-      shortDate(bill.created_at),
-      bill.title,
-      Math.abs(net) < 0.005 ? '—' : fmtSigned(net, bill.currency),
-      bill.groupName ?? 'Personal',
-      catLabel(bill.category),
+      shortDate(ev.createdAt),
+      ev.title,
+      Math.abs(ev.delta) < 0.005 ? '—' : fmtSigned(ev.delta, ev.currency),
+      ev.contextLabel,
+      catLabel(ev.category),
     ])
   }
   y = drawTable(doc, billCols, billRows, y)
 
   if (settlements.length > 0) {
-    // Payments — 22+46+46+36+32 = 182
+    // Payments — 22+44+44+36+36 = 182
     y = drawSectionTitle(doc, 'Payments', y)
     const payCols: ColDef[] = [
       { label: 'Date', w: 22 },
-      { label: 'From', w: 46 },
-      { label: 'To', w: 46 },
+      { label: 'From', w: 44 },
+      { label: 'To', w: 44 },
       { label: 'Amount', w: 36, align: 'right' },
-      { label: 'Note', w: 32 },
+      { label: 'Note', w: 36 },
     ]
     const payRows = settlements.map((s) => [
       shortDate(s.createdAt),

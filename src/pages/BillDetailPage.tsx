@@ -1,5 +1,6 @@
-import { useState, useEffect, useCallback } from 'react'
-import { useLiveQuery } from 'dexie-react-hooks'
+import { useState, useCallback, useMemo } from 'react'
+import { fetchBillDetail, fetchBillSettlementHistory, fetchPersonalBills } from '@/api/balances'
+import { useServerData } from '@/hooks/useServerData'
 import { ArrowLeft, Clock, Loader2, Pencil, ReceiptText, Share2, Trash2, Users } from 'lucide-react'
 import { toast } from 'sonner'
 import {
@@ -9,33 +10,19 @@ import {
   type BillCategory,
 } from '@/lib/bill-categories'
 import { Link, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom'
-import { getBillWithDetails, deleteBill } from '@/db/operations'
-import { db } from '@/db/db'
+import { deleteBill } from '@/db/operations'
+import { loadStagedBillDetail } from '@/lib/staged-rows'
 import { BILL_BACK_QUERY, billDetailBackPath, withBillBackQuery } from '@/lib/bill-navigation'
-import {
-  computePairwiseNetAllContexts,
-  loadBalanceSnapshot,
-  computePairwiseNetForBill,
-  dedupeParticipantIds,
-  expandProfileIdsForSplitMatching,
-  participantUnionForBill,
-  resolveProfileDisplay,
-} from '@/lib/people'
-import { isEffectivelyZero } from '@/lib/utils'
 import { useCurrentUser } from '@/hooks/useCurrentUser'
-import { fullSync } from '@/sync/sync-service'
 import { cn, formatCurrency } from '@/lib/utils'
 import { makeExportFilename } from '@/lib/export-utils'
 import { generateBillDetailPDF } from '@/lib/export-pdf'
 import { exportBillsToCSV } from '@/lib/export-csv'
 import { Button } from '@/components/ui/button'
 import { SettlementHistoryList } from '@/components/common/SettlementHistoryList'
-import { listSettlementHistoryForBill } from '@/lib/settlement'
 import { ConfirmDialog } from '@/components/common/ConfirmDialog'
 import { ExportImageDialog } from '@/components/export/ExportImageDialog'
 import { BillExportCard } from '@/components/export/BillExportCard'
-
-type BillDetails = Awaited<ReturnType<typeof getBillWithDetails>>
 
 export function BillDetailPage() {
   const { billId } = useParams<{ billId: string }>()
@@ -47,162 +34,70 @@ export function BillDetailPage() {
     backSearchParam: searchParams.get(BILL_BACK_QUERY),
     locationState: location.state,
   })
-  const [billState, setBillState] = useState<BillDetails>(null)
-  const [loadingState, setLoadingState] = useState(true)
-  const liveBill = useLiveQuery(async () => {
-    if (!billId) return null
-    return getBillWithDetails(billId)
-  }, [billId])
-  const [billPairRows, setBillPairRows] = useState<
-    { otherId: string; displayName: string; net: number; squareOverall: boolean }[]
-  >([])
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false)
-  const [mySplitTotal, setMySplitTotal] = useState<number | null>(null)
   const [exportOpen, setExportOpen] = useState(false)
 
-  useEffect(() => {
-    if (!billId) return
-    const id = billId
-    let cancelled = false
-
-    async function load() {
-      setLoadingState(true)
-      let data = await getBillWithDetails(id)
-      if (!data && userId && !cancelled) {
-        await fullSync(userId)
-        if (!cancelled) {
-          data = await getBillWithDetails(id)
-        }
-      }
-      if (!cancelled) {
-        setBillState(data)
-        setLoadingState(false)
-      }
+  // The whole screen in one call: bill, items, splits with resolved names, the viewer's own
+  // share, and one row per counterparty with that bill's net and whether the PERSON is square.
+  // This replaced getBillWithDetails plus a per-participant loop that computed a full
+  // cross-group tab for every other person on the bill.
+  // A bill written offline lives only in the local queue, so the endpoint cannot answer for it
+  // and the screen reported a load failure for a bill the user had just saved. The staged copy is
+  // descriptive only — no pairwise nets, since those are server aggregates for a row the server
+  // has never seen — and it is used ONLY when the bill is still unsent on this device.
+  const loadDetail = useCallback(async () => {
+    if (!userId || !billId) throw new Error('no user')
+    try {
+      return await fetchBillDetail(userId, billId)
+    } catch (error) {
+      const staged = await loadStagedBillDetail(billId, userId)
+      if (staged) return { data: staged, fromCache: true, fetchedAt: staged.bill.createdAt }
+      throw error
     }
+  }, [userId, billId])
+  const detail = useServerData(userId && billId ? loadDetail : null, [userId, billId, loadDetail])
 
-    void load()
-    return () => {
-      cancelled = true
-    }
-  }, [billId, userId])
+  const bill = useMemo(() => {
+    if (!detail.data) return null
+    return { ...detail.data.bill, items: detail.data.items }
+  }, [detail.data])
 
-  // Prefer the live bill once it resolves to a real row; otherwise fall back to the
-  // effect's billState, which has the fullSync recovery for bills not yet synced
-  // locally. Keep showing the loading state until the effect's fullSync attempt
-  // finishes so a deep-linked, not-yet-synced bill doesn't flash "Bill not found".
-  const bill = liveBill ?? billState
-  const loading = liveBill ? false : loadingState
-  const groupId = bill?.group_id ?? null
+  const loading = !userId || (detail.loading && !detail.data)
+  const groupName = detail.data?.groupName ?? null
+  const mySplitTotal = detail.data?.mySplitTotal ?? null
+  const billPairRows = useMemo(() => detail.data?.pairs ?? [], [detail.data])
 
-  const groupName = useLiveQuery(async () => {
-    if (!groupId) return null
-    const g = await db.groups.get(groupId)
-    return g?.name ?? null
-  }, [groupId])
+  const loadPayments = useCallback(
+    () =>
+      userId && billId
+        ? fetchBillSettlementHistory(userId, billId)
+        : Promise.reject(new Error('no user')),
+    [userId, billId],
+  )
+  const payments = useServerData(userId && billId ? loadPayments : null, [userId, billId])
+  // Held stable across renders: `billPayments` memoises off it, and a fresh array each render
+  // would rebuild the export payload every time.
+  const billPaymentHistory = useMemo(
+    () => (payments.loading && !payments.data ? undefined : (payments.data ?? [])),
+    [payments.loading, payments.data],
+  )
 
-  const billPaymentHistory = useLiveQuery(async () => {
-    if (!billId) return []
-    return listSettlementHistoryForBill(billId)
-  }, [billId])
-
-  const billPayments = useLiveQuery(async () => {
-    if (!exportOpen || !billId) return []
-    const rows = await db.settlements
-      .where('bill_id')
-      .equals(billId)
-      .filter((s) => !s.is_deleted && s.is_settled)
-      .toArray()
-    rows.sort((a, b) => b.created_at.localeCompare(a.created_at))
-    // Local contacts owned by another user aren't synced into this viewer's
-    // profiles table; fall back to the synced group_members.display_name.
-    const resolveName = async (uid: string): Promise<string> => {
-      const profile = await db.profiles.get(uid)
-      if (profile?.display_name?.trim()) return profile.display_name.trim()
-      if (groupId) {
-        const member = await db.group_members
-          .where('[group_id+user_id]')
-          .equals([groupId, uid])
-          .first()
-        if (member?.display_name?.trim()) return member.display_name.trim()
-      }
-      return 'Someone'
-    }
-    return Promise.all(
-      rows.map(async (s) => {
-        const [fromName, toName] = await Promise.all([resolveName(s.from_user_id), resolveName(s.to_user_id)])
-        return {
-          fromName,
-          toName,
-          amount: s.amount,
-          currency: s.currency,
-          createdAt: s.created_at,
-          label: s.label ?? '',
-        }
-      }),
-    )
-  }, [exportOpen, billId])
-
-  const reloadBillPairs = useCallback(async () => {
-    if (!billId || !userId || !bill) {
-      setBillPairRows([])
-      return
-    }
-    const union = await participantUnionForBill(billId)
-    union.add(bill.paid_by)
-    const myIds = await expandProfileIdsForSplitMatching(userId, userId)
-    const reps = await dedupeParticipantIds(union, userId)
-    const others = reps.filter((id) => !myIds.has(id))
-    const rows: { otherId: string; displayName: string; net: number; squareOverall: boolean }[] = []
-    // One bulk load shared by every participant on this bill.
-    const snapshot = await loadBalanceSnapshot()
-    for (const oid of others) {
-      const net = await computePairwiseNetForBill(billId, userId, oid)
-      if (Math.abs(net) < 0.005) continue
-      const disp = await resolveProfileDisplay(oid, userId)
-      // Whether you're square with this person overall (combined tab) — status lives on the
-      // person, not the bill, so a payment there settles this bill's contribution too. Scope
-      // to this bill's currency so an unrelated balance in another currency doesn't flip it.
-      const tab = await computePairwiseNetAllContexts(userId, oid, snapshot)
-      const squareOverall = isEffectivelyZero(tab.get(bill.currency) ?? 0)
-      rows.push({ otherId: oid, displayName: disp.displayName, net, squareOverall })
-    }
-    rows.sort((a, b) => a.displayName.localeCompare(b.displayName))
-    setBillPairRows(rows)
-  }, [billId, userId, bill])
-
-  useEffect(() => {
-    const t = setTimeout(() => {
-      void reloadBillPairs()
-    }, 0)
-    return () => clearTimeout(t)
-  }, [reloadBillPairs])
-
-  useEffect(() => {
-    if (!bill || !userId || bill.group_id !== null) {
-      const t = setTimeout(() => setMySplitTotal(null), 0)
-      return () => clearTimeout(t)
-    }
-
-    let cancelled = false
-    void (async () => {
-      const myIds = await expandProfileIdsForSplitMatching(userId, userId)
-      let total = 0
-      let included = false
-      for (const item of bill.items) {
-        for (const split of item.splits) {
-          if (!myIds.has(split.user_id)) continue
-          included = true
-          total += split.computed_amount
-        }
-      }
-      if (cancelled) return
-      setMySplitTotal(included ? Math.round(total * 100) / 100 : null)
-    })()
-
-    return () => {
-      cancelled = true
-    }
-  }, [bill, userId])
+  // The export lists every stored payment row, not the bundled view: `legs` is exactly that,
+  // already name-resolved, so it needs no second query.
+  const billPayments = useMemo(
+    () =>
+      (billPaymentHistory ?? []).flatMap((h) =>
+        h.legs.map((l) => ({
+          fromName: l.fromName,
+          toName: l.toName,
+          amount: l.amount,
+          currency: h.currency,
+          createdAt: h.createdAt,
+          label: h.label,
+        })),
+      ),
+    [billPaymentHistory],
+  )
 
   async function executeDeleteBill() {
     if (!billId || !userId) return
@@ -231,14 +126,29 @@ export function BillDetailPage() {
             Back
           </Link>
         </Button>
-        <div className="rounded-3xl border border-stone-200 bg-white p-5 shadow-sm">
-          <p className="text-center text-sm text-stone-500">Bill not found</p>
-        </div>
+        {detail.error ? (
+          // "Not found" is a claim about the data; a failed request is a claim about the network.
+          // Saying the first when the second happened sends the user looking for a deleted bill.
+          <div
+            role="alert"
+            className="rounded-3xl border border-amber-200 bg-amber-50 p-5 text-sm text-amber-950 shadow-sm"
+          >
+            <p className="font-medium">Could not load this bill</p>
+            <p className="mt-1 text-xs text-amber-900/80">{detail.error}</p>
+            <Button size="sm" variant="ghost" className="mt-3 rounded-full text-amber-900" onClick={detail.refresh}>
+              Try again
+            </Button>
+          </div>
+        ) : (
+          <div className="rounded-3xl border border-stone-200 bg-white p-5 shadow-sm">
+            <p className="text-center text-sm text-stone-500">Bill not found</p>
+          </div>
+        )}
       </div>
     )
   }
 
-  const canEdit = Boolean(userId && bill.created_by === userId)
+  const canEdit = Boolean(userId && bill.createdBy === userId)
   return (
     <>
     <div className="space-y-5">
@@ -287,10 +197,10 @@ export function BillDetailPage() {
             <h1 className="text-2xl font-semibold tracking-tight">{bill.title}</h1>
             <p className="mt-1 text-sm text-stone-500">
               Paid by {bill.payorName}
-              {bill.paid_by !== bill.created_by && (
+              {bill.paidBy !== bill.createdBy && (
                 <span> · recorded by {bill.creatorName}</span>
               )}
-              {' · '}{new Date(bill.created_at).toLocaleDateString()}
+              {' · '}{new Date(bill.createdAt).toLocaleDateString()}
             </p>
             {bill.category && CATEGORY_LABELS[bill.category as BillCategory] && (
               <span
@@ -306,7 +216,7 @@ export function BillDetailPage() {
           </div>
           <div className="text-right">
             <p className="text-2xl font-semibold text-teal-800">
-              {formatCurrency(bill.total_amount, bill.currency)}
+              {formatCurrency(bill.totalAmount, bill.currency)}
             </p>
             {mySplitTotal !== null && (
               <p className="mt-1 text-sm font-medium text-stone-600">
@@ -384,7 +294,7 @@ export function BillDetailPage() {
                   <div className="flex items-center justify-between">
                     <p className="font-medium text-stone-800">{item.name}</p>
                     <p className="font-semibold text-stone-800">
-                      {item.splits[0]?.split_type === 'quantity'
+                      {item.splits[0]?.splitType === 'quantity'
                         ? `${formatCurrency(item.amount, bill.currency)}/each`
                         : formatCurrency(item.amount, bill.currency)}
                     </p>
@@ -393,24 +303,24 @@ export function BillDetailPage() {
                     <div className="mt-3 border-t border-stone-200 pt-3">
                       <div className="flex items-center gap-1.5 text-xs font-medium text-stone-400">
                         <Users className="size-3.5" />
-                        Split ({item.splits[0].split_type})
+                        Split ({item.splits[0].splitType})
                       </div>
                       <div className="mt-3 space-y-1.5">
                         {item.splits.map((split) => (
                           <div key={split.id} className="flex items-center justify-between text-sm">
                             <span className="text-stone-600">{split.displayName}</span>
-                            {split.split_type === 'quantity' ? (
+                            {split.splitType === 'quantity' ? (
                               <span className="flex items-center gap-1">
                                 <span className="text-stone-400">
-                                  {split.split_value} × {formatCurrency(item.amount, bill.currency)} =
+                                  {split.splitValue} × {formatCurrency(item.amount, bill.currency)} =
                                 </span>
                                 <span className="font-medium text-stone-800">
-                                  {formatCurrency(split.computed_amount, bill.currency)}
+                                  {formatCurrency(split.computedAmount, bill.currency)}
                                 </span>
                               </span>
                             ) : (
                               <span className="font-medium text-stone-800">
-                                {formatCurrency(split.computed_amount, bill.currency)}
+                                {formatCurrency(split.computedAmount, bill.currency)}
                               </span>
                             )}
                           </div>
@@ -429,7 +339,7 @@ export function BillDetailPage() {
                 <Users className="size-4 text-teal-800" />
                 <h2 className="text-lg font-semibold">Split</h2>
               </div>
-              {bill.items[0]?.splits[0]?.split_type === 'quantity' && (
+              {bill.items[0]?.splits[0]?.splitType === 'quantity' && (
                 <span className="text-sm text-stone-500">
                   {formatCurrency(bill.items[0].amount, bill.currency)}/each
                 </span>
@@ -439,18 +349,18 @@ export function BillDetailPage() {
               {(bill.items[0]?.splits ?? []).map((split) => (
                 <div key={split.id} className="flex items-center justify-between rounded-xl border border-stone-200 bg-stone-100/60 px-4 py-3 text-sm">
                   <span className="text-stone-600">{split.displayName}</span>
-                  {split.split_type === 'quantity' ? (
+                  {split.splitType === 'quantity' ? (
                     <span className="flex items-center gap-1">
                       <span className="text-stone-400">
-                        {split.split_value} × {formatCurrency(bill.items[0].amount, bill.currency)} =
+                        {split.splitValue} × {formatCurrency(bill.items[0].amount, bill.currency)} =
                       </span>
                       <span className="font-medium text-stone-800">
-                        {formatCurrency(split.computed_amount, bill.currency)}
+                        {formatCurrency(split.computedAmount, bill.currency)}
                       </span>
                     </span>
                   ) : (
                     <span className="font-medium text-stone-800">
-                      {formatCurrency(split.computed_amount, bill.currency)}
+                      {formatCurrency(split.computedAmount, bill.currency)}
                     </span>
                   )}
                 </div>
@@ -479,8 +389,18 @@ export function BillDetailPage() {
     {exportOpen && bill && (
       <ExportImageDialog
         filename={makeExportFilename('Bills', 'png').replace('.png', '')}
-        onExportPDF={() => generateBillDetailPDF(bill.id)}
-        onExportCSV={userId ? () => exportBillsToCSV(userId) : undefined}
+        onExportPDF={() => generateBillDetailPDF(detail.data!)}
+        onExportCSV={
+                  userId
+                    ? async () => {
+                        // This dialog offers a whole-list CSV from a single bill's screen, so the
+                        // rows are not already on hand. Fetch them rather than exporting an empty
+                        // file or recomputing the settled flag locally.
+                        const { data } = await fetchPersonalBills(userId)
+                        await exportBillsToCSV(userId, [...data.mine, ...data.shared])
+                      }
+                    : undefined
+                }
         onClose={() => setExportOpen(false)}
       >
         <BillExportCard bill={bill} groupName={groupName ?? null} payments={billPayments ?? []} />

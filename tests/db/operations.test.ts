@@ -8,8 +8,10 @@ import {
   createGroup,
   createSettlement,
   deleteBill,
+  deleteBundledPayment,
   deleteGroup,
   deletePerson,
+  deleteSettlement,
   getBillWithDetails,
   linkProfileToRemote,
   recordDecomposedSettlement,
@@ -18,8 +20,6 @@ import {
   resolveGroupMemberUserId,
   updateBill,
 } from '@/db/operations'
-import { computeGroupBalances, computeGroupPairwiseBalances } from '@/lib/settlement'
-import { computePairwiseNetAllContexts, computePairwiseNetPersonalOnly } from '@/lib/people'
 import {
   makeBill,
   makeGroup,
@@ -31,6 +31,35 @@ import {
   resetDb,
   seedSimpleBill,
 } from '../helpers/db'
+
+// The two write-path guards ask the server what is owed (migration 064). Controlling that answer
+// here is what makes the guards testable at all — and lets us pin how each one DEGRADES when the
+// server cannot answer, which is the behaviour that differs between them.
+const serverMoney = vi.hoisted(() => ({
+  owed: 0,
+  breakdown: { memberUserId: '', displayName: '', currency: 'PHP', pays: [], receives: [] } as {
+    memberUserId: string
+    displayName: string
+    currency: string
+    pays: { memberUserId: string; displayName: string; amount: number }[]
+    receives: { memberUserId: string; displayName: string; amount: number }[]
+  } | null,
+  unreachable: false,
+}))
+vi.mock('@/api/balances', () => ({
+  loadOwedInGroup: vi.fn(async () => {
+    if (serverMoney.unreachable) throw new Error('offline')
+    return serverMoney.owed
+  }),
+  loadGroupMemberBreakdownFresh: vi.fn(async () => {
+    if (serverMoney.unreachable) throw new Error('offline')
+    // Mirrors the real loader: `kwenta_group_member_breakdown` RETURNs NULL when the caller is
+    // not an active member of the group, and that refusal is an ERROR, not an empty answer.
+    // Resolving it let `removeGroupMember` short-circuit its guard to "settled".
+    if (serverMoney.breakdown === null) throw new Error('membership declined')
+    return serverMoney.breakdown
+  }),
+}))
 
 // operations.ts fires sync + notifications as side effects. Stub them so each
 // operation is exercised purely against Dexie.
@@ -73,7 +102,30 @@ vi.mock('@/lib/supabase', async () => {
 
 beforeEach(async () => {
   await resetDb()
+  serverMoney.owed = 0
+  serverMoney.breakdown = {
+    memberUserId: '',
+    displayName: '',
+    currency: 'PHP',
+    pays: [],
+    receives: [],
+  }
+  serverMoney.unreachable = false
 })
+
+/** Every settled payment between two people, newest first — what these operations actually write. */
+async function paymentsBetween(fromUserId: string, toUserId: string) {
+  const rows = await db.settlements.toArray()
+  return rows
+    .filter(
+      (s) =>
+        !s.is_deleted &&
+        s.is_settled &&
+        s.from_user_id === fromUserId &&
+        s.to_user_id === toUserId,
+    )
+    .sort((a, b) => b.created_at.localeCompare(a.created_at))
+}
 
 describe('createBill', () => {
   it('writes the bill, items, equal splits, and an activity log entry', async () => {
@@ -445,17 +497,49 @@ describe('removeGroupMember', () => {
 
   it('blocks removal while the member has an outstanding balance', async () => {
     await seed3MemberGroup()
-    // Alice paid 90, split 30/30/30 → Cara owes 30.
-    await db.bills.add(makeBill({ id: 'BILL', group_id: 'G', paid_by: 'A', total_amount: 90 }))
-    await db.bill_items.add(makeItem({ id: 'IT', bill_id: 'BILL', amount: 90 }))
-    await db.item_splits.bulkAdd([
-      makeSplit({ item_id: 'IT', user_id: 'A', computed_amount: 30 }),
-      makeSplit({ item_id: 'IT', user_id: 'B', computed_amount: 30 }),
-      makeSplit({ item_id: 'IT', user_id: 'C', computed_amount: 30 }),
-    ])
+    serverMoney.breakdown = {
+      memberUserId: 'C',
+      displayName: 'Cara',
+      currency: 'PHP',
+      pays: [{ memberUserId: 'A', displayName: 'Alice', amount: 30 }],
+      receives: [],
+    }
     await expect(removeGroupMember('G', 'C', 'A')).rejects.toThrow(/outstanding balance/i)
     const m = await db.group_members.where('[group_id+user_id]').equals(['G', 'C']).first()
     expect(m?.is_deleted).toBe(false) // not removed
+  })
+
+  it('refuses removal when the balance cannot be checked at all', async () => {
+    await seed3MemberGroup()
+    serverMoney.unreachable = true
+    // Deliberately NOT the same call as the payment cap below: stranding an unsettled member's
+    // debt is invisible to the user afterwards, so an unchecked removal is worse than a blocked one.
+    await expect(removeGroupMember('G', 'C', 'A')).rejects.toThrow(/reconnect/i)
+    const m = await db.group_members.where('[group_id+user_id]').equals(['G', 'C']).first()
+    expect(m?.is_deleted).toBe(false)
+  })
+
+  /**
+   * The server returns NULL — not an error — when the caller is not an active member of the
+   * group, or cannot see it. That resolved successfully, so `breakdown && (...)` short-circuited
+   * to false and the guard was skipped entirely: an admin whose own membership had just been
+   * removed on another device could remove a member who still owed, stranding the debt on a
+   * roster row nobody can settle.
+   */
+  it('refuses removal when the server declines to answer, rather than reading it as settled', async () => {
+    await seed3MemberGroup()
+    serverMoney.breakdown = null
+    await expect(removeGroupMember('G', 'C', 'A')).rejects.toThrow(/reconnect/i)
+    const m = await db.group_members.where('[group_id+user_id]').equals(['G', 'C']).first()
+    expect(m?.is_deleted).toBe(false)
+  })
+
+  it('still force-removes without consulting the server (the deletePerson cascade)', async () => {
+    await seed3MemberGroup()
+    serverMoney.unreachable = true
+    await removeGroupMember('G', 'C', 'A', { force: true })
+    const m = await db.group_members.where('[group_id+user_id]').equals(['G', 'C']).first()
+    expect(m?.is_deleted).toBe(true)
   })
 
   it('removes a settled member without redistributing splits (history preserved)', async () => {
@@ -852,6 +936,7 @@ describe('payment caps', () => {
 
   it('createSettlement with enforceCap rejects overpaying', async () => {
     await seedDebt()
+    serverMoney.owed = 50
     await expect(
       createSettlement('G', 'B', 'A', 80, 'PHP', 'B', undefined, null, { enforceCap: true }),
     ).rejects.toThrow(/can only pay up to/i)
@@ -859,7 +944,19 @@ describe('payment caps', () => {
 
   it('createSettlement with enforceCap allows paying up to what is owed', async () => {
     await seedDebt()
+    serverMoney.owed = 50
     const id = await createSettlement('G', 'B', 'A', 50, 'PHP', 'B', undefined, null, {
+      enforceCap: true,
+    })
+    expect(await db.settlements.get(id)).toBeTruthy()
+  })
+
+  it('skips the cap when the server cannot answer, rather than blocking the payment', async () => {
+    await seedDebt()
+    serverMoney.unreachable = true
+    // The cap is an affordance, not an invariant: overpaying is legal and flips the sign, so
+    // refusing offline would deny a payment the user is entitled to make.
+    const id = await createSettlement('G', 'B', 'A', 80, 'PHP', 'B', undefined, null, {
       enforceCap: true,
     })
     expect(await db.settlements.get(id)).toBeTruthy()
@@ -867,6 +964,13 @@ describe('payment caps', () => {
 
   it('createBundledGroupSettlement with enforceCap rejects an over-cap recipient', async () => {
     await seedDebt()
+    serverMoney.breakdown = {
+      memberUserId: 'B',
+      displayName: 'Bob',
+      currency: 'PHP',
+      pays: [{ memberUserId: 'A', displayName: 'Alice', amount: 50 }],
+      receives: [],
+    }
     await expect(
       createBundledGroupSettlement({
         groupId: 'G',
@@ -877,6 +981,86 @@ describe('payment caps', () => {
         enforceCap: true,
       }),
     ).rejects.toThrow(/can only pay up to/i)
+  })
+
+  it('caps a recipient the payer owes nothing at zero', async () => {
+    await seedDebt()
+    serverMoney.breakdown = {
+      memberUserId: 'B',
+      displayName: 'Bob',
+      currency: 'PHP',
+      pays: [],
+      receives: [],
+    }
+    await expect(
+      createBundledGroupSettlement({
+        groupId: 'G',
+        fromUserId: 'B',
+        recipients: [{ toUserId: 'A', amount: 10 }],
+        currency: 'PHP',
+        markedBy: 'B',
+        enforceCap: true,
+      }),
+    ).rejects.toThrow(/can only pay up to 0/i)
+  })
+
+  /**
+   * The two sides of the cap comparison come from different id spaces. `pays` is keyed by the ids
+   * the SERVER's roster holds, while the recipient id has been through `resolveGroupMemberUserId`,
+   * which deliberately maps an account id BACK to a local contact id when this device's roster row
+   * holds the local one. Matching literally made a recipient look like someone owed 0, so the cap
+   * rejected a settle-up the same screen had just offered.
+   */
+  it('matches the server’s roster id through the identity set, not literally', async () => {
+    await db.groups.add(makeGroup({ id: 'G2', name: 'Trip', currency: 'PHP', created_by: 'B' }))
+    // This device tracks Alice as its own local contact, linked to her account id 'A-remote'.
+    await db.profiles.bulkAdd([
+      makeProfile({ id: 'B', display_name: 'Bob' }),
+      makeProfile({
+        id: 'A-local',
+        display_name: 'Alice',
+        is_local: true,
+        owner_id: 'B',
+        email: '',
+        linked_profile_id: 'A-remote',
+      }),
+      makeProfile({ id: 'A-remote', display_name: 'Alice' }),
+    ])
+    await db.group_members.bulkAdd([
+      makeMember({ group_id: 'G2', user_id: 'B', display_name: 'Bob' }),
+      makeMember({ group_id: 'G2', user_id: 'A-local', display_name: 'Alice' }),
+    ])
+    // The server answers with the id ITS roster holds — the account id.
+    serverMoney.breakdown = {
+      memberUserId: 'B',
+      displayName: 'Bob',
+      currency: 'PHP',
+      pays: [{ memberUserId: 'A-remote', displayName: 'Alice', amount: 50 }],
+      receives: [],
+    }
+
+    // Within the cap: allowed, even though the resolved recipient id is the LOCAL one.
+    const { settlementIds } = await createBundledGroupSettlement({
+      groupId: 'G2',
+      fromUserId: 'B',
+      recipients: [{ toUserId: 'A-local', amount: 50 }],
+      currency: 'PHP',
+      markedBy: 'B',
+      enforceCap: true,
+    })
+    expect(settlementIds).toHaveLength(1)
+
+    // And the cap is still a cap: over it, the payment is refused for the right reason.
+    await expect(
+      createBundledGroupSettlement({
+        groupId: 'G2',
+        fromUserId: 'B',
+        recipients: [{ toUserId: 'A-local', amount: 80 }],
+        currency: 'PHP',
+        markedBy: 'B',
+        enforceCap: true,
+      }),
+    ).rejects.toThrow(/can only pay up to 50/i)
   })
 })
 
@@ -941,12 +1125,14 @@ describe('recordDecomposedSettlement', () => {
         { fromUserId: 'Carlo', toUserId: 'John', amount: 100 },
       ],
     })
-    const net = await computeGroupBalances('G', 'Ana')
-    expect(net!.balances.every((b) => Math.abs(b.amount) < 0.005)).toBe(true)
-    for (const viewer of ['Ana', 'Carlo', 'John']) {
-      const pw = await computeGroupPairwiseBalances('G', viewer)
-      expect(pw!.entries.every((e) => Math.abs(e.net) < 0.005)).toBe(true)
-    }
+    // What this operation owes the caller is the ROWS: one settled leg per suggested transfer,
+    // in the group, for the exact amounts. That those rows then zero every screen is arithmetic
+    // over the whole ledger, which is asserted server-side (061_group_detail.test.sql).
+    expect((await paymentsBetween('Ana', 'Carlo')).map((r) => r.amount)).toEqual([200])
+    expect((await paymentsBetween('Carlo', 'John')).map((r) => r.amount)).toEqual([100])
+    const all = (await db.settlements.toArray()).filter((r) => !r.is_deleted && r.is_settled)
+    expect(all).toHaveLength(2)
+    expect(all.every((r) => r.group_id === 'G' && r.currency === 'PHP')).toBe(true)
   })
 
   it('drops sub-cent legs and throws when nothing is left', async () => {
@@ -983,7 +1169,8 @@ describe('recordPersonPayment', () => {
     })
     expect(settlementIds).toHaveLength(1)
     expect(bundleId).toBeNull()
-    expect((await computePairwiseNetPersonalOnly('me', 'other')).get('PHP') ?? 0).toBe(0)
+    const legs = await paymentsBetween('other', 'me')
+    expect(legs.map((l) => [l.amount, l.group_id])).toEqual([[100, null]])
     expect(cloudCalls.kwentaSync - before).toBe(1)
   })
 
@@ -1003,8 +1190,9 @@ describe('recordPersonPayment', () => {
       currency: 'PHP',
       markedBy: 'me',
     })
-    const summary = await computeGroupPairwiseBalances('G', 'me')
-    expect(summary?.entries.find((e) => e.memberUserId === 'other')?.net ?? 0).toBe(0)
+    // Tagged to the group, so it reduces the group leg rather than the personal one.
+    const legs = await paymentsBetween('other', 'me')
+    expect(legs.map((l) => [l.amount, l.group_id])).toEqual([[100, 'G']])
   })
 
   it('attributes the notification to the group when every leg is that one group', async () => {
@@ -1070,8 +1258,13 @@ describe('recordPersonPayment', () => {
     expect(bundleId).not.toBeNull()
     const legs = await db.settlements.where('bundle_id').equals(bundleId as string).toArray()
     expect(legs).toHaveLength(2)
-    // Combined tab clears; both contexts consistent.
-    expect((await computePairwiseNetAllContexts('me', 'other')).get('PHP') ?? 0).toBe(0)
+    // The total is PARTITIONED across contexts, never duplicated into each — that is the whole
+    // reason a bundle exists.
+    expect(legs.reduce((sum, l) => sum + l.amount, 0)).toBe(100)
+    expect(legs.map((l) => [l.group_id, l.amount]).sort()).toEqual([
+      [null, 60],
+      ['G2', 40],
+    ])
   })
 
   it('an overpayment flips the tab — no credit banked', async () => {
@@ -1085,7 +1278,10 @@ describe('recordPersonPayment', () => {
       currency: 'PHP',
       markedBy: 'me',
     })
-    expect((await computePairwiseNetPersonalOnly('me', 'other')).get('PHP') ?? 0).toBe(-50)
+    // Nothing is clamped and no credit row is invented: the full 150 is recorded, and the sign
+    // flip is the ledger's business (052_money_identity_and_personal_net.test.sql pins it).
+    const legs = await paymentsBetween('other', 'me')
+    expect(legs.map((l) => l.amount)).toEqual([150])
   })
 
   it('stores the method and note on the payment for the audit', async () => {
@@ -1103,5 +1299,54 @@ describe('recordPersonPayment', () => {
     const row = await db.settlements.get(settlementIds[0])
     expect(row?.method).toBe('GCash')
     expect(row?.label).toBe('lunch')
+  })
+})
+
+/**
+ * Both delete paths resolve rows from the Dexie MIRROR while the ids come from a server-fetched
+ * settlement-history list, and the two can legitimately disagree — a payment another member
+ * recorded is listed as soon as the endpoint answers, before realtime or the next sync has
+ * mirrored the row.
+ */
+describe('settlement deletes against an incomplete mirror', () => {
+  it('refuses rather than silently succeeding when the row is not mirrored yet', async () => {
+    // The dialog treated a resolved promise as success: it called onSaved()/onClose() with no
+    // toast, the payment was still listed after the refetch, and the user pressed Remove again.
+    await expect(deleteSettlement('not-mirrored-yet', 'me')).rejects.toThrow(/finished syncing/i)
+  })
+
+  it('is idempotent for a row already soft-deleted', async () => {
+    await db.settlements.add(
+      makeSettlement({ id: 'S1', from_user_id: 'a', to_user_id: 'b', amount: 10, is_deleted: true }),
+    )
+    await expect(deleteSettlement('S1', 'me')).resolves.toBeUndefined()
+  })
+
+  /**
+   * The worse half: `where('bundle_id')` returns the legs this device happens to hold, so a
+   * bundle whose legs had not all arrived was deleted PARTIALLY — the survivors keep moving the
+   * balance and the payment can never be reassembled.
+   */
+  it('refuses a bundle whose legs are not all mirrored, instead of deleting the ones it has', async () => {
+    await db.settlements.add(
+      makeSettlement({ id: 'S1', bundle_id: 'BU1', from_user_id: 'a', to_user_id: 'b', amount: 30 }),
+    )
+
+    await expect(deleteBundledPayment('BU1', 'me', ['S1', 'S2'])).rejects.toThrow(/finished syncing/i)
+
+    const survivor = await db.settlements.get('S1')
+    expect(survivor?.is_deleted).toBe(false)
+  })
+
+  it('deletes every leg when the mirror holds the whole bundle', async () => {
+    await db.settlements.bulkAdd([
+      makeSettlement({ id: 'S1', bundle_id: 'BU1', from_user_id: 'a', to_user_id: 'b', amount: 30 }),
+      makeSettlement({ id: 'S2', bundle_id: 'BU1', from_user_id: 'b', to_user_id: 'c', amount: 30 }),
+    ])
+
+    await deleteBundledPayment('BU1', 'me', ['S1', 'S2'])
+
+    const rows = await db.settlements.where('bundle_id').equals('BU1').toArray()
+    expect(rows.every((r) => r.is_deleted)).toBe(true)
   })
 })

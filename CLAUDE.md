@@ -11,7 +11,13 @@ npm run lint       # Run ESLint
 npm run preview    # Preview production build locally
 npm test           # Run unit tests once (Vitest)
 npm run test:watch # Run unit tests in watch mode
+npm run test:sql   # Run the SQL suite against a throwaway local Postgres (see below)
 ```
+
+**How work ships here is not optional.** Before writing code, read **Feature Lifecycle**,
+**Coding Rules**, **Post-task cleanup checklist** and **Verification** at the bottom of this
+file. The first two sections below (plans, testing) are the two rules broken most often, so
+they lead.
 
 ## Plans & Specs (do not commit)
 
@@ -24,23 +30,141 @@ Tests are **mandatory** for this project — we create tests and run testing as 
 - The test runner is **Vitest** (`vitest.config.ts`, `happy-dom` environment, `@` alias). Tests live in the top-level **`tests/`** folder, mirroring the source tree: `tests/lib/*.test.ts` for `src/lib/*`, `tests/db/*.test.ts` for `src/db/*`, `tests/sync/*.test.ts` for `src/sync/*`. Import the code under test via the `@` alias (e.g. `@/lib/splits`); import shared test helpers by relative path (e.g. `../helpers/db`).
 - `tests/setup.ts` (registered as `setupFiles`) imports `fake-indexeddb/auto` so any module that touches `@/db/db` can open the DB. For Dexie-backed functions, use the factories + `resetDb()` in `tests/helpers/db.ts` (call `resetDb()` in `beforeEach`).
 - **Mocking Supabase / sync side-effects:** modules that import `@/lib/supabase` or fire sync/notifications (e.g. `operations.ts`, `kwenta-notifications.ts`, `sync-service.ts`) are tested by `vi.mock`-ing the network/side-effect deps and asserting Dexie/localStorage state. Use `vi.hoisted` to share controllable mock state with the hoisted `vi.mock` factory (see `tests/lib/kwenta-notifications.test.ts`, `tests/lib/cloud-first-mutations.test.ts`, `tests/db/operations.test.ts`). A benign `@/lib/supabase` stub (`rpc → {data:null,error:null}`) keeps `fetchRemoteProfileIntoDexie` offline.
-- When adding or changing behavior, add/extend unit tests that cover it. Prefer the pure-logic modules (`src/lib/splits.ts`, `src/lib/utils.ts`, `src/lib/bill-split-form.ts`, etc.). DB-coupled modules (`settlement.ts`, `people.ts`, `personal-bill-status.ts`, `operations.ts`) are tested against `fake-indexeddb`.
+- When adding or changing behavior, add/extend unit tests that cover it. Prefer the pure-logic modules (`src/lib/splits.ts`, `src/lib/utils.ts`, `src/lib/bill-split-form.ts`, etc.). DB-coupled modules (`people.ts`, `operations.ts`) are tested against `fake-indexeddb`.
 - Run `npm test` before considering any change complete — **it must pass in full**.
   - No count is pinned here on purpose. A hard-coded total goes stale the moment anyone adds a test file, and a stale figure is worse than none: the next contributor sees a different number and cannot tell whether they broke something or fixed it. A green suite is the signal.
   - What the number was really guarding is worth stating directly instead: **never delete a test, weaken an assertion, or skip a case to make a change pass.** If a test is genuinely wrong, say so and why in the change itself. (This is not hypothetical — a batch of repair-rule tests was dropped when those rules moved into SQL, and `npm test` stayed green while the behaviour went uncovered.)
 - Coverage inventory:
-  - `tests/lib/` pure logic: `splits`, `utils` (incl. `roundMoney`/`isEffectivelyZero`/`MONEY_EPSILON`), `amount-input`, `bill-split-form`, `bill-navigation`, `balance-rollups`, `db-query-helpers`, `account-gate-messages`, `export-utils`, `bill-categories`, `auth-session-flags`, `runtime-flags`, `client-metrics`
-  - `tests/lib/` DB-backed: `settlement` (incl. `listSettlementHistoryForBill`), `people`, `personal-bill-status`, `clear-kwenta-local`, `export-csv`
+  - `tests/lib/` pure logic: `splits`, `utils` (incl. `roundMoney`/`isEffectivelyZero`/`MONEY_EPSILON`), `amount-input`, `bill-split-form`, `bill-navigation`, `account-gate-messages`, `export-utils`, `bill-categories`, `auth-session-flags`, `runtime-flags`, `client-metrics`
+  - `tests/lib/` DB-backed: `people` (identity expansion, participant union, canonical peers), `clear-kwenta-local`, `export-csv`
+  - `tests/lib/settlement.test.ts` is now ONLY `buildMovementChains` — the last pure transform in that module. Everything else it covered moved into SQL with the code (053/061/064).
   - `tests/lib/` with mocked deps: `kwenta-notifications` (outbox/senders/flush/dead-letter), `cloud-first-mutations` (pending-mutation + conflict tracking)
-  - `tests/db/`: `operations` (createBill/updateBill/deleteBill, createGroup, addGroupMember, removeGroupMember split redistribution, createSettlement, linkProfileToRemote id rewrites, deleteGroup cascade, getBillWithDetails)
+  - `tests/db/`: `operations` (createBill/updateBill/deleteBill, createGroup, addGroupMember, removeGroupMember split redistribution, createSettlement, linkProfileToRemote id rewrites, deleteGroup cascade, getBillWithDetails). The write-path guards mock `@/api/balances` and pin how each DEGRADES when the server cannot answer: the payment cap is skipped (overpaying is legal), member removal is refused. Payment tests assert the ROWS written, not a recomputed balance — that arithmetic is SQL's.
   - `tests/lib/` storage: `kwenta-storage-keys` (refresh marker + legacy-cursor migration, incl. failing storage writes)
   - `tests/sync/`: `sync-service` helpers (`getMillisecondsSinceLastRefresh`, `hasUnsyncedLocalDataForUser` incl. RLS push-filter, `shouldApplyPulledRow`, `compareTimestamps`); `sync-round-trip` (complete-bundle guarantees, echo guard, push stamping); `sync-manager` (navigation refresh: throttle, release, backoff isolation, monotonic clock); `pull-pagination` (PostgREST max-rows paging in the fallback path); `realtime-batch` (burst coalescing + `latestEventCreatedAt`, the server-clock cursor source)
   - `tests/db/cloud-first-write.test.ts`: the cloud-first write contract (accept / transport error / silent server-side drop / partial drop; rejected update and delete leave the original intact; multi-leg payment is all-or-nothing; a retry after rejection makes exactly one bill)
   - `tests/sync/cloud-write-idempotency.test.ts`: submission ids (replay reports the original outcome; fallback and probe-caching against a pre-`050` server)
-  - `tests/lib/balance-snapshot.test.ts`: shared `BalanceSnapshot` — identical numbers with and without it, plus a query-count guard that fails if per-contact rescanning returns
+  - `tests/api/`: `cache` (per-user scoping, corrupt entries, quota failure + evict-and-retry, the 60-entry cap, `clearApiCache`). **Injecting a storage failure needs `Object.defineProperty` on the `localStorage` INSTANCE** — plain assignment is swallowed by happy-dom's proxy and `vi.spyOn(Storage.prototype, …)` is never consulted, so either one makes a "survives a failing write" test pass without the failure path running; `balances` (the RPC mappers for every endpoint — overview, contacts, person summary, groups, personal bills, recent bills — PostgREST returns `numeric` as a STRING, and a null total must be DROPPED rather than coerced to a real zero balance; cache fallback, offline, and cross-user isolation); `settlement-history` (the 064 mappers — bundled item shape, legs kept distinct from recipients, a null `groupName` becoming an ABSENT key rather than the string "null", null-vs-empty group history, and that the two GUARD loaders never serve a cached answer)
   - `tests/lib/kwenta-data-repair`: the CLIENT contract only (asks, never decides; mirrors; surfaces a failed mirror). The repair RULES are SQL — see below.
-  - Remaining gaps (network-orchestration heavy, lower ROI): `realtime-events` subscriptions, `export-pdf` (jsPDF rendering), `db/hooks.ts` (React `useLiveQuery`).
-  - **Uncovered by design of the runner:** everything that lives in SQL — the `kwenta_repair_settlements` rules (which decide what gets soft-deleted), the read/write predicate split in `049`, and `relevant_bill_ids_for_user` (which gates what every user pulls, so a wrong set is a cross-account leak, not a slow query). Vitest has no Postgres. If you change any of them, verify against a branch database by hand; `npm test` cannot tell you they are wrong.
+  - `tests/lib/staged-rows`: rows this device wrote and has not pushed — the only thing that makes an offline write visible now that a list IS the server response. Pins that a staged bill is never reported `settled`, carries no pairwise nets, and reports a NULL share when the viewer is not on it; and that a confirmed row is never served from here (the endpoint stays authoritative).
+  - `tests/lib/local-search`: the offline fallback for global search (substring/case, email match, deletions and the viewer excluded, per-kind cap keeping the newest). Authoritative search is `kwenta_search`; this can only ever be NARROWER.
+  - `tests/hooks/useServerData.test.tsx`: **the one hook test in the suite**, driven by React's own `act` + `react-dom/client` (no testing-library dependency; `vitest.config.ts` sets `esbuild.jsx: 'automatic'` for it). It pins what a pure function cannot express: a subject change (`/app/people/alice` → `/bob`) clears `data`, `error` and `fromCache` so one person's balance never renders under another's name, while an invalidation TICK keeps the current data so a mutation does not blank the screen.
+  - Remaining gaps (network-orchestration heavy, lower ROI): `realtime-events` subscriptions, `export-pdf` (jsPDF rendering).
+  - **SQL is covered by `npm run test:sql`, not by Vitest.** Vitest has no Postgres, so anything living in SQL — the `kwenta_repair_settlements` rules, the read/write predicate split in `049`, `relevant_bill_ids_for_user` (a wrong set here is a cross-account leak, not a slow query) — used to be untestable, and a batch of repair-rule tests once vanished without `npm test` noticing. See the SQL Test Harness section below. **Both suites must pass.**
+
+## SQL Test Harness (`npm run test:sql`)
+
+`scripts/sql-test.sh` creates a **throwaway** Postgres cluster (port 55432, data dir under
+`$TMPDIR`), applies `supabase/tests/harness/000_supabase_shim.sql` + every file in
+`supabase/migrations/` in lexical order, then runs each `supabase/tests/sql/*.test.sql` in its own
+always-rolled-back transaction. It never touches your Supabase project and never touches an
+existing local cluster.
+
+- Requires Postgres 14 (`brew install postgresql@14`), or set `KWENTA_PG_BIN`.
+- `npm run test:sql -- --keep` leaves the DB up; `-- --shell` drops you into `psql` on it.
+- Assertions live in `supabase/tests/harness/001_test_helpers.sql`: `test.assert_eq`,
+  `assert_money` (compares integer cents), `assert_ids` (order-insensitive), `assert_bundle_eq`
+  (sorts each bundle array by id, then reports the first differing key), plus fixtures
+  `test.new_account / new_contact / new_group / add_member / new_bill / new_settlement`.
+- `test.as_user(uid)` sets `auth.uid()` **and** drops to the `authenticated` role so RLS applies.
+  Fixture setup runs as the owner, where RLS does not — **a test that forgets `as_user` proves
+  nothing about RLS.** The helper schema is granted to `authenticated` at the end of
+  `001_test_helpers.sql`; without that the first `assert_*` after `as_user` dies with "permission
+  denied for schema test", which is why the pre-`058` suites all set `request.jwt.claim.sub` alone
+  and stayed the owner (auth.uid() set, RLS off, missing GRANTs undetectable).
+
+SQL coverage so far (`supabase/tests/sql/`):
+- `051_pull_row_functions` — the extracted row functions reproduce the 049 bundle exactly (pinned
+  against a verbatim copy of the old body, three accounts, plus a future `p_since`); foreign local
+  contacts / groups / bills stay out; 049's linked-contact exception still delivers; no
+  `kwenta_pull_rows_*` is executable by `authenticated`.
+- `052_money_identity_and_personal_net` — `kwenta_round_money` JS tie semantics incl. the negative
+  half; identity expansion (forward link, siblings, reverse, soft-delete, missing profile,
+  transitive+undirected+viewer-scoped peer clusters); personal pairwise net (sign, mirror,
+  payment, overpayment flip, per-currency isolation, soft-deleted and unsettled exclusion,
+  contact-id ↔ account-id routing, and **one split per side per item** so a linked duplicate
+  counts once).
+- `053_money_group_net_and_breakdown` — group pairwise net (sign, mirror, settled payment, zero
+  rows for settled members, self-exclusion, currency drop vs empty-currency match, unsettled,
+  deleted group, removed members keeping their roster name); the breakdown reconciling
+  `total = personal + Σ groups` with effectively-zero groups omitted; `kwenta_person_summary`
+  answering for `auth.uid()` and refusing an unauthenticated caller. **The invariant:** a
+  viewer-private `profile_peer_links` merge never moves a shared group ledger — including when
+  the viewer merges themselves with another member and those members then transact without them.
+- `054_money_contacts_and_rollups` — contact discovery and canonical peers (a linked contact and
+  its account collapse to one row; settlement-only counterparties surface; no cross-account
+  leakage); the roster display-name fallback; and the Home rollups (personal vs combined buckets,
+  per-person netting BEFORE bucketing, effectively-zero bucketed nowhere).
+  Includes the `055` fix: a manual merge collapses to ONE peer, transitive chains included, and
+  the rollup no longer double-counts.
+- `056_bill_settled_and_search` — the per-bill settled flag (derived from the PERSON-level tab,
+  scoped to the bill's own currency; missing/deleted/solo bills are settled; epsilon boundary at
+  half a cent; an unreadable bill returns null rather than a status that proves it exists) and
+  global search (caller-scoped, case-insensitive, LIKE-wildcard-safe).
+- `063_person_summary_group_pool_net` — the pairwise-vs-pool divergence on one leg (identical in
+  a two-member group, different the moment a third member exists), 053's keys and totals
+  preserved, settled groups still dropped, roster-resolved identity, and `kwenta_group_pool_net`
+  not being client-callable.
+- `062_person_statement` — event shape per context, payment phrasing and sign, and above all the
+  RECONCILIATION invariant asserted against `kwenta_person_summary` (across personal + two groups
+  + a payment, in the peer-linked duplicate case, and per currency). Plus exclusions: third-party
+  payers, non-shared groups, deleted bills, unsettled payments, off-currency group bills, and
+  chronological ordering.
+- `061_group_detail` — shape and roster order, active-membership gating (non-member and former
+  member both get null), deleted groups, the pairwise-vs-pool distinction (a member invisible to
+  the viewer pairwise is still down against the pool), pool balances summing to zero, settled
+  members staying on the roster at zero, the rawDebts edges (splits plus REVERSED settlement
+  edges), currency drop, and removed members keeping their roster name.
+- `060_bill_detail` — bill pairwise (sign, mirror, bill-tagged vs untagged payments, deleted
+  bills, and the duplicated-identity-charged-once case) and the detail payload (own share,
+  counterparties, self excluded, square parties omitted, `squareOverall` following the person tab
+  and staying currency-scoped, roster names incl. removed members, unreadable → null).
+- `059_list_pages` — group list rows (roster count, viewer standing, membership scoping, caller
+  scoping) and the personal-bill buckets. Pinned hard: a bill is in **exactly one** bucket and
+  never both; the shared bucket reaches a split filed under a linked contact; and one person is
+  **one** participant pill whether they hold a contact id, an account id, or a manual merge.
+  Includes the both-directions-nonzero group case ported here when
+  `computeAllGroupPairwiseBalances` was deleted — a single net scalar per group cannot express it.
+- `058_home_rollups_and_recent_bills` — the Home page's group bucket and its recent-bills list.
+  The load-bearing case: the group bucket is **not** `combined - personal` (combined nets a person
+  across personal and group before choosing a side), so it had to be ported rather than derived on
+  the client. Also covers membership scoping (exact viewer id, active memberships only, deleted
+  groups out) and `kwenta_recent_bills` (viewer-paid only, newest first, the cap keeps the newest,
+  deletions honoured, caller-scoped).
+- `057_contacts_subtitle` — the "Linked · <account>" / "Local contact" line the People page
+  renders. Note `profiles.linked_profile_id` has a FK, so a dangling link cannot exist
+  server-side: the client's "Loading their profile…" state is a SYNC phenomenon.
+- `064_settlement_history_and_group_math` — the bundle rules that the UI depends on and that a
+  Dexie iteration order could never make deterministic: a bundle is ONE item with MANY legs;
+  `recipients` collapses by recipient while `legs` keeps every row (the input to
+  `buildMovementChains`); a ONE-recipient bundle is NOT bundled ("You paid 1 people"); bill
+  attribution only when every row agrees; first non-blank label wins; "Added by" from the activity
+  log. Plus roster-first names across the privacy boundary, active-membership gating (a former
+  member is still SENT the rows by 024 and must still be refused), the person list staying per-leg
+  and identity-expanded, currency-scoped spending, breakdown signs with the subject-need-not-be-
+  active case, and the owed cap in both directions.
+- `055_fix_merged_contact_double_count` — merging two contacts as the same person used to double
+  the Home headline (one 100 bill split evenly showed 100 owed instead of 50). Canonical peers are
+  now grouped on the whole identity **cluster** rather than resolved one hop at a time; one-hop
+  resolution cannot collapse `a1<->a2<->a3`. Fixed in SQL **and** in `iterCanonicalPeerIds`
+  (`src/lib/people.ts`) in the same change, so both implementations agree during the migration —
+  covered by `tests/lib/people.test.ts` on the TS side.
+- `065_list_settled_map_and_payor_names` — the four read-path defects the 051–064 review found
+  (shared-bucket `payorName`, the set-wise settled map agreeing bill-for-bill with
+  `kwenta_bill_settled`, `mySplitTotal` NULL-vs-zero, `category` on statement events), plus the
+  **security** sweep and its two reproduced exploits: an authenticated caller could read another
+  user's bundle via `kwenta_build_pull_bundle` and forge rows authored by them via
+  `kwenta_push_*`. The sweep is generic on purpose — it catches the next viewer-argument function
+  someone grants, which prose could not.
+
+**Fidelity limit, stated plainly:** the shim approximates Supabase (`auth.users`, `auth.uid()`,
+the `authenticated`/`service_role` roles). Nothing verifies a JWT, and `service_role` is an
+ordinary role here. What this suite proves reliably is **logic** — predicates, aggregation, money
+arithmetic. RLS conclusions still need a check against a real branch database before shipping.
+
+The fixtures must match what the app actually writes, or a test exercises impossible states:
+local contacts use `email: ''` (not NULL), equal splits carry `split_value = 1`, settlements have
+no `settled_at` column and a NOT NULL `label`.
 
 After every edit, run `npm run build` to confirm no TypeScript errors. If the build reports `TS1127: Invalid character`, the Edit tool introduced Unicode curly quotes (`'`, `'`, `"`, `"`) into string literals. Fix with:
 
@@ -86,7 +210,7 @@ User action
   → notifySyncAfterMutation → finalizeMutationSync
   → syncRoundTrip (kwenta_sync RPC: push unsynced + pull changed)
   → Dexie updated with server response
-  → useLiveQuery re-renders UI
+  → bumpDataVersion → useServerData re-fetches → UI re-renders
 ```
 
 Realtime path (another device/user changes something):
@@ -94,8 +218,13 @@ Realtime path (another device/user changes something):
 DB trigger → kwenta_user_events → Supabase Realtime
   → realtime-events.ts processes event
   → fetch bundle RPC (bill/group/settlement)
-  → upsert into Dexie → useLiveQuery re-renders
+  → upsert into Dexie → bumpDataVersion → useServerData re-fetches
 ```
+
+That last `bumpDataVersion` is load-bearing and was missing: screens read SQL endpoints, not
+Dexie, so upserting a bundle changes nothing they observe. `notifyServerDataChanged()` fires once
+per applied unit of work — one event (`processEventSafely`), one coalesced batch, or one bulk
+catch-up — never per upserted row, since each bump costs every mounted screen a round trip.
 
 ### Cloud-First Mutations
 
@@ -232,25 +361,30 @@ Current version: **14** (v14 added optional `settlements.method` — cash/transf
 
 ### Reads: a server-sourced mirror, computed locally
 
-The UI reads from Dexie, but Dexie is a mirror of a complete server bundle (see below), so a
-read is *computed over server-sourced rows* rather than over an independent local truth.
+**Every displayed money number comes from a SQL endpoint** (migrations 052-064), fetched via
+`src/api/balances.ts` and `useServerData`. No balance is computed from Dexie any more. The local
+mirror still backs the offline cache and the descriptive rows an export needs, and it is what
+contact discovery reads — but it is never asked what something is worth.
 
-Balance arithmetic stays in TypeScript deliberately. Moving it into SQL would freeze balances
-offline — a payment recorded without a connection could not move any number until reconnect —
-which is the opposite of the goal. Keeping it local also keeps ONE implementation of money
-math, covered by `npm test`.
+The accepted trade-off is stated in rule 8: **balances do not move offline.** A queued write shows
+an explicit "unsent changes" state rather than a silently stale number.
 
-**Performance.** Pairwise balances take an optional `BalanceSnapshot` (`src/lib/people.ts`):
-one bulk load of bills, items, splits and settlements, plus memos for identity expansion and
-per-group summaries. Pass a single snapshot across a whole page. Without it, every contact
-re-scanned every bill and re-queried its items and splits, and `computePairwiseNetBreakdown`
-recomputed a whole group's balances once per contact per group — tens of thousands of
-IndexedDB round trips per page load. `computeGroupPairwiseBalances` already worked this way;
-the personal path simply never adopted it. `tests/lib/balance-snapshot.test.ts` asserts both
-that the numbers are unchanged and that query counts do not grow with contact count.
+**A row this device has not pushed is still shown.** `src/lib/staged-rows.ts` surfaces unsent
+personal bills (Bills list + Bill detail) and unsent local contacts (People). That is not a
+violation of rule 7: `synced_at === null` is a fact about THIS device, not an inference about what
+the server holds, and nothing there decides a server row is absent. It exists because the read
+migration made an offline save invisible, which users read as "it failed" — and re-entering the
+bill is exactly the duplicate path cloud-first writes were built to close. Staged rows carry no
+money: `settled` is false and pairwise nets are empty, because the server has never seen the row.
 
-Use `captureBalanceParitySnapshot` (`src/lib/balance-parity-snapshot.ts`) to diff every
-displayed balance before and after a change against real data.
+**A cached answer must look different from a fresh one.** `fetchWithCache` returns
+`fromCache`/`fetchedAt`; every screen that renders server money shows `SavedCopyNotice`
+(`src/components/common/SavedCopyNotice.tsx`) when it is serving one. An authorization failure is
+NOT served from cache at all — losing access must not read as staleness.
+
+What is left in TypeScript is pure transforms of bounded input, each with its Vitest coverage:
+`computeSplits`, `buildSuggestedPayers` (`settlement-suggestions.ts`), `buildMovementChains`
+(`settlement.ts`), `buildMoneyFlowRows` (`money-flow.ts`), `roundMoney`/`isEffectivelyZero`.
 
 ### Reads are always fresh (no pull cursor)
 
@@ -323,23 +457,36 @@ Notifications are queued in `localStorage` (`kwenta_notification_outbox_v1`) and
 
 **`resolveSharedGroupMemberFallbackIdentity(viewerUserId, profileId)`** — finds a shared group to get the display_name from group_members when the profile itself isn't accessible
 
-**`expandProfileIdsForSplitMatching(profileId, viewerUserId?)`** — returns `Set<string>` including the id, its `linked_profile_id`, all other profiles pointing to the same remote id, and (when `viewerUserId` is set) every id in the same manual peer-link cluster for that owner. Used for balance queries since split rows may use either the local or linked id. **`expandAnchorProfileIds(anchorId, viewerUserId)`** aliases the same expansion for a local anchor.
+**`expandProfileIdsForSplitMatching(profileId, viewerUserId?)`** — returns `Set<string>` including the id, its `linked_profile_id`, all other profiles pointing to the same remote id, and (when `viewerUserId` is set) every id in the same manual peer-link cluster for that owner. Split rows may use either the local or linked id. The SQL twin is `kwenta_expand_identity` (052).
 
 **`findRemoteProfileIdForLinking(input)`** — accepts UUID or email; looks up locally, then calls `kwenta_lookup_profile_id_by_email` RPC if needed
 
 **`fetchRemoteProfileIntoDexie(profileId)`** — returns `Promise<boolean>`; fetches via `kwenta_fetch_profile_for_linking` RPC and upserts into Dexie (RPC allows co-members’ rows, including `is_local`, when you share a group — see migration `029`)
 
-**`getMemberSuggestions(currentUserId, query, limit)`** — returns ranked member suggestions (local contacts + online group members) for the add-member flow
+**`listCanonicalRelatedProfileIds(meId)`** — the contact picker's phonebook: one row per real
+person, deduped across local contact, linked account and manual merges. Deliberately still LOCAL
+— a local contact exists only on the device that created it, and picking who to split with has to
+work offline because creating a bill does. Its SQL twin is `kwenta_canonical_peer_ids` (054/055);
+the two must agree, and `tests/lib/people.test.ts` plus `055`'s suite keep them honest.
 
-### Balance Computation Helpers
+### Balance Computation
 
-Balance between two people is a **plain signed sum**, per currency: (Σ pairwise bill shares, personal + each group) − (Σ payments). `+` = they owe me. Overpayment flips the sign — there is **no "general credit"** concept (removed 2026-07-11; the old clamp/credit apparatus and `computePairwiseNet`/`buildPersonalReconcilePlan`/`applyGeneralCreditToSelection`/`settleUpPersonalBills` are gone).
+Balance between two people is a **plain signed sum**, per currency: (Σ pairwise bill shares,
+personal + each group) − (Σ payments). `+` = they owe me. Overpayment flips the sign — there is
+**no "general credit"** concept (removed 2026-07-11).
 
-- `computePairwiseNetPersonalOnly(meId, otherId)` — personal-only net (non-group bills + personal payments), plain signed, per currency
-- `computePairwiseNetBreakdown(meId, otherId)` — `{ personal, groups[], total }`; `total` = personal + Σ group pairwise nets. Powers the Person page hero + "Right now" drill-down + `computePairwiseNetAllContexts`
-- `computePairwiseNetAllContexts(meId, otherId)` — the combined tab (`= breakdown.total`); People list, hero, bill status, exports all read this
-- `computePairwiseNetForBill(billId, meId, otherId)` — one bill's pairwise contribution (informational; bill "settled" status is derived from the person tab via `isPersonalBillFullySettled`, not per-bill)
-- `computePersonalNetRollup(meId)` / `computeCombinedNetRollup(meId)` — personal-only / combined (personal+group) totals across contacts; Home uses the combined one for its headline
+**This arithmetic lives in SQL only** — see the migrations table. The client fetches numbers; it
+does not derive them.
+
+**Exports are handed the screen's payload, never a recomputation.** `exportBillsToCSV`,
+`exportGroupToCSV`, `exportPersonToCSV`, `generateBillsPDF`, `generateGroupPDF`,
+`generateBillDetailPDF` and `generatePersonPDF` all take the server data the page already holds.
+An export that recomputed its own money could disagree with the screen it was exported from —
+and did, once reads became server-side. Descriptive rows (item names, per-member share matrices)
+still come from the local mirror: those are records, not derived money.
+
+**Statement:** the Person page timeline is server events (`062`) walked by `buildMoneyFlowRows`
+(`src/lib/money-flow.ts`). Its last running number must equal the hero — pinned in SQL, not TS.
 
 **Payments:** `recordPersonPayment` (`operations.ts`) writes one atomic payment; multi-context allocations share a `bundle_id` (partition the total, never duplicate). "Settle up" = a `RecordPaymentDialog` prefilled to the full balance. The Person page statement (`buildPersonMoneyFlow` + `PersonStatement.tsx`) is the running-balance timeline (the standalone `/ledger` route is retired).
 
@@ -349,17 +496,20 @@ Two ordering rules the SQL depends on: orphan detection resolves each party thro
 
 ---
 
-## Settlement Logic (`src/lib/settlement.ts`)
+## Settlement Logic
 
-**`computeGroupBalances(groupId, currentUserId)`**
-1. Sum bill payer credits and split debits
-2. Apply settled settlements (adjust net)
-3. Return per-member `{ userId, displayName, amount }` entries
-4. Also returns suggestions via `optimizeSettlements`
+Group balances are SQL (`kwenta_group_pairwise` 053, `kwenta_group_detail` 061). The settle-up
+decomposition stays in TypeScript — `buildSuggestedPayers` (`src/lib/settlement-suggestions.ts`)
+over the directed debt graph 061 returns — because it is a pure transform of bounded input, and
+porting it would create a second greedy algorithm that could disagree by a transfer.
 
-**`optimizeSettlements(balances, nameMap)`** — greedy debt simplification: matches biggest receivers with biggest payers, minimizing transfer count.
+`src/lib/settlement.ts` is now view-model types plus **`buildMovementChains`**, which turns one
+payment's bookkeeping legs into readable paths ("You → Cha → Yumi").
 
-**`bundle_id`** — multiple settlement rows (different recipients) can share one `bundle_id`, representing one logical payment. Used in bundled payments UI and history.
+**`bundle_id`** — several settlement rows (different recipients) share one `bundle_id` and render
+as ONE payment. `recipients` collapses those rows by recipient; `legs` keeps one entry per stored
+row. The two differ exactly when money moved through an intermediary, which is what
+`buildMovementChains` consumes — never collapse them together.
 
 ---
 
@@ -430,6 +580,15 @@ Migrations are numbered; there are two `021_` files. Core RPCs:
 | `047` | `kwenta_repair_orphan_settlements()` RPC — server-authoritative soft-delete of orphaned settlements, self-scoped by `auth.uid()` (superseded by `048`) |
 | `048` | `kwenta_repair_settlements(p_dry_run)` RPC — the whole repair (orphans + exact duplicates + party canonicalization) server-side, scoped to the caller's identity set, returns counts; `p_dry_run` powers the Settings preview. Also defines `kwenta_identity_ids` and `kwenta_settlement_party_id` (linked-account **and** group-roster resolution). The client no longer decides what to delete |
 | `050` | `kwenta_write_submissions` + optional `p_submission_id` on `kwenta_sync`: a replayed submission returns its original `applied` map instead of re-applying. Optional argument, so an older client still works |
+| `051` | **One source of truth for visibility.** Lifts each table's row set out of `kwenta_build_pull_bundle` into `kwenta_pull_rows_<table>(p_since, uid)`; the bundle becomes a thin wrapper over them. Pure refactor — pinned against a verbatim copy of the 049 body in `supabase/tests/sql/051_pull_row_functions.test.sql`. **Every read endpoint must select from these functions and must not inline a `WHERE` over a base table** — these predicates are the privacy boundary, and twelve endpoints with twelve copies is twelve chances to leak. Not granted to `authenticated`: they take `uid` as an argument, so a client-callable version would let any user read any other user's rows |
+| `058` | `kwenta_balances_overview` gains `groupReceive`/`groupPay` (additive keys — an older client ignores them) and `kwenta_recent_bills` replaces the Home page's Dexie bill query. The group bucket is bucketed **per group** and is not derivable from the other two buckets; see the header |
+| `059` | `kwenta_groups_with_balances` + `kwenta_personal_bills` — the Groups and Bills lists as one call each. Two deliberate departures from the TS they replace (both in the header): the participant representative is picked by lowest id rather than by Dexie iteration order, and the "shared with me" bucket is identity-routed rather than literal-id. Neither list carries a per-row `pending` flag — that is a fact about one device, so the client merges its own unsent ids |
+| `060` | `kwenta_bill_detail` — the Bill detail screen in one call (bill, items, splits with roster-first names, the viewer's own share, one row per counterparty). Adds `kwenta_bill_pairwise` (per-item FIRST match per side, so a duplicated identity is charged once) and `kwenta_bill_participant_name`. `squareOverall` comes from the PERSON tab, currency-scoped — payments are never tagged to a bill, so a per-bill net cannot reach zero on its own. The bill's settlement HISTORY list is deliberately not included; those are records, not derived money |
+| `061` | `kwenta_group_detail` — the Group detail screen in one call. Returns AGGREGATES, not suggestions: the settle-up decomposition stays in TypeScript (`buildSuggestedPayers`, rule 8), so the endpoint hands back the directed debt graph. Two balance views that are NOT the same quantity: `pairwise` (what each member owes the viewer) and `memberBalances` (each member against the group pool). Gated on ACTIVE membership — the pull bundle still delivers rows to former members by design (`024`), so absence from the bundle cannot be the check |
+| `062` | `kwenta_person_statement` — the Person page statement's EVENTS. The running-balance walk stays in TypeScript (`buildMoneyFlowRows`, rule 8). The invariant the header exists for: per currency the event deltas SUM to `kwenta_person_summary`'s total, because that total is the hero on the same screen. Personal bills take ONE split per side per item (expanded ids); group bills SUM every matching split (exact ids) — the same asymmetry as `052`/`053` |
+| `063` | `kwenta_person_summary` group legs gain `theirNet` — that person's net against the group POOL, which is NOT the leg's pairwise `net`. The Person export card asks the pool question ("receives"/"pays" in this group); with a third member the two diverge (Bob fronting 90 for three is +60 to the pool but only +30 against you). Adds server-internal `kwenta_group_pool_net` |
+| `064` | **The last client-side money.** `kwenta_{bill,group,person}_settlement_history` (payment history, replacing three Dexie scans — one of which read the entire `settlements` table), `kwenta_group_spending` (the Total Spending pie; now currency-scoped, where the client version summed every currency and labelled it with the group's), `kwenta_group_member_breakdown` and `kwenta_owed_in_group`. The last two feed the two write-path guards, which stay CLIENT-side policy on purpose — see the header: `enforceCap` is opt-in because personal overpayment is legal, and the removal check is opt-out via `force` for the `deletePerson` cascade, so an unconditional server rule would break both, and one keyed off a client-supplied flag would not be enforcement. Internal helpers `kwenta_settlement_history_build`, `kwenta_settlement_party_name`, `kwenta_is_active_group_member` are not granted to `authenticated` |
+| `065` | **Apply first — it closes a live privacy hole.** `kwenta_build_pull_bundle` was never REVOKEd from PUBLIC and the `kwenta_push_*` validators were granted to `authenticated`; all take the acting user as an argument, so any signed-in client could read another user's profile/contacts/groups/settlements and write rows attributed to them (both reproduced in the 065 suite). Also: `payorName` in the shared bill bucket resolves through `kwenta_peer_display_name` instead of a pull-rows join that can never see another account (every shared row read "Paid by Someone"); `kwenta_bills_settled_map` computes each counterparty's tab ONCE for a whole list instead of once per bill (`kwenta_bill_settled` kept unchanged as the single-bill answer); `kwenta_bill_detail.mySplitTotal` is NULL again when the viewer holds no split, not `0`; `kwenta_person_statement` events carry `category` |
 | `049` | Pull follows linked profiles: personal settlements, `bills_for_sync` / `relevant_bill_ids_for_user`, `kwenta_fetch_bill_bundle` and additive `FOR SELECT` policies route by identity, so a row that missed canonicalization still reaches the right account. **Reads only** — `user_is_participant_on_personal_bill` stays literal-id because it is the `USING` clause of the `FOR ALL` policies in `007` and the `WHERE` of the push validators in `044`; widening it granted the account behind a linked contact UPDATE/DELETE over the linker's bills. The widened read predicate is the separate `user_can_read_personal_bill`. |
 
 The `kwenta_sync` RPC is the single entry point for all sync: accepts push payload, applies it server-side, returns the pull bundle for `p_since` (the client always passes the epoch — see "Reads are always fresh"). Push validators enforce the same RLS rules the client filters apply.
@@ -491,8 +650,10 @@ The `kwenta_sync` RPC is the single entry point for all sync: accepts push paylo
 | `src/sync/sync-manager.ts` | Orchestration: debounce, backoff, backup timer |
 | `src/sync/cloud-first-mutations.ts` | `finalizeMutationSync`, pending mutation tracking |
 | `src/sync/realtime-events.ts` | Supabase Realtime subscription + event processing |
-| `src/lib/people.ts` | Profile display, linking, balance helpers, member suggestions |
-| `src/lib/settlement.ts` | Group balance computation, settlement suggestions, history |
+| `src/api/balances.ts` | Every server-computed read (balances, lists, detail screens, history) |
+| `src/hooks/useServerData.ts` | Fetch + `dataVersion` invalidation for server-backed screens |
+| `src/lib/people.ts` | Profile display, linking, identity expansion, contact discovery |
+| `src/lib/settlement.ts` | Settlement view-model types + `buildMovementChains` |
 | `src/lib/splits.ts` | Split amount computation (equal/percentage/custom) |
 | `src/lib/kwenta-notifications.ts` | Notification outbox, senders, recipient resolution |
 | `src/lib/supabase.ts` | Supabase client (PKCE auth, session persistence) |
@@ -511,3 +672,264 @@ The `kwenta_sync` RPC is the single entry point for all sync: accepts push paylo
 - Precaches all build artifacts, handles SKIP_WAITING for updates
 - App name: "Kwenta — Bill Splitter", display: `standalone`, theme: `#1f2937`
 - Installable on iOS/Android/desktop; works fully offline via Dexie + SW cache
+
+---
+
+## Feature Lifecycle (follow strictly)
+
+The bar for every change: **correct, private, and cheap to run**. This is a money app
+with a hard privacy boundary and an offline mirror — a wrong balance, a leaked row, or a
+duplicated payment is not a cosmetic bug. Three phases; the Phase-1 gate is mandatory,
+not polish.
+
+### Phase 0 — Understand & align
+
+- Read the actual code paths first and write down how they behave **today**. You cannot
+  tell whether you broke something if you never established what "working" looked like.
+  Trace the full flow: operation → builder → `commitCloudFirstWrite` → `kwenta_sync` →
+  pull bundle → Dexie → `bumpDataVersion` → `useServerData`. The first relevant file is never the whole
+  behaviour.
+- **Ask before building — even for small calls.** If a requirement is ambiguous, a
+  trade-off is open, or you have any concern about the direction, ask (`AskUserQuestion`)
+  first. A feature built in the wrong direction is the most expensive bug. When there is
+  an obvious conventional default, take it and say so.
+- Summarize before editing: current behaviour, desired behaviour, what changes, what must
+  stay, likely files, risks, assumptions, open questions.
+
+### Phase 1 — Data, privacy & cost plan (MANDATORY before writing code)
+
+For any change touching data (Dexie, SQL, sync, notifications, balances), write this out
+in chat **before implementing**:
+
+1. **Reads** — list every Dexie query and every RPC the path will make. A per-contact or
+   per-bill loop that re-queries items/splits is a design error, not a slow path: fix it
+   *now*: a screen fetches ONE scoped endpoint, and money is never aggregated per contact on
+   the client at all (rule 8).
+2. **Writes** — which builder produces the rows, and which single `commitCloudFirstWrite`
+   submits them. Cascades and multi-leg writes contribute to a `MutationRowCollector` and
+   the **parent submits once** — never a chain of separate submits with compensating
+   deletes.
+3. **Privacy** — does the change read or return rows for a user other than `auth.uid()`?
+   If a server read is involved it must select from the `kwenta_pull_rows_<table>`
+   functions (migration `051`), never an inlined `WHERE` over a base table. State which
+   identity set the rows are scoped to, and whether a linked contact widens it.
+4. **Schema** — new Dexie fields/indexes need a **new Dexie version** in `src/db/db.ts`
+   (never mutate an existing version). New SQL needs a **new migration number** with a
+   header (see rule 3), plus RLS and grants.
+5. **Cost surface** — every new RPC call, realtime subscription, notification send and
+   background timer. Prefer piggybacking `kwenta_sync`, the existing `kwenta_user_events`
+   channel and the 5-minute backup timer over adding anything new.
+6. **Blast radius** — the shared files/tables/RPCs/components touched and the adjacent
+   flows that must be regression-tested (this list feeds Phase 3). Grep for callers before
+   assuming something is unused.
+
+If the plan surfaces an open trade-off, stop and ask (Phase 0) before coding.
+
+### Phase 2 — Build
+
+Smallest complete change. Clear over clever. Follow the existing patterns; search for an
+existing helper before writing a new one. TDD is the default: failing test → implement →
+green → refactor.
+
+| Don't | Do | Canonical example |
+| --- | --- | --- |
+| write Dexie then call the cloud | build rows → `commitCloudFirstWrite` → mirror server response | `src/db/operations.ts` + `src/sync/cloud-write.ts` |
+| several submits for one logical mutation | `MutationRowCollector`, parent submits once | `deletePerson`, `deleteGroup`, `linkProfileToRemote` |
+| soft-delete because "I can't find X" locally | server decides — `kwenta_repair_settlements` | `src/lib/kwenta-data-repair.ts` |
+| fetching the whole dataset to render one screen | a scoped read endpoint; cache the rows for offline | rule 7 |
+| stamp a realtime cursor from the device clock | max **server-supplied** `created_at` of drained events | `src/sync/realtime-batch.ts` |
+| re-query bills/items/splits per contact | one scoped SQL endpoint for the screen | `kwenta_person_summary` |
+| `db.profiles.get(id)` alone in a group context | fall back to `group_members.display_name` | `getBillWithDetails` |
+| aggregating money over every bill on the client | a SQL endpoint returns the number | rule 8 |
+| a second copy of any money rule | one implementation — SQL aggregates, TS transforms | rule 8 |
+| an inlined `WHERE` over a base table in a read RPC | select from `kwenta_pull_rows_<table>` | migration `051` |
+| sending a notification during the mutation | queue in the outbox, flush after the sync confirms | `src/lib/kwenta-notifications.ts` |
+| editing a past migration | new numbered migration with a header | `supabase/migrations/` |
+| mutating an existing Dexie version | new version block in `src/db/db.ts` | v14 |
+| polling / manual refetch loops | `useServerData` + `bumpDataVersion` + the existing refresh triggers | `src/hooks/useServerData.ts` |
+
+### Phase 3 — Verify (before saying "done")
+
+1. **Compare old vs new behaviour** — confirm the feature does what was asked, edge cases
+   included. Re-derive the expected result from the requirements, not from your
+   implementation.
+2. **Regression-test the Phase-1 blast-radius list.**
+3. **Adversarial pass** — think like a malicious user, a repeated tap, a lost response, a
+   stale device, two devices at once, a half-applied bundle, an older client against a
+   newer server (and the reverse). Ask of every assumption: what if it is false? Could
+   this duplicate a payment, move a balance that was rejected, delete a real row, or show
+   one user another user's data? Add tests for the realistic ones.
+4. **Run the gates** (see Verification below). `npm test` **and** `npm run test:sql` must
+   both pass, plus `npm run build` and `npm run lint`.
+5. **Fresh-eyes review of the complete diff** as though someone else wrote it and it ships
+   today — hunt for reasons it fails, not reassurance that it looks fine.
+
+---
+
+## Coding Rules
+
+Each of these reflects a real past correction in this repo:
+
+1. **Never reintroduce write-then-sync.** The Dexie transaction must not commit before the
+   server confirms. That ordering is what minted duplicate bills.
+2. **Deletion is server-authoritative.** A device is sent only its own profile plus its own
+   local contacts, so it can never conclude that a person/bill/group does not exist. No
+   client-side soft-delete driven by a missing row — ever.
+3. **Migrations are append-only.** Next number: **`066`**. Never edit a past migration.
+   **Every migration carries its own explanatory header** — what broke, why the shape is
+   what it is, and whether it must be applied before the code that uses it ships. That
+   header is the canonical record; read it rather than trusting any summary. A signature or
+   return-type change to an existing function needs a `DROP` first plus a restated
+   revoke/grant block.
+4. **Dexie versions are append-only too** — add a version, never edit one that has shipped.
+5. **A function that names its caller must not be callable by the caller.** Client-facing
+   endpoints derive the viewer from `auth.uid()` and select from `kwenta_pull_rows_*`. Helpers
+   that take the acting user as an ARGUMENT (`p_viewer`, `uid`) are `SECURITY DEFINER`, so that
+   argument *is* the authorization decision — they must be `service_role` only. This was not
+   hypothetical: `kwenta_build_pull_bundle` was never revoked from PUBLIC (Postgres grants
+   EXECUTE to PUBLIC by default) and the `kwenta_push_*` validators were granted to
+   `authenticated`, so any signed-in user could read another user's profile, private contacts,
+   groups, memberships and settlements, and could write rows attributed to them. Fixed and
+   pinned by a generic sweep in `065`'s suite. The money helpers in 052–054/057/063 read base
+   tables rather than `kwenta_pull_rows_*`; that is safe *only* because of this rule.
+6. **Always fall back to `group_members.display_name`** when resolving a name in a group
+   context; a co-member's local contact row is not on this device by design.
+7. **Reads are scoped server endpoints; Dexie is a cache.** *(Supersedes "every pull is the
+   complete bundle", 2026-08-04.)* A screen fetches what that screen shows. **Online, the
+   server response IS the list** — the cache exists for offline display and is never
+   consulted to decide whether a row exists, so a scoped read can never be mistaken for a
+   deletion. `kwenta_sync` remains the **write** path. Still forbidden: **stamping any sync
+   cursor from the device clock** — the realtime cursor takes the max *server-supplied*
+   `created_at`. A fast clock writes a cursor into the future and then silently filters out
+   every later event, permanently.
+8. **Money math lives in SQL, once.** *(Supersedes "money math lives in TypeScript",
+   2026-08-04: in a multi-user app the local dataset was never authoritative, so a balance
+   computed from it was only as correct as the last sync.)* The dividing line — **SQL owns
+   aggregation over unbounded data** (pairwise nets, rollups, group balances, the per-bill
+   settled flag, the statement); **TypeScript owns pure transforms of bounded inputs** and
+   keeps its Vitest coverage (`computeSplits`, `settlement-suggestions.ts`,
+   `group-payments.ts`, `roundMoney`/`isEffectivelyZero`). Exactly one implementation of any
+   rule, never both. Accepted trade-off: **balances no longer move offline**, so a queued
+   write shows an explicit "includes N unsent changes" state rather than a silently stale
+   number. Do SQL money arithmetic in **integer cents** — JS `Math.round` is
+   half-up-toward-+∞, SQL `ROUND` is half-away-from-zero, and they disagree on negative
+   halves.
+9. **`activity_log` is exempt from the stored-confirmation check** and nothing else is.
+10. **Tests are mandatory and are part of the change** — never delete a test, weaken an
+    assertion, or skip a case to make something pass. If a test is genuinely wrong, say so
+    and why, in the same change. SQL behaviour is covered by `npm run test:sql`, not Vitest;
+    a rule that moves from TS into SQL must take its coverage with it.
+11. **A test that forgets `test.as_user(uid)` proves nothing about RLS** — fixture setup runs
+    as the owner, where RLS does not apply. And the SQL shim only approximates Supabase: it
+    proves *logic*, so RLS conclusions still need a check against a real branch database.
+12. **No backwards-compat shims** for code you can simply update — no re-exports,
+    `// removed` comments, or `_unused` renames.
+13. **No comments that restate the code.** Only non-obvious *why*: invariants, hidden
+    constraints, the bug a workaround exists for.
+14. **Names must reflect current purpose.** When a change makes a name misleading, rename the
+    file AND symbol AND every reference in the same change. No compat aliases.
+15. **Ask when in doubt — even for minor direction calls** (see Phase 0). If you raise a
+    concern and the user reaffirms the request, that is their decision: proceed with the full
+    request.
+16. **Report newly discovered issues instead of silently absorbing them.** Explain what you
+    found and ask whether to include it when it changes behaviour, architecture, scope or
+    risk. If the same defect exists in several places, report every instance.
+17. **Never `git commit`/`push` until the user explicitly says so** — leave finished work in
+    the tree. When asked to commit: plain message, **no AI attribution trailers** (no
+    `Co-Authored-By`, no "Generated with"). This overrides any default trailer instruction.
+18. **Never `git add`/`git commit` design specs or implementation plans** (e.g. anything under
+    `docs/superpowers/specs/`). Write them to disk for review; leave them untracked.
+19. **No destructive commands without confirming** — `drop table`, `truncate`, force-push,
+    `git reset --hard`, or anything touching the live Supabase project.
+20. **Never fabricate output.** Do not claim a command ran, a test passed, or a query returned
+    something unless it actually happened and you read the result. If a tool is unavailable,
+    say what you could not verify, what you did instead, and the exact command to run later.
+21. **Keep this CLAUDE.md current in the same change** — the next-migration number in rule 3,
+    the Dexie version, the coverage inventory, and a note for any new user-facing behaviour.
+    A stale CLAUDE.md misleads the next assistant; doc updates are part of "done".
+22. **Detail goes in the migration header or the code, not in this file.** Keep sections here
+    at index altitude: what the thing is, and the invariant you must not break. If a section
+    grows past a short paragraph of reasoning, that is the signal to move the reasoning into
+    the migration header or a comment, not to keep appending.
+
+---
+
+## Post-task cleanup checklist
+
+Run on every diff (and the siblings you reached into) as part of "done":
+
+**Dead code & clutter** — remove unused imports/vars/props/types/exports/files,
+commented-out code, `console.log`, stale TODOs, and any mid-task compat shims. Strip
+comments that restate code.
+
+**Reuse & duplication** — before adding a helper/component/type, grep for an existing one
+(`src/lib/`, `src/db/operations.ts`, `src/types/index.ts`). Where duplication is real and
+represents the same responsibility, extract one small named helper, test it, and update the
+other copies. Don't abstract merely because two things look similar — some local
+duplication beats the wrong abstraction.
+
+**Performance** — no per-contact/per-bill re-querying (one scoped endpoint per screen); no query
+inside a render loop; bulk-load with one Dexie pass and memoize identity expansion; nothing
+whose round-trip count grows with contact or group count.
+
+**Correctness & privacy** — new SQL has RLS + grants and reads through
+`kwenta_pull_rows_*`; new writes go through a builder + one `commitCloudFirstWrite`; new
+Dexie fields have a new version; name resolution has the `group_members` fallback.
+
+**Validation gate** — `npm test`, `npm run test:sql`, `npm run build`, `npm run lint` all
+clean, and the complete diff re-read.
+
+If a sweep finds nothing to remove or tighten, **say so explicitly** — silence shouldn't be
+ambiguous with "I forgot to check."
+
+---
+
+## Verification
+
+Run, in this order, and inspect each result:
+
+```bash
+npm test            # Vitest — must pass in full
+npm run test:sql    # SQL suite against a throwaway Postgres — must pass in full
+npm run build       # tsc -b + vite build (catches type errors)
+npm run lint        # ESLint
+```
+
+Then re-read the complete diff and investigate every failure, warning and surprise.
+
+Distinguish explicitly when reporting: **passed / failed / failed because of this change /
+pre-existing failure / could not be run / not applicable.** Never say "everything passed"
+when only a subset ran.
+
+`npm run build` reporting `TS1127: Invalid character` means an edit introduced Unicode curly
+quotes into a string literal — fix with the python snippet in the SQL Test Harness section.
+
+---
+
+## Final report
+
+End every non-trivial task with these sections:
+
+- **Understanding** — what the system did before, what was asked, what it does now,
+  requirements clarified, assumptions remaining.
+- **Changes made** — files and components changed, key decisions, helpers created,
+  duplication removed, migrations or schema changes.
+- **Tests** — added/updated, behaviours covered, edge and adversarial cases.
+- **Verification** — the exact commands run and the result of each.
+- **Final review** — issues found and fixed, minor cleanups, remaining concerns.
+- **Production readiness** — exactly one of *Ready for production* / *Ready for production
+  with noted limitations* / *Not ready for production*, based only on checks that actually
+  ran.
+
+Be honest about anything that could not be verified. Never guarantee that future issues are
+impossible.
+
+---
+
+## When in doubt
+
+- Read the closest sibling file's existing pattern before inventing a new one.
+- For anything touching RLS, the pull bundle, the cloud-first write path, balance
+  arithmetic, or data repair: propose the approach before editing.
+- If a memory, a summary, or this document disagrees with the code, **trust the code** and
+  update the doc in the same change.

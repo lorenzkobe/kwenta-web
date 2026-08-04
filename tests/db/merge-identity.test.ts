@@ -1,7 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { db } from '@/db/db'
 import { mergeProfileIdentity } from '@/db/operations'
-import { computeGroupPairwiseBalances } from '@/lib/settlement'
 import { findDuplicateIdentityCandidates } from '@/lib/duplicate-identity'
 import { makeGroup, makeMember, makeProfile, resetDb, seedSimpleBill } from '../helpers/db'
 
@@ -63,12 +62,23 @@ describe('mergeProfileIdentity', () => {
     expect((await db.item_splits.where('user_id').equals('jello-local').count())).toBe(0)
     expect(await findDuplicateIdentityCandidates('g1', ME)).toHaveLength(0)
 
-    // Net is preserved: ME owes 30 to the single (merged) Jello.
-    const after = await computeGroupPairwiseBalances('g1', ME)
-    const jelloEntry = after!.entries.find((e) => e.memberUserId === 'jello-real')
-    expect(jelloEntry?.net).toBe(-30) // ME owes 30 to the single Jello
-    // No leftover entry under the old local id:
-    expect(after!.entries.some((e) => e.memberUserId === 'jello-local')).toBe(false)
+    // The merge is a REWRITE, not a compute-time alias: every row that named the duplicate now
+    // names the account, so one person appears once to every member of the group and not just to
+    // the viewer who merged them. That is why "Jello pays Jello" disappears rather than being
+    // filtered out on screen.
+    const splits = await db.item_splits.toArray()
+    const byUser = new Map(splits.map((sp) => [sp.user_id, sp.computed_amount]))
+    expect(byUser.get('jello-real')).toBe(100)
+    expect(byUser.get(ME)).toBe(30)
+    expect(byUser.has('jello-local')).toBe(false)
+
+    const memberIds = (await db.group_members.where('group_id').equals('g1').toArray())
+      .filter((m) => !m.is_deleted)
+      .map((m) => m.user_id)
+    expect(memberIds).not.toContain('jello-local')
+
+    // The resulting net (ME owes the single Jello 30) is ledger arithmetic, asserted server-side
+    // in 053_money_group_net_and_breakdown.test.sql and 055's double-count fix.
   })
 
   it('refuses when the source is not a viewer-owned local contact', async () => {

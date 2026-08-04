@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback, useMemo } from 'react'
 import {
   ArrowLeft,
   Check,
@@ -18,8 +18,13 @@ import {
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { Link, useNavigate, useParams } from 'react-router-dom'
-import { useLiveQuery } from 'dexie-react-hooks'
-import { db } from '@/db/db'
+import {
+  fetchGroupDetail,
+  fetchGroupSettlementHistory,
+  fetchGroupSpending,
+  type SettlementHistoryItem,
+} from '@/api/balances'
+import { useServerData } from '@/hooks/useServerData'
 import {
   addExistingGroupMember,
   createSettlement,
@@ -34,15 +39,12 @@ import {
   type DuplicateIdentityCandidate,
 } from '@/lib/duplicate-identity'
 import {
-  computeGroupBalances,
   type GroupBalanceSummary,
-  computeGroupPairwiseBalances,
   type GroupPairwiseSummary,
-  type SettlementHistoryItem,
-  computeGroupSuggestions,
   type GroupSuggestionsSummary,
   type SuggestedPayerGroup,
 } from '@/lib/settlement'
+import { buildSuggestedPayers } from '@/lib/settlement-suggestions'
 import { useCurrentUser } from '@/hooks/useCurrentUser'
 import { cn, formatCurrency } from '@/lib/utils'
 import {
@@ -67,12 +69,12 @@ import { ConfirmDialog } from '@/components/common/ConfirmDialog'
 import { ExportImageDialog } from '@/components/export/ExportImageDialog'
 import { GroupExportCard } from '@/components/export/GroupExportCard'
 import { GroupMemberExportCard, type GroupMemberBillEntry } from '@/components/export/GroupMemberExportCard'
-import { useGroupSettlementHistory } from '@/db/hooks'
-import { listCanonicalRelatedProfileIds, resolveProfileDisplay } from '@/lib/people'
+import { loadPhonebookRows } from '@/lib/people'
 import { MemberMultiPicker } from '@/components/common/MemberMultiPicker'
 import { PayIntoGroupDialog } from '@/components/common/PayIntoGroupDialog'
 import { GroupSettleUpDialog } from '@/components/common/GroupSettleUpDialog'
 import { MemberBalancesDialog } from '@/components/common/MemberBalancesDialog'
+import { SavedCopyNotice } from '@/components/common/SavedCopyNotice'
 
 const CURRENCY_OPTIONS = [
   ['PHP', 'PHP — Philippine Peso'],
@@ -148,13 +150,7 @@ function ManageMembersDialog({
   useEffect(() => {
     let cancelled = false
     async function run() {
-      const ids = await listCanonicalRelatedProfileIds(currentUserId)
-      const rows: { id: string; displayName: string; subtitle?: string }[] = []
-      for (const id of ids) {
-        const disp = await resolveProfileDisplay(id, currentUserId)
-        rows.push({ id, displayName: disp.displayName, subtitle: disp.subtitle })
-      }
-      rows.sort((a, b) => a.displayName.localeCompare(b.displayName))
+      const rows = await loadPhonebookRows(currentUserId)
       if (!cancelled) setPhonebook(rows)
     }
     void run()
@@ -531,64 +527,36 @@ function SpendingPie({ slices }: { slices: { value: number; color: string }[] })
   )
 }
 
+/**
+ * Gross consumption per member — what each person's shares add up to, regardless of who fronted
+ * the money. Payments do not touch it, so this is not a balance.
+ *
+ * The numbers come from `kwenta_group_spending` (migration 064). The version this replaced walked
+ * every bill, item and split in the browser AND summed every currency in the group into one
+ * figure that it then labelled with the group's currency; the endpoint drops off-currency rows
+ * like every other group aggregate.
+ */
 function TotalSpendingDialog({
   groupId,
   currency,
-  members,
+  currentUserId,
   onClose,
 }: {
   groupId: string
   currency: string
-  members: MemberRow[]
+  currentUserId: string
   onClose: () => void
 }) {
-  const [rows, setRows] = useState<{ userId: string; name: string; amount: number; color: string }[]>([])
-  const [loading, setLoading] = useState(true)
+  const load = useCallback(() => fetchGroupSpending(currentUserId, groupId), [currentUserId, groupId])
+  const spending = useServerData(load, [currentUserId, groupId])
 
-  useEffect(() => {
-    async function compute() {
-      const allBills = await db.bills.where('group_id').equals(groupId).toArray()
-      const activeBills = allBills.filter((b) => !b.is_deleted)
-      const spendingByUser = new Map<string, number>()
-      for (const bill of activeBills) {
-        const allItems = await db.bill_items.where('bill_id').equals(bill.id).toArray()
-        for (const item of allItems.filter((i) => !i.is_deleted)) {
-          const allSplits = await db.item_splits.where('item_id').equals(item.id).toArray()
-          for (const split of allSplits.filter((s) => !s.is_deleted)) {
-            spendingByUser.set(split.user_id, (spendingByUser.get(split.user_id) ?? 0) + split.computed_amount)
-          }
-        }
-      }
-      const rosterRows = await db.group_members.where('group_id').equals(groupId).toArray()
-      const nameMap = new Map<string, string>()
-      for (const m of members) nameMap.set(m.userId, m.profileName)
-      for (const r of rosterRows) {
-        if (!nameMap.has(r.user_id) && r.display_name.trim()) {
-          nameMap.set(r.user_id, r.display_name.trim())
-        }
-      }
-      for (const userId of spendingByUser.keys()) {
-        if (!nameMap.has(userId)) {
-          const profile = await db.profiles.get(userId)
-          if (profile?.display_name?.trim()) nameMap.set(userId, profile.display_name.trim())
-        }
-      }
-      const sorted = [...spendingByUser.entries()]
-        .map(([userId, amount]) => ({ userId, amount: Math.round(amount * 100) / 100 }))
-        .filter((r) => r.amount > 0)
-        .sort((a, b) => b.amount - a.amount)
-      setRows(sorted.map((r, i) => ({
-        userId: r.userId,
-        name: nameMap.get(r.userId) ?? 'Unknown',
-        amount: r.amount,
-        color: SPENDING_COLORS[i % SPENDING_COLORS.length],
-      })))
-      setLoading(false)
-    }
-    void compute()
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [groupId])
-
+  const rows = (spending.data?.rows ?? []).map((r, i) => ({
+    userId: r.userId,
+    name: r.displayName,
+    amount: r.amount,
+    color: SPENDING_COLORS[i % SPENDING_COLORS.length],
+  }))
+  const loading = spending.loading && !spending.data
   const total = rows.reduce((s, r) => s + r.amount, 0)
 
   return (
@@ -602,6 +570,8 @@ function TotalSpendingDialog({
           <div className="flex justify-center py-8">
             <Loader2 className="size-5 animate-spin text-teal-800" />
           </div>
+        ) : spending.error && !spending.data ? (
+          <p className="py-8 text-center text-sm text-red-600">{spending.error}</p>
         ) : rows.length === 0 ? (
           <p className="py-8 text-center text-sm text-stone-400">No bills yet</p>
         ) : (
@@ -714,14 +684,11 @@ export function GroupDetailPage() {
   const [showAddBill, setShowAddBill] = useState(false)
   const [detailBillId, setDetailBillId] = useState<string | null>(null)
   const [editBillId, setEditBillId] = useState<string | null>(null)
-  const [balanceSummary, setBalanceSummary] = useState<GroupPairwiseSummary | null>(null)
-  const [exportBalanceSummary, setExportBalanceSummary] = useState<GroupBalanceSummary | null>(null)
   const [dupCandidates, setDupCandidates] = useState<DuplicateIdentityCandidate[]>([])
   const [dismissedDupKeys, setDismissedDupKeys] = useState<Set<string>>(new Set())
   const [mergeTarget, setMergeTarget] = useState<DuplicateIdentityCandidate | null>(null)
   const [editingSettlement, setEditingSettlement] = useState<SettlementHistoryItem | null>(null)
   const [payIntoGroupOpen, setPayIntoGroupOpen] = useState(false)
-  const [suggestions, setSuggestions] = useState<GroupSuggestionsSummary | null>(null)
   const [settleUpPayer, setSettleUpPayer] = useState<SuggestedPayerGroup | null>(null)
   const [payPerson, setPayPerson] = useState<{ memberUserId: string; name: string; owed: number } | null>(null)
   const [viewMember, setViewMember] = useState<{ userId: string; name: string; isCurrentUser: boolean } | null>(null)
@@ -767,75 +734,98 @@ export function GroupDetailPage() {
     setExportMember({ userId: member.userId, profileName: member.profileName, netBalance: net, bills: memberBills })
   }
 
-  const settlementHistory = useGroupSettlementHistory(groupId)
+  const loadPayments = useCallback(
+    () =>
+      userId && groupId
+        ? fetchGroupSettlementHistory(userId, groupId)
+        : Promise.reject(new Error('no user')),
+    [userId, groupId],
+  )
+  const payments = useServerData(userId && groupId ? loadPayments : null, [userId, groupId])
+  const settlementHistory = payments.loading && !payments.data ? undefined : (payments.data ?? [])
 
-  const group = useLiveQuery(
-    () => (groupId ? db.groups.get(groupId) : undefined),
-    [groupId],
+  // The whole screen in one call: group, roster, bills with payer names, the viewer's pairwise
+  // standing, every member's net against the POOL, and the directed debt graph. This replaced
+  // four Dexie queries plus a recompute of the entire group ledger three separate ways.
+  const loadDetail = useCallback(
+    () => (userId && groupId ? fetchGroupDetail(userId, groupId) : Promise.reject(new Error('no user'))),
+    [userId, groupId],
+  )
+  const detail = useServerData(userId && groupId ? loadDetail : null, [userId, groupId, loadDetail])
+
+  const group = useMemo(() => {
+    const g = detail.data?.group
+    if (!g) return null
+    return { id: g.id, name: g.name, currency: g.currency, created_by: g.createdBy, is_deleted: false }
+  }, [detail.data])
+
+  const members = useMemo(() => detail.data?.members, [detail.data])
+  const bills = useMemo(
+    () =>
+      detail.data?.bills.map((b) => ({
+        id: b.id,
+        title: b.title,
+        note: b.note,
+        currency: b.currency,
+        total_amount: b.totalAmount,
+        created_at: b.createdAt,
+        created_by: b.createdBy,
+        paid_by: b.paidBy,
+        group_id: b.groupId,
+        category: b.category,
+        payorName: b.payorName,
+      })),
+    [detail.data],
   )
 
-  const members = useLiveQuery(async () => {
-    if (!groupId) return []
-    const all = await db.group_members.where('group_id').equals(groupId).toArray()
-    const active = all.filter((m) => !m.is_deleted)
-    active.sort((a, b) => {
-      const aMe = a.user_id === userId
-      const bMe = b.user_id === userId
-      if (aMe !== bMe) return aMe ? -1 : 1
-      return a.joined_at.localeCompare(b.joined_at)
-    })
-    return Promise.all(
-      active.map(async (m) => {
-        const profile = await db.profiles.get(m.user_id)
-        return {
-          id: m.id,
-          userId: m.user_id,
-          profileName: profile?.display_name ?? m.display_name,
-          isCurrentUser: m.user_id === userId,
-        }
-      }),
-    )
-  }, [groupId, userId])
+  const balanceSummary = useMemo<GroupPairwiseSummary | null>(() => {
+    const d = detail.data
+    if (!d) return null
+    return {
+      groupId: d.group.id,
+      groupName: d.group.name,
+      currency: d.group.currency,
+      entries: d.pairwise,
+      totalToReceive: d.totalToReceive,
+      totalToPay: d.totalToPay,
+    }
+  }, [detail.data])
 
-  const bills = useLiveQuery(async () => {
-    if (!groupId) return []
-    const all = await db.bills.where('group_id').equals(groupId).toArray()
-    const active = all.filter((b) => !b.is_deleted)
-    active.sort((a, b) => b.created_at.localeCompare(a.created_at))
-    return Promise.all(
-      active.map(async (bill) => {
-        const payor = await db.profiles.get(bill.paid_by)
-        let payorName = payor?.display_name
-        if (!payorName) {
-          const member = await db.group_members
-            .where('[group_id+user_id]')
-            .equals([groupId, bill.paid_by])
-            .first()
-          payorName = member?.display_name
-        }
-        return { ...bill, payorName: payorName ?? 'Unknown' }
-      }),
-    )
-  }, [groupId])
+  const exportBalanceSummary = useMemo<GroupBalanceSummary | null>(() => {
+    const d = detail.data
+    if (!d) return null
+    return {
+      groupId: d.group.id,
+      groupName: d.group.name,
+      currency: d.group.currency,
+      balances: d.memberBalances,
+      totalToReceive: d.totalToReceive,
+      totalToPay: d.totalToPay,
+    }
+  }, [detail.data])
+
+  // The decomposition stays here on purpose: it is a pure transform of a bounded input and it
+  // has Vitest coverage (CLAUDE.md rule 8). Porting it to SQL would mean two greedy algorithms
+  // that can disagree by a transfer, and therefore two different "who pays whom" screens.
+  const suggestions = useMemo<GroupSuggestionsSummary | null>(() => {
+    const d = detail.data
+    if (!d) return null
+    const nameOf = (id: string) =>
+      d.memberBalances.find((m) => m.userId === id)?.displayName ??
+      d.members.find((m) => m.userId === id)?.profileName ??
+      'Unknown'
+    const payers = buildSuggestedPayers(d.rawDebts, nameOf)
+    return { groupId: d.group.id, groupName: d.group.name, currency: d.group.currency, payers }
+  }, [detail.data])
 
   const membershipLoaded = Array.isArray(members)
-  const groupLoading = group === undefined
+  const groupLoading = !userId || (detail.loading && !detail.data)
   const membersLoading = members === undefined
   const billsLoading = bills === undefined
   const currentUserHasActiveMembership = Boolean(
     userId && (members ?? []).some((m) => m.userId === userId),
   )
   const isGroupCreator = Boolean(userId && group && group.created_by === userId)
-
-  async function refreshBalances() {
-    if (!groupId || !userId) return
-    const updated = await computeGroupPairwiseBalances(groupId, userId)
-    setBalanceSummary(updated)
-    const exportUpdated = await computeGroupBalances(groupId, userId)
-    setExportBalanceSummary(exportUpdated)
-    const updatedSuggestions = await computeGroupSuggestions(groupId)
-    setSuggestions(updatedSuggestions)
-  }
 
   async function refreshDupCandidates() {
     if (!groupId || !userId) {
@@ -845,11 +835,17 @@ export function GroupDetailPage() {
     setDupCandidates(await findDuplicateIdentityCandidates(groupId, userId))
   }
 
+  // Keyed on the roster's CONTENT, never on `members` itself: that array is memoised on
+  // `detail.data`, so it gets a fresh identity from every fetch. Depending on the identity — and
+  // calling `detail.refresh()` from inside the effect, which `useServerData` already does on
+  // mount — made the effect re-trigger the fetch that re-triggered the effect, refetching
+  // `kwenta_group_detail` for as long as the page stayed open.
+  const rosterKey = useMemo(() => (members ?? []).map((m) => m.userId).join(','), [members])
+
   useEffect(() => {
-    refreshBalances()
-    refreshDupCandidates()
+    void refreshDupCandidates()
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [groupId, userId, bills, members])
+  }, [groupId, userId, rosterKey])
 
   const dupKey = (c: DuplicateIdentityCandidate) => `${c.localId}->${c.targetId}`
   const visibleDupCandidates = dupCandidates.filter((c) => !dismissedDupKeys.has(dupKey(c)))
@@ -859,7 +855,7 @@ export function GroupDetailPage() {
     await mergeProfileIdentity(mergeTarget.localId, mergeTarget.targetId, userId)
     setMergeTarget(null)
     await refreshDupCandidates()
-    await refreshBalances()
+    detail.refresh()
   }
 
   async function executeDeleteGroup() {
@@ -895,9 +891,24 @@ export function GroupDetailPage() {
             Back to groups
           </Link>
         </Button>
-        <div className="rounded-3xl border border-stone-200 bg-white p-5 shadow-sm">
-          <p className="text-center text-sm text-stone-500">Group not found</p>
-        </div>
+        {detail.error ? (
+          // The server returns null for "deleted, or you are not a member" — both are genuinely
+          // "not found" to this user. A failed REQUEST is neither, and must not claim to be.
+          <div
+            role="alert"
+            className="rounded-3xl border border-amber-200 bg-amber-50 p-5 text-sm text-amber-950 shadow-sm"
+          >
+            <p className="font-medium">Could not load this group</p>
+            <p className="mt-1 text-xs text-amber-900/80">{detail.error}</p>
+            <Button size="sm" variant="ghost" className="mt-3 rounded-full text-amber-900" onClick={detail.refresh}>
+              Try again
+            </Button>
+          </div>
+        ) : (
+          <div className="rounded-3xl border border-stone-200 bg-white p-5 shadow-sm">
+            <p className="text-center text-sm text-stone-500">Group not found</p>
+          </div>
+        )}
       </div>
     )
   }
@@ -917,6 +928,7 @@ export function GroupDetailPage() {
   return (
     <>
       <div className="space-y-5">
+        {detail.fromCache && detail.data && <SavedCopyNotice fetchedAt={detail.fetchedAt} />}
         <div className="flex items-center justify-between gap-2">
           <Button asChild variant="ghost" size="sm" className="rounded-full gap-1">
             <Link to="/app/groups">
@@ -1293,7 +1305,7 @@ export function GroupDetailPage() {
           initialCurrency={group.currency}
           currentUserId={userId}
           onClose={() => setShowEditGroup(false)}
-          onSaved={refreshBalances}
+          onSaved={detail.refresh}
         />
       )}
 
@@ -1305,7 +1317,7 @@ export function GroupDetailPage() {
           creatorUserId={group?.created_by ?? ''}
           isCreator={isGroupCreator}
           onClose={() => setShowManage(false)}
-          onChanged={refreshBalances}
+          onChanged={detail.refresh}
         />
       )}
 
@@ -1319,11 +1331,11 @@ export function GroupDetailPage() {
         />
       )}
 
-      {showTotalSpending && groupId && group && (
+      {showTotalSpending && groupId && group && userId && (
         <TotalSpendingDialog
           groupId={groupId}
           currency={group.currency}
-          members={members ?? []}
+          currentUserId={userId}
           onClose={() => setShowTotalSpending(false)}
         />
       )}
@@ -1333,7 +1345,7 @@ export function GroupDetailPage() {
           item={editingSettlement}
           onClose={() => setEditingSettlement(null)}
           onSaved={() => {
-            void refreshBalances()
+            void detail.refresh()
           }}
         />
       )}
@@ -1350,7 +1362,7 @@ export function GroupDetailPage() {
             name: m.profileName,
             isCurrentUser: m.isCurrentUser,
           }))}
-          onRecorded={() => void refreshBalances()}
+          onRecorded={() => void detail.refresh()}
         />
       )}
 
@@ -1362,18 +1374,21 @@ export function GroupDetailPage() {
           currency={group.currency}
           markedBy={userId}
           payer={settleUpPayer}
-          onRecorded={() => void refreshBalances()}
+          onRecorded={() => void detail.refresh()}
           onUsePayInto={() => { setSettleUpPayer(null); setPayIntoGroupOpen(true) }}
         />
       )}
 
-      <MemberBalancesDialog
-        open={viewMember !== null}
-        onOpenChange={(o) => !o && setViewMember(null)}
-        groupId={groupId!}
-        currency={group.currency}
-        member={viewMember}
-      />
+      {userId && (
+        <MemberBalancesDialog
+          open={viewMember !== null}
+          onOpenChange={(o) => !o && setViewMember(null)}
+          groupId={groupId!}
+          currency={group.currency}
+          currentUserId={userId}
+          member={viewMember}
+        />
+      )}
 
       {payPerson && userId && (
         <RecordSettlementDialog
@@ -1405,7 +1420,7 @@ export function GroupDetailPage() {
           }}
           onRecorded={() => {
             setPayPerson(null)
-            void refreshBalances()
+            void detail.refresh()
           }}
         />
       )}
@@ -1438,8 +1453,19 @@ export function GroupDetailPage() {
       {exportOpen && exportBalanceSummary && balanceSummary && (
         <ExportImageDialog
           filename={makeExportFilename(group.name, 'png').replace('.png', '')}
-          onExportPDF={userId ? () => generateGroupPDF(group.id, userId) : undefined}
-          onExportCSV={userId ? () => exportGroupToCSV(group.id, userId) : undefined}
+          // Gated on the payment history having actually loaded, not just on the group. `?? []`
+          // would emit a file whose Payments section is empty because the fetch had not finished
+          // — indistinguishable from a group where nobody has ever settled up.
+          onExportPDF={
+            userId && detail.data && settlementHistory
+              ? () => generateGroupPDF(detail.data!, settlementHistory)
+              : undefined
+          }
+          onExportCSV={
+            userId && detail.data && settlementHistory
+              ? () => exportGroupToCSV(detail.data!, settlementHistory)
+              : undefined
+          }
           onClose={() => setExportOpen(false)}
         >
           <GroupExportCard
@@ -1485,7 +1511,7 @@ export function GroupDetailPage() {
           billId={detailBillId}
           currentUserId={userId}
           onClose={() => setDetailBillId(null)}
-          onUpdated={refreshBalances}
+          onUpdated={detail.refresh}
           onEdit={(id) => {
             setDetailBillId(null)
             setEditBillId(id)
@@ -1509,7 +1535,7 @@ export function GroupDetailPage() {
             setShowAddBill(false)
             setEditBillId(null)
           }}
-          onSaved={refreshBalances}
+          onSaved={detail.refresh}
         />
       )}
     </>

@@ -1,15 +1,13 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback, useMemo } from 'react'
 import { Link } from 'react-router-dom'
 import { toast } from 'sonner'
 import { BookUser, ChevronRight, Loader2, Plus, UserPlus } from 'lucide-react'
 import { useLiveQuery } from 'dexie-react-hooks'
-import {
-  computePairwiseNetAllContexts,
-  formatPairwiseSummary,
-  listCanonicalRelatedProfileIds,
-  loadBalanceSnapshot,
-  resolveProfileDisplay,
-} from '@/lib/people'
+import { fetchContactsWithBalances, totalsToMap, type ContactBalanceRow } from '@/api/balances'
+import { useServerData } from '@/hooks/useServerData'
+import { loadStagedContactRows } from '@/lib/staged-rows'
+import { formatPairwiseSummary } from '@/lib/people'
+import { SavedCopyNotice } from '@/components/common/SavedCopyNotice'
 import { createLocalProfile } from '@/db/operations'
 import { useCurrentUser } from '@/hooks/useCurrentUser'
 import { cn } from '@/lib/utils'
@@ -25,34 +23,39 @@ export function PeoplePage() {
   const [duplicateNotice, setDuplicateNotice] = useState<string | null>(null)
   const [balanceFilter, setBalanceFilter] = useState<'with_balance' | 'all'>('with_balance')
 
-  const rows = useLiveQuery(async () => {
-    if (!userId) return []
-    // One bulk load shared across contact discovery AND every contact's balance. Previously
-    // each contact re-scanned every bill and re-queried its items and splits, which is what
-    // made this page slow to open.
-    const snapshot = await loadBalanceSnapshot()
-    const ids = await listCanonicalRelatedProfileIds(userId, snapshot)
-    const out: {
-      id: string
-      displayName: string
-      subtitle?: string
-      primaryLabel: string
-      tone: 'balanced' | 'receive' | 'pay'
-      lines: string[]
-    }[] = []
-    for (const id of ids) {
-      const net = await computePairwiseNetAllContexts(userId, id, snapshot)
-      const disp = await resolveProfileDisplay(id, userId)
-      const { lines, primaryLabel, tone } = formatPairwiseSummary(net)
-      out.push({
-        id,
-        displayName: disp.displayName,
-        subtitle: disp.subtitle,
+  // The server returns one row per real person with their combined standing already computed.
+  // This used to load every bill and settlement in the database and then recompute a pairwise
+  // net per contact against that snapshot.
+  const fetchContacts = useCallback(
+    () => (userId ? fetchContactsWithBalances(userId) : Promise.reject(new Error('no user'))),
+    [userId],
+  )
+  const contacts = useServerData(userId ? fetchContacts : null, [userId, fetchContacts])
+
+  // Contacts created offline exist only here until they are pushed. The server list cannot
+  // contain them, so without this a contact added offline was invisible while the Dexie duplicate
+  // guard still refused to add them again — "already exists" for someone not on the screen.
+  const stagedContacts = useLiveQuery(
+    async () => (userId ? loadStagedContactRows(userId) : []),
+    [userId],
+    [] as ContactBalanceRow[],
+  )
+
+  const rows = useMemo(() => {
+    if (!contacts.data) return undefined
+    const confirmed = new Set(contacts.data.map((row) => row.peerId))
+    const merged = [...stagedContacts.filter((c) => !confirmed.has(c.peerId)), ...contacts.data]
+    const out = merged.map((row) => {
+      const { lines, primaryLabel, tone } = formatPairwiseSummary(totalsToMap(row.net))
+      return {
+        id: row.peerId,
+        displayName: row.displayName,
+        subtitle: row.subtitle,
         primaryLabel,
         tone,
         lines,
-      })
-    }
+      }
+    })
     out.sort((a, b) => {
       const aHasBalance = a.tone !== 'balanced'
       const bHasBalance = b.tone !== 'balanced'
@@ -60,7 +63,7 @@ export function PeoplePage() {
       return a.displayName.localeCompare(b.displayName)
     })
     return out
-  }, [userId])
+  }, [contacts.data, stagedContacts])
 
   useEffect(() => {
     if (!duplicateNotice) return
@@ -181,7 +184,27 @@ export function PeoplePage() {
         </div>
       )}
 
-      {rowsLoading && !showAdd ? (
+      {contacts.fromCache && contacts.data && <SavedCopyNotice fetchedAt={contacts.fetchedAt} />}
+
+      {contacts.error && !contacts.data ? (
+        // `rowsLoading` is `rows === undefined`, which a failed fetch never clears — without this
+        // branch the page rendered its skeletons forever, with no message and no way to retry.
+        <div
+          role="alert"
+          className="rounded-3xl border border-amber-200 bg-amber-50 p-5 text-sm text-amber-950 shadow-sm"
+        >
+          <p className="font-medium">People unavailable</p>
+          <p className="mt-1 text-xs text-amber-900/80">{contacts.error}</p>
+          <Button
+            size="sm"
+            variant="ghost"
+            className="mt-3 rounded-full text-amber-900"
+            onClick={contacts.refresh}
+          >
+            Try again
+          </Button>
+        </div>
+      ) : rowsLoading && !showAdd ? (
         <div className="space-y-2">
           {Array.from({ length: 4 }).map((_, i) => (
             <div

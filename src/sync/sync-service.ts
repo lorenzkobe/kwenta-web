@@ -314,8 +314,7 @@ export async function isEntityUnsyncedForActor(
   entityId: string | null | undefined,
   actorUserId: string,
 ): Promise<boolean> {
-  const isUnsynced = (r: { synced_at: string | null; updated_at: string } | undefined) =>
-    !!r && (r.synced_at === null || r.updated_at > r.synced_at)
+  const isUnsynced = isUnsyncedRow
   // No entity to scope to: the sync already returned no transport error, and the actor-global
   // check would flag this mutation for any unrelated unsynced row. Treat as not-stuck rather than
   // raise a false conflict; genuinely dropped writes are still caught by the per-row push retry.
@@ -364,10 +363,7 @@ export async function hasUnsyncedLocalDataForUser(userId: string): Promise<boole
   for (const tableName of TABLE_NAMES) {
     const table = getLocalTable(tableName)
     const allRecords = await table.toArray()
-    const unsyncedRaw = allRecords.filter((r: SyncFields) => {
-      if (r.synced_at === null) return true
-      return r.updated_at > r.synced_at
-    })
+    const unsyncedRaw = allRecords.filter((r: SyncFields) => isUnsyncedRow(r))
     const unsynced = filterUnsyncedForPush(tableName, unsyncedRaw, userId, ctx)
     if (unsynced.length > 0) return true
   }
@@ -375,8 +371,20 @@ export async function hasUnsyncedLocalDataForUser(userId: string): Promise<boole
 }
 
 /**
+ * Has this row not reached the server yet — never pushed, or edited since it last was?
+ *
+ * One definition, because the answer drives both what gets pushed and what the UI flags as
+ * unsent; two copies that drift would show a confirmed badge on a queued write.
+ */
+export function isUnsyncedRow(
+  r: { synced_at: string | null; updated_at: string } | undefined | null,
+): boolean {
+  if (!r) return false
+  return r.synced_at === null || r.updated_at > r.synced_at
+}
+
+/**
  * Push locally unsynced records the current user may write under RLS.
- * A record is unsynced if synced_at is null OR updated_at > synced_at.
  */
 export async function pushChanges(): Promise<{ pushed: number; errors: string[] }> {
   const startedAt = performance.now()

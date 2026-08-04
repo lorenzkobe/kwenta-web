@@ -43,7 +43,8 @@ import {
   type PinnedSplits,
 } from '@/lib/bill-split-form'
 import { BILL_BACK_QUERY, parseSafeAppPath, withBillBackQuery } from '@/lib/bill-navigation'
-import { computePairwiseNetAllContexts, listCanonicalRelatedProfileIds } from '@/lib/people'
+import { listCanonicalRelatedProfileIds } from '@/lib/people'
+import { fetchPersonSummary } from '@/api/balances'
 import { normalizeAmountInput, stripLeadingZerosAmount } from '@/lib/amount-input'
 import { cn, formatCurrency } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
@@ -730,9 +731,14 @@ export function AddBillPage() {
         const payerId = input.paidBy
         if (payerId && payerId !== userId) {
           try {
-            const globalByCurrency = await computePairwiseNetAllContexts(userId, payerId)
-            const gNet = globalByCurrency.get(input.currency) ?? 0
-            if (gNet > 0.005) {
+            const { data: summary, fromCache } = await fetchPersonSummary(userId, payerId)
+            // A cached answer predates the bill that was just written, so it would state a
+            // balance that is knowably wrong. This toast is a courtesy, not a screen — saying
+            // nothing is the right degradation.
+            const gNet = fromCache ? null : (summary.total[input.currency] ?? 0)
+            if (gNet === null) {
+              /* stale answer — no claim */
+            } else if (gNet > 0.005) {
               toast.info(
                 `This bill is offset — ${payorDisplayName} still owes you ${formatCurrency(gNet, input.currency)} overall`,
               )

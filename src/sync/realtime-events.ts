@@ -16,6 +16,7 @@ import type {
   ProfilePeerLink,
 } from '@/types'
 import { pullChanges, syncRoundTrip } from '@/sync/sync-service'
+import { useAppStore } from '@/store/app-store'
 import { latestEventCreatedAt, planRealtimeBatch, type UserEventRow } from '@/sync/realtime-batch'
 type ReconcileBundle = Partial<
   Record<
@@ -34,6 +35,21 @@ type ReconcileBundle = Partial<
 
 const LAST_SEEN_EVENT_KEY = (userId: string) => `kwenta_last_seen_user_event:${userId}`
 const MAX_RECENT_EVENT_IDS = 1024
+
+/**
+ * Tell every mounted server-backed screen to re-fetch.
+ *
+ * Screens read from SQL endpoints, not Dexie, so upserting a bundle into the mirror changes
+ * nothing they observe — `dataVersion` is their only invalidation signal. Without this the whole
+ * realtime path was inert for reads: another device's payment landed in Dexie and the open Person
+ * page kept showing the pre-payment hero until the 5-minute backup timer fired.
+ *
+ * Called once per applied unit of work (one event, or one coalesced batch), never per upserted
+ * row — each bump costs every mounted screen a round trip.
+ */
+function notifyServerDataChanged(): void {
+  useAppStore.getState().bumpDataVersion()
+}
 
 function isRecord(v: unknown): v is Record<string, unknown> {
   return Boolean(v) && typeof v === 'object'
@@ -306,6 +322,7 @@ async function catchUpSince(userId: string, sinceIso: string, onEvent: (ev: User
     // already advances from the event rows themselves.
     const latestCreatedAt = latestEventCreatedAt(events)
     if (latestCreatedAt) localStorage.setItem(LAST_SEEN_EVENT_KEY(userId), latestCreatedAt)
+    notifyServerDataChanged()
     return
   }
 
@@ -349,6 +366,7 @@ export function startRealtimeForUser(userId: string): () => void {
       })
     } finally {
       localStorage.setItem(LAST_SEEN_EVENT_KEY(userId), ev.created_at)
+      notifyServerDataChanged()
     }
   }
 
@@ -399,6 +417,10 @@ export function startRealtimeForUser(userId: string): () => void {
       if (plan.latestCreatedAt) {
         localStorage.setItem(LAST_SEEN_EVENT_KEY(userId), plan.latestCreatedAt)
       }
+      // Only the coalesced branch: the `<= 1` branch above delegates to processEventSafely,
+      // which bumps for itself. Bumping in both would cost every mounted screen two round trips
+      // for one event.
+      notifyServerDataChanged()
     }
   }
 

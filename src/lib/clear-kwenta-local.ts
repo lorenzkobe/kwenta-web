@@ -1,5 +1,6 @@
 import { db } from '@/db/db'
 import { useAppStore } from '@/store/app-store'
+import { clearApiCache } from '@/api/cache'
 import { resetAutoRepairGuard } from '@/lib/kwenta-data-repair'
 import {
   KWENTA_LAST_REFRESH_STORAGE_KEY,
@@ -31,6 +32,9 @@ export async function clearKwentaLocalData(): Promise<void> {
   // upgraded device cannot inherit the previous user's marker.
   localStorage.removeItem(KWENTA_LEGACY_LAST_PULL_STORAGE_KEY)
   useAppStore.getState().setInitialCloudHydration('pending')
+  // Cached RPC responses hold balances and contact names. Leaving them would show the previous
+  // account's money to whoever signs in next on this device.
+  clearApiCache()
   // Module state, not storage — it outlives the account that set it. Without this the next
   // account to sign in on this tab (no page reload) is refused its own once-per-session repair.
   resetAutoRepairGuard()

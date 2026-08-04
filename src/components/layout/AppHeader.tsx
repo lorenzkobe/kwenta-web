@@ -1,6 +1,5 @@
 import {
   BookUser,
-  CloudUpload,
   Home,
   Layers3,
   ReceiptText,
@@ -8,20 +7,15 @@ import {
   UserRound,
   Users,
   Wallet,
-  WifiOff,
-  Wifi,
 } from 'lucide-react'
-import { useEffect, useState } from 'react'
-import { useLiveQuery } from 'dexie-react-hooks'
+import { useState } from 'react'
 import { Link, NavLink } from 'react-router-dom'
 import { useAuth } from '@/hooks/useAuth'
 import { useCurrentUser } from '@/hooks/useCurrentUser'
-import { hasUnsyncedLocalDataForUser } from '@/sync/sync-service'
-import { useAppStore } from '@/store/app-store'
-import { requestSyncNow } from '@/sync/sync-manager'
 import { cn } from '@/lib/utils'
 import { NotificationsBell } from '@/components/notifications/NotificationsBell'
 import { GlobalSearchSheet } from '@/components/common/GlobalSearchSheet'
+import { RefreshButton } from '@/components/common/RefreshButton'
 import { Button } from '@/components/ui/button'
 
 const baseNavItems = [
@@ -36,24 +30,7 @@ const adminNavItem = { to: '/app/users', icon: Users, label: 'Users', end: false
 export function AppHeader() {
   const { userType } = useAuth()
   const navItems = userType === 'admin' ? [...baseNavItems, adminNavItem] : [...baseNavItems]
-  const isOnline = useAppStore((s) => s.isOnline)
-  const syncStatus = useAppStore((s) => s.syncStatus)
-  const syncRetryAt = useAppStore((s) => s.syncRetryAt)
-  const pullStale = useAppStore((s) => s.pullStale)
   const { userId } = useCurrentUser()
-  const [nowMs, setNowMs] = useState(() => Date.now())
-  const waitingToSync = useLiveQuery(
-    async () => (userId ? hasUnsyncedLocalDataForUser(userId) : false),
-    [userId],
-  )
-  useEffect(() => {
-    if (!syncRetryAt) return
-    const id = window.setInterval(() => setNowMs(Date.now()), 1000)
-    return () => window.clearInterval(id)
-  }, [syncRetryAt])
-
-  const retrySeconds = syncRetryAt ? Math.max(0, Math.ceil((syncRetryAt - nowMs) / 1000)) : null
-  const retryLabel = retrySeconds !== null ? `Retry in ~${retrySeconds}s` : null
   const [searchOpen, setSearchOpen] = useState(false)
 
   return (
@@ -102,61 +79,7 @@ export function AppHeader() {
           >
             <Search className="size-4" />
           </Button>
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            disabled={!isOnline || syncStatus === 'syncing'}
-            onClick={() => requestSyncNow()}
-            title={
-              !isOnline
-                ? "You're offline — connect to sync your data"
-                : syncStatus === 'syncing'
-                  ? 'Sync in progress…'
-                  : syncStatus === 'error'
-                    ? retryLabel
-                      ? `Sync failed — ${retryLabel.toLowerCase()} (tap to retry now)`
-                      : 'Sync failed — tap to retry'
-                    : waitingToSync === true
-                      ? 'Waiting to sync — tap to sync now'
-                      : pullStale
-                        ? 'Some data may be out of date — tap to refresh'
-                        : 'Tap to sync now'
-            }
-            className="h-auto max-w-44 gap-0 rounded-full border-stone-200/80 bg-stone-50 px-3 py-2 text-xs font-medium text-stone-600 hover:bg-stone-100 disabled:opacity-90 sm:max-w-none"
-          >
-            {!isOnline ? (
-              <>
-                <WifiOff className="mr-1 size-3 shrink-0" />
-                <span className="truncate">Offline</span>
-              </>
-            ) : syncStatus === 'syncing' ? (
-              <>
-                <Wifi className="mr-1 size-3 shrink-0" />
-                <span className="truncate">Syncing…</span>
-              </>
-            ) : syncStatus === 'error' ? (
-              <>
-                <Wifi className="mr-1 size-3 shrink-0 text-amber-600" />
-                <span className="truncate">{retryLabel ?? "Couldn't sync"}</span>
-              </>
-            ) : waitingToSync === true ? (
-              <>
-                <CloudUpload className="mr-1 size-3 shrink-0 text-amber-700" />
-                <span className="truncate">Waiting to sync</span>
-              </>
-            ) : pullStale ? (
-              <>
-                <Wifi className="mr-1 size-3 shrink-0 text-amber-600" />
-                <span className="truncate">Data may be behind</span>
-              </>
-            ) : (
-              <>
-                <Wifi className="mr-1 size-3 shrink-0" />
-                <span className="truncate">Online</span>
-              </>
-            )}
-          </Button>
+          <RefreshButton showLastUpdated />
           {userId ? <NotificationsBell userId={userId} /> : null}
           <Button asChild size="icon-sm" className="rounded-full">
             <Link to="/app/settings">

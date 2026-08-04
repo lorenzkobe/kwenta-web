@@ -1,59 +1,55 @@
-import { useEffect, useState } from 'react'
+import { useCallback } from 'react'
 import { ArrowDownLeft, ArrowUpRight, X } from 'lucide-react'
 import { Button } from '@/components/ui/button'
-import {
-  computeMemberPaymentBreakdown,
-  type MemberPaymentBreakdown,
-} from '@/lib/settlement'
+import { fetchGroupMemberBreakdown } from '@/api/balances'
+import { useServerData } from '@/hooks/useServerData'
 import { formatCurrency } from '@/lib/utils'
 
 /**
- * Read-only view of a single member's pending balances within a group: who they still
- * pay and who still pays them. Computed from the member's own perspective via
- * computeMemberPaymentBreakdown, so the numbers match what that member sees.
+ * Read-only view of a single member's pending balances within a group: who they still pay and who
+ * still pays them, from that member's own perspective (migration 064), so the numbers match what
+ * that member sees on their own device.
  */
 export function MemberBalancesDialog({
   open,
   onOpenChange,
   groupId,
   currency,
+  currentUserId,
   member,
 }: {
   open: boolean
   onOpenChange: (open: boolean) => void
   groupId: string
   currency: string
+  currentUserId: string
   member: { userId: string; name: string; isCurrentUser: boolean } | null
 }) {
-  // Keyed by the member id the data was loaded for, so a stale result from a
-  // previously-opened member never renders against the current one. State is only
-  // ever set inside the async callback (never synchronously in the effect body).
-  const [state, setState] = useState<{ key: string; data: MemberPaymentBreakdown | null }>({
-    key: '',
-    data: null,
-  })
-
-  useEffect(() => {
-    if (!open || !member) return
-    let cancelled = false
-    const key = member.userId
-    void computeMemberPaymentBreakdown(groupId, key).then((result) => {
-      if (!cancelled) setState({ key, data: result })
-    })
-    return () => {
-      cancelled = true
-    }
-  }, [open, groupId, member])
+  const memberId = member?.userId ?? null
+  const load = useCallback(
+    () => fetchGroupMemberBreakdown(currentUserId, groupId, memberId!),
+    [currentUserId, groupId, memberId],
+  )
+  const state = useServerData(open && memberId ? load : null, [
+    open,
+    groupId,
+    memberId,
+    currentUserId,
+  ])
 
   if (!open || !member) return null
 
-  const ready = state.key === member.userId
-  const breakdown = ready ? state.data : null
-  const loading = !ready
+  // The payload names its own subject, so a result still in flight for a newly-selected member
+  // can never be rendered under that member's heading.
+  const breakdown =
+    state.data && state.data.memberUserId === member.userId ? state.data : null
+  const loading = breakdown === null && state.error === null
   const possessive = member.isCurrentUser ? 'Your' : `${member.name}'s`
   const subject = member.isCurrentUser ? 'You' : member.name
+  // Only a breakdown the server actually produced can support "all settled up". A refusal now
+  // arrives as `state.error` (ServerDeclinedError) and renders as an error, not as a zero.
   const hasNothing =
-    ready && (breakdown === null || (breakdown.pays.length === 0 && breakdown.receives.length === 0))
+    breakdown !== null && breakdown.pays.length === 0 && breakdown.receives.length === 0
 
   return (
     <div className="fixed inset-0 z-60 flex items-end justify-center p-4 sm:items-center">
@@ -87,6 +83,10 @@ export function MemberBalancesDialog({
                 <div key={i} className="h-10 animate-pulse rounded-xl bg-stone-100" />
               ))}
             </div>
+          )}
+
+          {state.error && !breakdown && (
+            <p className="py-6 text-center text-sm text-red-600">{state.error}</p>
           )}
 
           {hasNothing && (

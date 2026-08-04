@@ -1,18 +1,13 @@
-import { useMemo, useState } from 'react'
+import { useCallback, useMemo, useState } from 'react'
 import { Plus, ReceiptText, Share2, Trash2, Users } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { toast } from 'sonner'
 import { useLiveQuery } from 'dexie-react-hooks'
-import { db } from '@/db/db'
 import { deleteBill } from '@/db/operations'
-import { isPersonalBillFullySettled } from '@/lib/personal-bill-status'
-import {
-  dedupeParticipantIds,
-  expandProfileIdsForSplitMatching,
-  fetchRemoteProfileIntoDexie,
-  loadBalanceSnapshot,
-  resolveProfileDisplay,
-} from '@/lib/people'
+import { fetchPersonalBills, type PersonalBillRow } from '@/api/balances'
+import { useServerData } from '@/hooks/useServerData'
+import { loadStagedPersonalBillRows } from '@/lib/staged-rows'
+import { SavedCopyNotice } from '@/components/common/SavedCopyNotice'
 import { useCurrentUser } from '@/hooks/useCurrentUser'
 import { formatCurrency, timeAgo, cn } from '@/lib/utils'
 import {
@@ -24,7 +19,6 @@ import {
 } from '@/lib/bill-categories'
 import { exportBillsToCSV } from '@/lib/export-csv'
 import { generateBillsPDF } from '@/lib/export-pdf'
-import type { Bill } from '@/types'
 import { Button } from '@/components/ui/button'
 import { ConfirmDialog } from '@/components/common/ConfirmDialog'
 import { ExportDataDialog } from '@/components/export/ExportDataDialog'
@@ -39,21 +33,8 @@ import {
 type BillFilter = 'all' | 'settled' | 'unsettled'
 type BillSort = 'date_desc' | 'date_asc' | 'title_asc' | 'title_desc'
 
-type EnrichedBill = {
-  id: string
-  title: string
-  currency: string
-  total_amount: number
-  created_at: string
-  created_by: string
-  payorName?: string
-  itemCount: number
-  settled: boolean
-  /** Written offline and not yet confirmed by the server. */
-  pending: boolean
-  category: string | null
-  participantPills: { id: string; label: string }[]
-}
+/** A server row plus one fact only this device knows: whether the write is still queued. */
+type EnrichedBill = PersonalBillRow & { pending: boolean }
 
 export function BillsPage() {
   const { userId } = useCurrentUser()
@@ -61,7 +42,6 @@ export function BillsPage() {
   const [sort, setSort] = useState<BillSort>('date_desc')
   const [filterCategory, setFilterCategory] = useState<string | null>(null)
   const [tab, setTab] = useState<'mine' | 'shared'>('mine')
-  const [sharedActivated, setSharedActivated] = useState(false)
   const [deleteTarget, setDeleteTarget] = useState<{ id: string; title: string } | null>(null)
   const [exportOpen, setExportOpen] = useState(false)
   const [myBillsShown, setMyBillsShown] = useState(10)
@@ -75,114 +55,59 @@ export function BillsPage() {
     resolvedMyBillsShown = 10
   }
 
-  /** Raw personal-bill buckets: which bills are mine vs shared with me. A handful of indexed
-   *  queries, so tab badges and the header count render without waiting for enrichment. */
-  async function loadBuckets(currentUserId: string) {
-    const myRaw = (await db.bills.where('created_by').equals(currentUserId).toArray()).filter(
-      (b) => !b.is_deleted && b.group_id === null,
-    )
-    const mySplits = (await db.item_splits.where('user_id').equals(currentUserId).toArray()).filter(
-      (split) => !split.is_deleted,
-    )
-    const itemIds = [...new Set(mySplits.map((split) => split.item_id))]
-    const splitItems =
-      itemIds.length > 0 ? await db.bill_items.where('id').anyOf(itemIds).toArray() : []
-    const billIds = [
-      ...new Set(splitItems.filter((item) => !item.is_deleted).map((item) => item.bill_id)),
-    ]
-    const splitBills = billIds.length > 0 ? await db.bills.where('id').anyOf(billIds).toArray() : []
-    const sharedRaw = splitBills.filter(
-      (bill) => !bill.is_deleted && bill.group_id === null && bill.created_by !== currentUserId,
-    )
-    return { myRaw, sharedRaw }
-  }
+  // One call returns both buckets with participants, payer, item count and the settled flag
+  // already resolved. This replaced a per-bill fan-out: each bill re-read its own items, resolved
+  // every participant name, and asked isPersonalBillFullySettled — which computes a whole
+  // person-level tab. The Shared tab is no longer lazy because it costs nothing extra now.
+  const loadBills = useCallback(
+    () => (userId ? fetchPersonalBills(userId) : Promise.reject(new Error('no user'))),
+    [userId],
+  )
+  const billsQuery = useServerData(userId ? loadBills : null, [userId, loadBills])
 
-  /** Enrich one bucket. Everything reused across bills — the viewer's own id cluster, each
-   *  participant's display name, each counterparty's tab — is computed once, not per bill. */
-  async function enrichBucket(bills: Bill[], currentUserId: string): Promise<EnrichedBill[]> {
-    const snapshot = await loadBalanceSnapshot()
-    const settledTabCache = new Map<string, Map<string, number>>()
-    const displayCache = new Map<string, string>()
-    const myIds = await expandProfileIdsForSplitMatching(currentUserId, currentUserId)
+  // The one fact the server cannot know: which of these rows this device has not sent yet.
+  // Written offline, it is queued locally and must be flagged rather than shown as confirmed.
+  // These rows are also the ONLY source for a bill the server has never seen — decorating the
+  // server's response could never surface one, so an offline save appeared nowhere at all.
+  const stagedBills = useLiveQuery(
+    async () => (userId ? loadStagedPersonalBillRows(userId) : []),
+    [userId],
+    [] as PersonalBillRow[],
+  )
+  const unsentBillIds = useMemo(() => new Set(stagedBills.map((b) => b.id)), [stagedBills])
 
-    const out: EnrichedBill[] = []
-    for (const bill of bills) {
-      const items = await db.bill_items.where('bill_id').equals(bill.id).toArray()
-      const activeItems = items.filter((i) => !i.is_deleted)
-      const union = snapshot.participantsByBill.get(bill.id) ?? new Set<string>()
-      const reps = await dedupeParticipantIds(union, currentUserId)
+  const withPending = useCallback(
+    (rows: PersonalBillRow[] | undefined): EnrichedBill[] =>
+      (rows ?? []).map((b) => ({ ...b, pending: unsentBillIds.has(b.id) })),
+    [unsentBillIds],
+  )
 
-      const participantPills: { id: string; label: string }[] = []
-      for (const uid of reps) {
-        if (myIds.has(uid)) {
-          participantPills.push({ id: uid, label: 'You' })
-          continue
-        }
-        let label = displayCache.get(uid)
-        if (label === undefined) {
-          label = (await resolveProfileDisplay(uid, currentUserId)).displayName
-          displayCache.set(uid, label)
-        }
-        participantPills.push({ id: uid, label })
-      }
-      participantPills.sort((a, b) => {
-        if (a.label === 'You') return -1
-        if (b.label === 'You') return 1
-        return a.label.localeCompare(b.label)
-      })
+  const myBills = useMemo(() => {
+    if (!billsQuery.data) return undefined
+    const confirmed = withPending(billsQuery.data.mine)
+    // A staged bill the server has already accepted comes back in `mine`; keep the server's copy
+    // so a row never renders twice while `synced_at` catches up.
+    const seen = new Set(confirmed.map((b) => b.id))
+    const staged = stagedBills
+      .filter((b) => !seen.has(b.id))
+      .map((b) => ({ ...b, pending: true }))
+    return [...staged, ...confirmed]
+  }, [billsQuery.data, withPending, stagedBills])
+  const sharedEnriched = useMemo(
+    () => (billsQuery.data ? withPending(billsQuery.data.shared) : undefined),
+    [billsQuery.data, withPending],
+  )
 
-      let payor = await db.profiles.get(bill.paid_by)
-      if (!payor) {
-        await fetchRemoteProfileIntoDexie(bill.paid_by)
-        payor = await db.profiles.get(bill.paid_by)
-      }
-
-      out.push({
-        id: bill.id,
-        title: bill.title,
-        currency: bill.currency,
-        total_amount: bill.total_amount,
-        created_at: bill.created_at,
-        created_by: bill.created_by,
-        payorName: payor?.display_name ?? 'Someone',
-        itemCount: activeItems.length,
-        settled: await isPersonalBillFullySettled(
-          bill.id,
-          currentUserId,
-          settledTabCache,
-          snapshot,
-        ),
-        pending: bill.synced_at === null,
-        category: bill.category ?? null,
-        participantPills,
-      })
-    }
-    return out
-  }
-
-  const counts = useLiveQuery(async () => {
-    if (!userId) return { my: 0, shared: 0, myCategories: [] as (string | null)[] }
-    const { myRaw, sharedRaw } = await loadBuckets(userId)
+  // Counted off the rendered lists, not the raw response, so the tab badges and the header total
+  // agree with what is actually on screen once staged bills are included.
+  const counts = useMemo(() => {
+    if (myBills === undefined) return undefined
     return {
-      my: myRaw.length,
-      shared: sharedRaw.length,
-      myCategories: myRaw.map((b) => b.category ?? null),
+      my: myBills.length,
+      shared: sharedEnriched?.length ?? 0,
+      myCategories: myBills.map((b) => b.category),
     }
-  }, [userId])
-
-  const myBills = useLiveQuery(async () => {
-    if (!userId) return [] as EnrichedBill[]
-    const { myRaw } = await loadBuckets(userId)
-    return enrichBucket(myRaw, userId)
-  }, [userId])
-
-  // The Shared tab is only enriched once it has actually been opened, and stays live after —
-  // so first paint does not pay for a list the user may never look at.
-  const sharedEnriched = useLiveQuery(async () => {
-    if (!userId || !sharedActivated) return undefined
-    const { sharedRaw } = await loadBuckets(userId)
-    return enrichBucket(sharedRaw, userId)
-  }, [userId, sharedActivated])
+  }, [myBills, sharedEnriched])
 
   const billBuckets = myBills === undefined ? undefined : { myBills, sharedBills: sharedEnriched ?? [] }
 
@@ -196,9 +121,9 @@ export function BillsPage() {
     copy.sort((a, b) => {
       switch (sort) {
         case 'date_desc':
-          return b.created_at.localeCompare(a.created_at)
+          return b.createdAt.localeCompare(a.createdAt)
         case 'date_asc':
-          return a.created_at.localeCompare(b.created_at)
+          return a.createdAt.localeCompare(b.createdAt)
         case 'title_asc':
           return a.title.localeCompare(b.title, undefined, { sensitivity: 'base' })
         case 'title_desc':
@@ -212,7 +137,7 @@ export function BillsPage() {
 
   const sharedBills = useMemo(() => {
     const list = [...(billBuckets?.sharedBills ?? [])]
-    list.sort((a, b) => b.created_at.localeCompare(a.created_at))
+    list.sort((a, b) => b.createdAt.localeCompare(a.createdAt))
     return list
   }, [billBuckets?.sharedBills])
 
@@ -221,7 +146,11 @@ export function BillsPage() {
     return BILL_CATEGORIES.filter((c) => cats.has(c))
   }, [counts?.myCategories])
 
-  const loadingBills = tab === 'mine' ? myBills === undefined : sharedEnriched === undefined
+  const loadingBills = !userId || (billsQuery.loading && !billsQuery.data)
+  const exportRows = useMemo(
+    () => [...(billBuckets?.myBills ?? []), ...(billBuckets?.sharedBills ?? [])],
+    [billBuckets?.myBills, billBuckets?.sharedBills],
+  )
 
   async function executeDeleteBill() {
     if (!userId || !deleteTarget) return
@@ -281,7 +210,7 @@ export function BillsPage() {
         </button>
         <button
           type="button"
-          onClick={() => { setTab('shared'); setSharedActivated(true); setSharedBillsShown(10) }}
+          onClick={() => { setTab('shared'); setSharedBillsShown(10) }}
           className={cn(
             'flex flex-1 items-center justify-center gap-1.5 rounded-lg py-2 text-sm font-medium transition-all',
             tab === 'shared' ? 'bg-white text-stone-900 shadow-sm' : 'text-stone-500 hover:bg-white/50 hover:text-stone-700',
@@ -363,7 +292,24 @@ export function BillsPage() {
         </Button>
       </div>
 
-      {loadingBills ? (
+      {billsQuery.fromCache && billsQuery.data && (
+        <SavedCopyNotice fetchedAt={billsQuery.fetchedAt} />
+      )}
+
+      {billsQuery.error && !billsQuery.data ? (
+        // An empty list and an unreachable server must not look the same — one of them means
+        // "you have no bills" and the user may act on it.
+        <div
+          role="alert"
+          className="rounded-3xl border border-amber-200 bg-amber-50 p-5 text-sm text-amber-950 shadow-sm"
+        >
+          <p className="font-medium">Bills unavailable</p>
+          <p className="mt-1 text-xs text-amber-900/80">{billsQuery.error}</p>
+          <Button size="sm" variant="ghost" className="mt-3 rounded-full text-amber-900" onClick={billsQuery.refresh}>
+            Try again
+          </Button>
+        </div>
+      ) : loadingBills ? (
         <div className="space-y-3">
           {Array.from({ length: 4 }).map((_, idx) => (
             <div
@@ -450,15 +396,15 @@ export function BillsPage() {
                         )}
                       </div>
                       <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-stone-500">
-                        <span>{timeAgo(bill.created_at)}</span>
+                        <span>{timeAgo(bill.createdAt)}</span>
                         <span>·</span>
                         <span>
                           {bill.itemCount} item{bill.itemCount !== 1 ? 's' : ''}
                         </span>
                       </div>
-                      {bill.participantPills.length > 0 && (
+                      {bill.participants.length > 0 && (
                         <div className="mt-2 flex flex-wrap gap-1.5">
-                          {bill.participantPills.map((p) => (
+                          {bill.participants.map((p) => (
                             <span
                               key={p.id}
                               className="inline-flex max-w-40 truncate rounded-full border border-teal-800/20 bg-teal-800/8 px-2.5 py-0.5 text-[0.7rem] font-medium text-teal-900"
@@ -471,7 +417,7 @@ export function BillsPage() {
                     </Link>
                     <div className="flex items-center gap-2">
                       <span className="text-sm font-semibold text-stone-800">
-                        {formatCurrency(bill.total_amount, bill.currency)}
+                        {formatCurrency(bill.totalAmount, bill.currency)}
                       </span>
                       <Button
                         variant="ghost"
@@ -543,13 +489,13 @@ export function BillsPage() {
                         )}
                       </div>
                       <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-stone-500">
-                        <span>{timeAgo(bill.created_at)}</span>
+                        <span>{timeAgo(bill.createdAt)}</span>
                         <span>·</span>
                         <span>Paid by {bill.payorName ?? 'Someone'}</span>
                       </div>
                     </div>
                     <span className="text-sm font-semibold text-stone-800">
-                      {formatCurrency(bill.total_amount, bill.currency)}
+                      {formatCurrency(bill.totalAmount, bill.currency)}
                     </span>
                   </div>
                 </Link>
@@ -587,8 +533,10 @@ export function BillsPage() {
       <ExportDataDialog
         title="Export personal bills"
         description="Download all your personal bills as a PDF report or CSV spreadsheet."
-        onExportPDF={() => generateBillsPDF(userId)}
-        onExportCSV={() => exportBillsToCSV(userId)}
+        // Both buckets: a bill someone else created and split you into is still part of the
+        // user's personal record, and the pre-migration exporter always included it.
+        onExportPDF={() => generateBillsPDF(userId, exportRows)}
+        onExportCSV={() => exportBillsToCSV(userId, exportRows)}
         onClose={() => setExportOpen(false)}
       />
     )}

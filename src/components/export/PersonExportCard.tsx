@@ -1,5 +1,5 @@
 import { formatCurrency } from '@/lib/utils'
-import type { SettlementHistoryItem } from '@/lib/settlement'
+import type { SettlementHistoryItem } from '@/api/balances'
 
 export interface PersonBillEntry {
   title: string

@@ -72,6 +72,26 @@ describe('clearKwentaLocalData', () => {
     expect(localStorage.getItem('unrelated_key')).toBe('keep-me')
   })
 
+  // Cached RPC responses hold balances and contact names, so leaving them behind would show the
+  // previous account's money to whoever signs in next on a shared device.
+  it('removes cached server responses for every user', async () => {
+    localStorage.setItem(
+      'kwenta_api_cache_v1:user-1:contacts',
+      JSON.stringify({ data: [{ peerId: 'p1' }], fetchedAt: '2026-08-04T00:00:00.000Z' }),
+    )
+    localStorage.setItem(
+      'kwenta_api_cache_v1:user-2:overview',
+      JSON.stringify({ data: {}, fetchedAt: '2026-08-04T00:00:00.000Z' }),
+    )
+    localStorage.setItem('unrelated_key', 'keep-me')
+
+    await clearKwentaLocalData()
+
+    expect(localStorage.getItem('kwenta_api_cache_v1:user-1:contacts')).toBeNull()
+    expect(localStorage.getItem('kwenta_api_cache_v1:user-2:overview')).toBeNull()
+    expect(localStorage.getItem('unrelated_key')).toBe('keep-me')
+  })
+
   it('resets initial cloud hydration to pending', async () => {
     useAppStore.getState().setInitialCloudHydration('ready')
     await clearKwentaLocalData()

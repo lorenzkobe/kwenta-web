@@ -9,7 +9,7 @@ import {
   updateBundledPaymentLabel,
   updateSettlement,
 } from '@/db/operations'
-import type { SettlementHistoryItem } from '@/lib/settlement'
+import type { SettlementHistoryItem } from '@/api/balances'
 import { useCurrentUser } from '@/hooks/useCurrentUser'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -85,7 +85,7 @@ export function EditSettlementDialog({
     setDeleting(true)
     try {
       if (item.isBundled && item.bundleId) {
-        await deleteBundledPayment(item.bundleId, userId)
+        await deleteBundledPayment(item.bundleId, userId, item.settlementIds)
       } else {
         await deleteSettlement(item.id, userId)
       }

@@ -23,9 +23,10 @@ import {
   resolveRecipientProfileIdForNotify,
 } from '@/lib/kwenta-notifications'
 import { computeSplits, type SplitInput } from '@/lib/splits'
-import { computeGroupPairwiseBalances, owedInGroup } from '@/lib/settlement'
+import { loadGroupMemberBreakdownFresh, loadOwedInGroup } from '@/api/balances'
 import type { SettlementLeg } from '@/lib/settlement-suggestions'
 import {
+  expandProfileIdsForSplitMatching,
   fetchRemoteProfileIntoDexie,
   participantUnionForBill,
 } from '@/lib/people'
@@ -980,7 +981,7 @@ export async function linkProfileToRemote(
   // Covered:
   //   group_members.user_id     — immediate rewrite (membership must match server auth.uid)
   //   item_splits.user_id       — immediate rewrite (pull filter checks ish.user_id = auth.uid)
-  //   bills.paid_by             — immediate rewrite (payer credit in computeGroupBalances)
+  //   bills.paid_by             — immediate rewrite (payer credit in kwenta_group_pairwise, 053)
   //   settlements.from_user_id  — immediate rewrite (personal settlement RLS check)
   //   settlements.to_user_id    — immediate rewrite (personal settlement RLS check)
   //
@@ -1001,10 +1002,10 @@ export async function linkProfileToRemote(
     })
   }
 
-  // Rewrite bills.paid_by from the local contact to the remote profile so the
-  // linked player is credited correctly as payer in computeGroupBalances. Without
-  // this the server keeps paid_by = localProfileId and the payer shows as "Unknown"
-  // on User B's device (their profile is not visible due to the privacy boundary).
+  // Rewrite bills.paid_by from the local contact to the remote profile so the linked account is
+  // credited correctly as payer by `kwenta_group_pairwise` (migration 053). Without this the
+  // server keeps paid_by = localProfileId and the payer shows as "Unknown" on User B's device
+  // (their profile is not visible due to the privacy boundary).
   const allBills = await db.bills.toArray()
   for (const bill of allBills) {
     if (bill.is_deleted || bill.paid_by !== localProfileId) continue
@@ -1198,9 +1199,18 @@ export async function removeGroupMember(
   if (!membership) return
 
   // Block removal unless fully settled (owes no one and is owed by no one).
+  //
+  // Refuses rather than skipping when the answer is unavailable: stranding an unsettled member's
+  // debt is not something the user would notice, so an unchecked removal is worse than a blocked
+  // one. (The payment cap below makes the opposite call, for the opposite reason.)
   if (!options?.force) {
-    const summary = await computeGroupPairwiseBalances(groupId, memberUserId)
-    if (summary && (summary.totalToReceive > 0.005 || summary.totalToPay > 0.005)) {
+    // Catches a refusal (ServerDeclinedError) as well as a transport failure: both mean the
+    // balance is unknown, and an unchecked removal strands the debt on a roster row nobody can
+    // settle. Before, a refusal resolved to null and short-circuited the check to false.
+    const breakdown = await loadGroupMemberBreakdownFresh(groupId, memberUserId).catch(() => {
+      throw new Error('Could not check this member’s balance. Reconnect and try again.')
+    })
+    if (breakdown.pays.length > 0 || breakdown.receives.length > 0) {
       throw new Error(
         'This member still has an outstanding balance. Settle up before removing them.',
       )
@@ -1598,8 +1608,10 @@ export async function createSettlement(
   }
 
   if (options?.enforceCap && groupId) {
-    const owed = await owedInGroup(groupId, resolvedFromUserId, resolvedToUserId)
-    if (amount > owed + 0.005) {
+    const owed = await loadOwedInGroup(groupId, resolvedFromUserId, resolvedToUserId).catch(
+      () => null,
+    )
+    if (owed !== null && amount > owed + 0.005) {
       throw new Error(`You can only pay up to ${owed.toFixed(2)} — that's what you owe them.`)
     }
   }
@@ -1745,11 +1757,37 @@ export async function createBundledGroupSettlement(params: {
   ])
   const labelTrim = (params.label ?? '').trim()
 
+  // One call for every recipient: `pays` already lists what this payer owes each person, so
+  // asking per recipient would be N round trips for one answer.
   if (params.enforceCap) {
-    for (const recipient of resolvedRecipients) {
-      const owed = await owedInGroup(params.groupId, resolvedFromUserId, recipient.toUserId)
-      if (recipient.amount > owed + 0.005) {
-        throw new Error(`You can only pay up to ${owed.toFixed(2)} — that's what you owe them.`)
+    const breakdown = await loadGroupMemberBreakdownFresh(
+      params.groupId,
+      resolvedFromUserId,
+    ).catch(() => null)
+    if (breakdown) {
+      const owedTo = new Map(breakdown.pays.map((p) => [p.memberUserId, p.amount]))
+      for (const recipient of resolvedRecipients) {
+        // The two sides of this comparison come from different id spaces. `pays` is keyed by the
+        // ids the SERVER's roster holds, while `toUserId` came from `resolveGroupMemberUserId`,
+        // which deliberately maps an account id BACK to a local contact id when this device's
+        // roster row holds the local one. Matching literally made the recipient look like someone
+        // owed 0, so the cap rejected a settle-up the same screen had just offered. Expanding to
+        // the identity set is how every other cross-id match in this codebase is done.
+        const candidateIds = await expandProfileIdsForSplitMatching(
+          recipient.toUserId,
+          params.markedBy,
+        )
+        let owed = 0
+        for (const id of candidateIds) {
+          const hit = owedTo.get(id)
+          if (hit !== undefined) {
+            owed = hit
+            break
+          }
+        }
+        if (recipient.amount > owed + 0.005) {
+          throw new Error(`You can only pay up to ${owed.toFixed(2)} — that's what you owe them.`)
+        }
       }
     }
   }
@@ -2211,7 +2249,17 @@ export async function deleteSettlement(
   options?: { collect?: MutationRowCollector },
 ): Promise<void> {
   const s = await db.settlements.get(settlementId)
-  if (!s || s.is_deleted) return
+  // The id comes from a SERVER-fetched history list while the row is resolved from the local
+  // mirror, and the two can legitimately disagree — a payment another member recorded is listed
+  // as soon as the endpoint answers, before realtime or the next sync has mirrored the row.
+  // Returning here made the dialog report a successful delete that did nothing, so the user
+  // pressed Remove again. Refusing is recoverable; a silent no-op is not.
+  if (!s) {
+    throw new Error(
+      'This payment has not finished syncing to this device yet. Refresh and try again.',
+    )
+  }
+  if (s.is_deleted) return
 
   const timestamp = now()
 
@@ -2246,8 +2294,28 @@ export async function deleteSettlement(
   })
 }
 
-export async function deleteBundledPayment(bundleId: string, editorUserId: string): Promise<void> {
+export async function deleteBundledPayment(
+  bundleId: string,
+  editorUserId: string,
+  /**
+   * Every leg the SERVER says this bundle has.
+   *
+   * The mirror is not a reliable census of a bundle: `where('bundle_id')` returns the legs this
+   * device happens to hold, so a bundle whose legs had not all arrived was deleted PARTIALLY —
+   * the surviving legs keep moving the balance and the payment can never be reassembled. The
+   * caller already has the authoritative list from the settlement-history endpoint.
+   */
+  expectedSettlementIds: string[],
+): Promise<void> {
   const rows = await db.settlements.where('bundle_id').equals(bundleId).toArray()
+  const known = new Set(rows.map((row) => row.id))
+  const missing = expectedSettlementIds.filter((id) => !known.has(id))
+  if (missing.length > 0) {
+    throw new Error(
+      'This payment has not finished syncing to this device yet. Refresh and try again.',
+    )
+  }
+
   const activeRows = rows.filter((row) => !row.is_deleted)
   if (activeRows.length === 0) return
 

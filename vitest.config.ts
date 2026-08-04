@@ -2,6 +2,10 @@ import path from 'path'
 import { defineConfig } from 'vitest/config'
 
 export default defineConfig({
+  // The suite is almost entirely pure logic and Dexie, so it has never needed the React plugin.
+  // `tests/hooks/useServerData.test.tsx` renders one hook (with React's own `act`, no testing
+  // library), which needs JSX transformed against the automatic runtime.
+  esbuild: { jsx: 'automatic' },
   resolve: {
     alias: {
       '@': path.resolve(__dirname, './src'),

@@ -1,5 +1,6 @@
 import { formatCurrency } from '@/lib/utils'
-import type { GroupBalanceSummary, GroupPairwiseSummary, SettlementHistoryItem } from '@/lib/settlement'
+import type { GroupBalanceSummary, GroupPairwiseSummary } from '@/lib/settlement'
+import type { SettlementHistoryItem } from '@/api/balances'
 
 interface BillEntry {
   id: string

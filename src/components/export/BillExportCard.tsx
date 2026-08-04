@@ -1,7 +1,23 @@
 import { formatCurrency } from '@/lib/utils'
-import type { getBillWithDetails } from '@/db/operations'
 
-type BillDetails = NonNullable<Awaited<ReturnType<typeof getBillWithDetails>>>
+/**
+ * Only what the card draws. Declared structurally rather than derived from a Dexie query, so the
+ * card does not care whether the bill came from the server or the local mirror.
+ */
+type BillDetails = {
+  title: string
+  note: string
+  currency: string
+  totalAmount: number
+  createdAt: string
+  payorName: string
+  items: {
+    id: string
+    name: string
+    amount: number
+    splits: { id: string; displayName: string; computedAmount: number }[]
+  }[]
+}
 
 interface PaymentEntry {
   fromName: string
@@ -22,7 +38,7 @@ function computePersonTotals(items: BillDetails['items']): { name: string; amoun
   const map = new Map<string, number>()
   for (const item of items) {
     for (const split of item.splits) {
-      map.set(split.displayName, (map.get(split.displayName) ?? 0) + split.computed_amount)
+      map.set(split.displayName, (map.get(split.displayName) ?? 0) + split.computedAmount)
     }
   }
   return Array.from(map.entries())
@@ -105,7 +121,7 @@ export function BillExportCard({ bill, groupName, payments = [] }: Props) {
               {bill.title}
             </div>
             <div style={{ color: '#9ca3af', fontSize: 12, marginTop: 4 }}>
-              {new Date(bill.created_at).toLocaleDateString('en-US', {
+              {new Date(bill.createdAt).toLocaleDateString('en-US', {
                 month: 'short',
                 day: 'numeric',
                 year: 'numeric',
@@ -115,7 +131,7 @@ export function BillExportCard({ bill, groupName, payments = [] }: Props) {
           </div>
           <div style={{ textAlign: 'right', flexShrink: 0 }}>
             <div style={{ color: '#2dd4bf', fontSize: 18, fontWeight: 700 }}>
-              {formatCurrency(bill.total_amount, bill.currency)}
+              {formatCurrency(bill.totalAmount, bill.currency)}
             </div>
             <div style={{ color: '#6b7280', fontSize: 11, marginTop: 2 }}>{bill.currency}</div>
           </div>
@@ -160,7 +176,7 @@ export function BillExportCard({ bill, groupName, payments = [] }: Props) {
                         <div key={split.id} style={{ display: 'flex', justifyContent: 'space-between', paddingLeft: 12 }}>
                           <span style={{ color: '#6b7280', fontSize: 11 }}>{split.displayName}</span>
                           <span style={{ color: '#9ca3af', fontSize: 11 }}>
-                            {formatCurrency(split.computed_amount, bill.currency)}
+                            {formatCurrency(split.computedAmount, bill.currency)}
                           </span>
                         </div>
                       ))}
@@ -202,7 +218,7 @@ export function BillExportCard({ bill, groupName, payments = [] }: Props) {
                 <div key={split.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '6px 10px', backgroundColor: '#1f2937', borderRadius: 8 }}>
                   <span style={{ color: '#d1d5db', fontSize: 12, fontWeight: 500 }}>{split.displayName}</span>
                   <span style={{ color: 'white', fontSize: 12, fontWeight: 700 }}>
-                    {formatCurrency(split.computed_amount, bill.currency)}
+                    {formatCurrency(split.computedAmount, bill.currency)}
                   </span>
                 </div>
               ))}

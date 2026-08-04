@@ -4,6 +4,7 @@ import {
   getMillisecondsSinceLastRefresh,
   hasUnsyncedLocalDataForUser,
   isEntityUnsyncedForActor,
+  isUnsyncedRow,
   resolvePaidByForPush,
   isRowApplied,
   shouldApplyPulledRow,
@@ -207,6 +208,33 @@ describe('shouldApplyPulledRow', () => {
         '2026-06-23T11:00:00.000Z',
       ),
     ).toBe(true)
+  })
+})
+
+describe('isUnsyncedRow', () => {
+  it('is unsynced when it has never been pushed', () => {
+    expect(isUnsyncedRow({ synced_at: null, updated_at: '2026-08-04T00:00:00.000Z' })).toBe(true)
+  })
+
+  it('is unsynced when it was edited after its last push', () => {
+    expect(
+      isUnsyncedRow({ synced_at: '2026-08-04T00:00:00.000Z', updated_at: '2026-08-04T00:00:01.000Z' }),
+    ).toBe(true)
+  })
+
+  it('is synced when the last push is at or after the last edit', () => {
+    expect(
+      isUnsyncedRow({ synced_at: '2026-08-04T00:00:01.000Z', updated_at: '2026-08-04T00:00:01.000Z' }),
+    ).toBe(false)
+    expect(
+      isUnsyncedRow({ synced_at: '2026-08-04T00:00:02.000Z', updated_at: '2026-08-04T00:00:01.000Z' }),
+    ).toBe(false)
+  })
+
+  // The Bills list maps this over server rows, some of which have no local copy at all.
+  it('treats a missing row as synced rather than flagging it unsent', () => {
+    expect(isUnsyncedRow(undefined)).toBe(false)
+    expect(isUnsyncedRow(null)).toBe(false)
   })
 })
 
