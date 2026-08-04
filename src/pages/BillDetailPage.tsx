@@ -55,7 +55,11 @@ export function BillDetailPage() {
       throw error
     }
   }, [userId, billId])
-  const detail = useServerData(userId && billId ? loadDetail : null, [userId, billId, loadDetail])
+  const detail = useServerData(
+    userId && billId ? loadDetail : null,
+    [userId, billId, loadDetail],
+    billId ? `bill:${billId}` : undefined,
+  )
 
   const bill = useMemo(() => {
     if (!detail.data) return null
@@ -74,7 +78,11 @@ export function BillDetailPage() {
         : Promise.reject(new Error('no user')),
     [userId, billId],
   )
-  const payments = useServerData(userId && billId ? loadPayments : null, [userId, billId])
+  const payments = useServerData(
+    userId && billId ? loadPayments : null,
+    [userId, billId],
+    billId ? `bill-payments:${billId}` : undefined,
+  )
   // Held stable across renders: `billPayments` memoises off it, and a fresh array each render
   // would rebuild the export payload every time.
   const billPaymentHistory = useMemo(

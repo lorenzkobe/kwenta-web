@@ -6,7 +6,7 @@ import { timeAgo, cn } from '@/lib/utils'
  * Balances are server-computed and do not move offline (CLAUDE.md rule 8), so a cached copy has to
  * be visibly different from a fresh one — otherwise a screen showing last week's amounts is
  * indistinguishable from one showing the truth, and the user settles up against a balance that has
- * already moved. `fetchWithCache` returns `fromCache`/`fetchedAt` for exactly this, and most
+ * already moved. `fetchEndpoint` returns `fromCache`/`fetchedAt` for exactly this, and most
  * screens were dropping both on the floor.
  */
 export function SavedCopyNotice({

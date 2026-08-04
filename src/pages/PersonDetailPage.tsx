@@ -382,6 +382,7 @@ export function PersonDetailPage() {
   const personSummary = useServerData(
     userId && personId ? loadSummary : null,
     [userId, personId, loadSummary],
+    personId ? `person:${personId}` : undefined,
   )
 
   // The events come from the server (migration 062); the running-balance walk stays local. The
@@ -396,6 +397,7 @@ export function PersonDetailPage() {
   const statementQuery = useServerData(
     userId && personId ? loadStatement : null,
     [userId, personId, loadStatement],
+    personId ? `statement:${personId}` : undefined,
   )
   const statement = useMemo(
     () => (statementQuery.data ? buildMoneyFlowRows(statementQuery.data) : undefined),
@@ -435,7 +437,11 @@ export function PersonDetailPage() {
         : Promise.reject(new Error('no user')),
     [userId, personId],
   )
-  const paymentsQuery = useServerData(userId && personId ? loadPayments : null, [userId, personId])
+  const paymentsQuery = useServerData(
+    userId && personId ? loadPayments : null,
+    [userId, personId],
+    personId ? `person-payments:${personId}` : undefined,
+  )
   const settlements = useMemo(
     () =>
       paymentsQuery.loading && !paymentsQuery.data ? undefined : (paymentsQuery.data ?? []),

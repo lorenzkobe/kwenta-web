@@ -83,8 +83,12 @@ import { notifyPaymentsRecorded } from '@/lib/kwenta-notifications'
 // stub that returns nothing reads as "the server stored nothing" and the write correctly
 // refuses. Echo the push back with migration 044's `applied` map to stand in for acceptance.
 // The dedicated contract tests for accept/reject/drop live in tests/db/cloud-first-write.test.ts.
-/** Counts kwenta_sync round trips so tests can assert a multi-leg write submits once, not N times. */
-const cloudCalls = vi.hoisted(() => ({ mode: 'ok' as const, kwentaSync: 0, calls: 0 }))
+/**
+ * Counts write round trips so tests can assert a multi-leg write submits once, not N times.
+ * Both RPCs count: which one the client reaches depends on the server generation, and "how many
+ * times did this mutation go to the server" is the same question either way.
+ */
+const cloudCalls = vi.hoisted(() => ({ mode: 'ok' as const, writeRoundTrips: 0, calls: 0 }))
 
 vi.mock('@/lib/supabase', async () => {
   const { makeSupabaseCloudMock } = await import('../helpers/cloud-sync-mock')
@@ -93,7 +97,7 @@ vi.mock('@/lib/supabase', async () => {
     supabase: {
       ...base,
       rpc: async (fn: string, args?: Record<string, unknown>) => {
-        if (fn === 'kwenta_sync') cloudCalls.kwentaSync += 1
+        if (fn === 'kwenta_sync' || fn === 'kwenta_write') cloudCalls.writeRoundTrips += 1
         return base.rpc(fn, args)
       },
     },
@@ -869,7 +873,7 @@ describe('deletePerson atomic cascade', () => {
   it('fires exactly one sync for a person spanning a group, a personal bill, and a settlement', async () => {
     // The cascade is now submitted directly, so "exactly one sync" is counted as kwenta_sync
     // round trips: every affected row lands in a single transaction, not one call per entity.
-    const before = cloudCalls.kwentaSync
+    const before = cloudCalls.writeRoundTrips
     await db.profiles.bulkAdd([makeProfile({ id: 'ME' }), makeProfile({ id: 'P', is_local: true, owner_id: 'ME' })])
     await db.groups.add(makeGroup({ id: 'G', created_by: 'ME' }))
     await db.group_members.bulkAdd([
@@ -883,7 +887,7 @@ describe('deletePerson atomic cascade', () => {
 
     await deletePerson('P', 'ME')
 
-    expect(cloudCalls.kwentaSync - before).toBe(1)
+    expect(cloudCalls.writeRoundTrips - before).toBe(1)
     expect((await db.profiles.get('P'))?.is_deleted).toBe(true)
     const m = await db.group_members.where('[group_id+user_id]').equals(['G', 'P']).first()
     expect(m?.is_deleted).toBe(true)
@@ -1157,7 +1161,7 @@ describe('recordPersonPayment', () => {
     await seedSimpleBill({ groupId: null, paidBy: 'me', shares: { other: 100 } }) // they owe me 100
     // A payment is now submitted straight to the server, so "syncs exactly once" is counted
     // as kwenta_sync round trips rather than calls to the old local-then-sync entry point.
-    const before = cloudCalls.kwentaSync
+    const before = cloudCalls.writeRoundTrips
     const { settlementIds, bundleId } = await recordPersonPayment({
       meId: 'me',
       otherId: 'other',
@@ -1171,7 +1175,7 @@ describe('recordPersonPayment', () => {
     expect(bundleId).toBeNull()
     const legs = await paymentsBetween('other', 'me')
     expect(legs.map((l) => [l.amount, l.group_id])).toEqual([[100, null]])
-    expect(cloudCalls.kwentaSync - before).toBe(1)
+    expect(cloudCalls.writeRoundTrips - before).toBe(1)
   })
 
   it('a group-tagged payment reduces that group pairwise net', async () => {

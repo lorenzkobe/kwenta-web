@@ -548,7 +548,7 @@ function TotalSpendingDialog({
   onClose: () => void
 }) {
   const load = useCallback(() => fetchGroupSpending(currentUserId, groupId), [currentUserId, groupId])
-  const spending = useServerData(load, [currentUserId, groupId])
+  const spending = useServerData(load, [currentUserId, groupId], `group-spending:${groupId}`)
 
   const rows = (spending.data?.rows ?? []).map((r, i) => ({
     userId: r.userId,
@@ -741,7 +741,11 @@ export function GroupDetailPage() {
         : Promise.reject(new Error('no user')),
     [userId, groupId],
   )
-  const payments = useServerData(userId && groupId ? loadPayments : null, [userId, groupId])
+  const payments = useServerData(
+    userId && groupId ? loadPayments : null,
+    [userId, groupId],
+    groupId ? `group-payments:${groupId}` : undefined,
+  )
   const settlementHistory = payments.loading && !payments.data ? undefined : (payments.data ?? [])
 
   // The whole screen in one call: group, roster, bills with payer names, the viewer's pairwise
@@ -751,7 +755,11 @@ export function GroupDetailPage() {
     () => (userId && groupId ? fetchGroupDetail(userId, groupId) : Promise.reject(new Error('no user'))),
     [userId, groupId],
   )
-  const detail = useServerData(userId && groupId ? loadDetail : null, [userId, groupId, loadDetail])
+  const detail = useServerData(
+    userId && groupId ? loadDetail : null,
+    [userId, groupId, loadDetail],
+    groupId ? `group:${groupId}` : undefined,
+  )
 
   const group = useMemo(() => {
     const g = detail.data?.group

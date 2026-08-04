@@ -2,6 +2,7 @@ import { supabase } from '@/lib/supabase'
 import { withMetric } from '@/lib/client-metrics'
 import { generateId } from '@/lib/utils'
 import { useAppStore } from '@/store/app-store'
+import { mountedReadSpecs, primeReads, type ReadSpec } from '@/api/primed-reads'
 import {
   PULL_SINCE_EPOCH,
   TABLE_NAMES,
@@ -126,9 +127,28 @@ async function normalizeForPush(payload: CloudWritePayload): Promise<CloudWriteP
  */
 let submissionIdSupported: boolean | null = null
 
-/** Test seam — resets the probe so a suite can exercise both server generations. */
+/**
+ * Whether the server has migration `066` (`kwenta_write`). Probed the same way and for the same
+ * reason: against an older database the write still has to go through `kwenta_sync`, downloading
+ * the whole bundle to confirm one row.
+ */
+let writeRpcSupported: boolean | null = null
+
+/** Test seam — resets the probes so a suite can exercise every server generation. */
 export function resetSubmissionIdSupport(): void {
   submissionIdSupported = null
+  writeRpcSupported = null
+}
+
+/**
+ * One `p_reads` element. Only the fields `kwenta_read` dispatches on — the RPC parameter name a
+ * direct PostgREST call needs is a client-side concern and is deliberately not sent.
+ */
+function toReadArg(spec: ReadSpec): Record<string, unknown> {
+  const out: Record<string, unknown> = { key: spec.key, fn: spec.fn }
+  if (spec.id !== undefined) out.id = spec.id
+  if (spec.limit !== undefined) out.limit = spec.limit
+  return out
 }
 
 function isMissingOverloadError(err: unknown): boolean {
@@ -164,7 +184,7 @@ export async function submitCloudWrite(input: {
    * success from failure and retries.
    */
   submissionId?: string
-}): Promise<{ pulled: number }> {
+}): Promise<{ stored: number }> {
   if (isCloudWritePayloadEmpty(input.payload)) {
     throw new CloudWriteRejectedError('Nothing to save.', 'EMPTY_PAYLOAD')
   }
@@ -178,27 +198,62 @@ export async function submitCloudWrite(input: {
 
   const payload = await normalizeForPush(input.payload)
 
-  const args: Record<string, unknown> = { p_since: PULL_SINCE_EPOCH, p_push: payload }
-  const useSubmissionId = input.submissionId !== undefined && submissionIdSupported !== false
-  if (useSubmissionId) args.p_submission_id = input.submissionId
+  let bundle: unknown = null
+  let rpcError: unknown = null
+  // Which endpoints are on screen right now. The server recomputes exactly these AFTER applying
+  // the push and hands them back, so the re-read triggered below costs no request.
+  const reads = mountedReadSpecs()
+  let usedWriteRpc = false
 
-  let { data: bundle, error: rpcError } = await withMetric(
-    'sync.cloudWriteRpc',
-    () => supabase.rpc('kwenta_sync', args),
-    { rows: countRows(payload), idempotent: useSubmissionId },
-  )
-
-  // Older database without migration 050: retry without the submission id. The write still
-  // succeeds, it just loses replay protection — which is strictly better than refusing to save.
-  if (rpcError && useSubmissionId && isMissingOverloadError(rpcError)) {
-    submissionIdSupported = false
-    ;({ data: bundle, error: rpcError } = await withMetric(
+  if (writeRpcSupported !== false) {
+    const attempt = await withMetric(
       'sync.cloudWriteRpc',
-      () => supabase.rpc('kwenta_sync', { p_since: PULL_SINCE_EPOCH, p_push: payload }),
-      { rows: countRows(payload), idempotent: false },
-    ))
-  } else if (!rpcError && useSubmissionId) {
-    submissionIdSupported = true
+      () =>
+        supabase.rpc('kwenta_write', {
+          p_push: payload,
+          p_submission_id: input.submissionId ?? null,
+          p_reads: reads.map(toReadArg),
+        }),
+      { rows: countRows(payload), reads: reads.length, rpc: 'kwenta_write' },
+    )
+    if (attempt.error && isMissingOverloadError(attempt.error)) {
+      // Database without migration 066. Fall through to the old path, and remember, so every
+      // later write in this session goes straight there.
+      writeRpcSupported = false
+    } else {
+      writeRpcSupported = true
+      usedWriteRpc = true
+      bundle = attempt.data
+      rpcError = attempt.error
+    }
+  }
+
+  if (!usedWriteRpc) {
+    const args: Record<string, unknown> = { p_since: PULL_SINCE_EPOCH, p_push: payload }
+    const useSubmissionId = input.submissionId !== undefined && submissionIdSupported !== false
+    if (useSubmissionId) args.p_submission_id = input.submissionId
+
+    let legacy = await withMetric(
+      'sync.cloudWriteRpc',
+      () => supabase.rpc('kwenta_sync', args),
+      { rows: countRows(payload), idempotent: useSubmissionId, rpc: 'kwenta_sync' },
+    )
+
+    // Older database without migration 050: retry without the submission id. The write still
+    // succeeds, it just loses replay protection — which is strictly better than refusing to save.
+    if (legacy.error && useSubmissionId && isMissingOverloadError(legacy.error)) {
+      submissionIdSupported = false
+      legacy = await withMetric(
+        'sync.cloudWriteRpc',
+        () => supabase.rpc('kwenta_sync', { p_since: PULL_SINCE_EPOCH, p_push: payload }),
+        { rows: countRows(payload), idempotent: false, rpc: 'kwenta_sync' },
+      )
+    } else if (!legacy.error && useSubmissionId) {
+      submissionIdSupported = true
+    }
+
+    bundle = legacy.data
+    rpcError = legacy.error
   }
 
   if (rpcError) {
@@ -249,10 +304,10 @@ export async function submitCloudWrite(input: {
     submittedIds.set(table, new Set(rowsFor(payload, table).map((r) => r.id)))
   }
 
-  let pulled = 0
+  let stored = 0
   for (const table of TABLE_NAMES) {
     const rows = (bundle[table] as SyncFields[]) ?? []
-    pulled += rows.length
+    stored += rows.length
     if (rows.length === 0) continue
     const localTable = getLocalTable(table)
     const mine = submittedIds.get(table)!
@@ -274,8 +329,18 @@ export async function submitCloudWrite(input: {
     if (toPut.length > 0) await localTable.bulkPut(toPut)
   }
 
-  markRefreshed()
-  return { pulled }
+  if (usedWriteRpc) {
+    // The payloads for the screens that were on display, recomputed by the server after this
+    // write. `bumpDataVersion` (in the caller) makes every mounted hook re-read; each is served
+    // from here without a request.
+    primeReads((bundle as { reads?: Record<string, unknown> }).reads)
+  } else {
+    // Only the legacy path pulled the caller's complete row set, so only it may claim the mirror
+    // is fresh. Stamping the marker after a `kwenta_write` would permanently satisfy the backup
+    // timer's staleness gate and the initial-hydration check, and the mirror would stop refreshing.
+    markRefreshed()
+  }
+  return { stored }
 }
 
 /**

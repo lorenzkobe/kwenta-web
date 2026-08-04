@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useAppStore } from '@/store/app-store'
+import { markReadMounted, markReadUnmounted } from '@/api/primed-reads'
 
 export type ServerDataState<T> = {
   data: T | undefined
@@ -22,10 +23,16 @@ export type ServerDataState<T> = {
  * `fetcher` must be stable or wrapped in `useCallback`; it is tracked by ref so a new identity
  * does not itself trigger a fetch (that is the bug pattern that tore down and recreated the
  * notifications channel on every render).
+ *
+ * `endpointKey` is the api cache key this hook renders (`overview`, `group:<uuid>`, …). Declaring
+ * it lets a mutation ask the server to recompute exactly the endpoints that are on screen and
+ * return them with the write, so the re-read that follows costs no request. Omit it and the hook
+ * behaves as before — it simply fetches again.
  */
 export function useServerData<T>(
   fetcher: (() => Promise<{ data: T; fromCache: boolean; fetchedAt: string }>) | null,
   deps: readonly unknown[],
+  endpointKey?: string,
 ): ServerDataState<T> {
   const dataVersion = useAppStore((s) => s.dataVersion)
   const isOnline = useAppStore((s) => s.isOnline)
@@ -50,6 +57,15 @@ export function useServerData<T>(
   // /app/people/alice → /app/people/bob reuses this hook without remounting, and without this
   // reset Bob's page renders Alice's balance under Bob's name until the fetch resolves.
   const prevDepsRef = useRef<readonly unknown[]>(deps)
+
+  // Registered only while this screen is actually rendering the endpoint. A write asks for the
+  // registered set, so a key left behind by an unmounted screen would make every mutation pay to
+  // recompute a payload nobody is looking at.
+  useEffect(() => {
+    if (!endpointKey) return
+    markReadMounted(endpointKey)
+    return () => markReadUnmounted(endpointKey)
+  }, [endpointKey])
 
   useEffect(() => {
     const call = fetcherRef.current

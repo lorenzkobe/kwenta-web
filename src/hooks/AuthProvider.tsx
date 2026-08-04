@@ -103,6 +103,31 @@ async function ensureProfile(userId: string, email: string, prefetched?: Profile
 const ensureProfileInFlight = new Map<string, Promise<void>>()
 const pendingSignupNickname = new Map<string, string>()
 
+type AccountGateResult = Awaited<ReturnType<typeof runAccountGate>>
+const accountGateInFlight = new Map<string, Promise<AccountGateResult>>()
+
+function runAccountGate(userId: string) {
+  return withMetric('auth.accountGate', () =>
+    supabase.from('profiles').select('*').eq('id', userId).maybeSingle(),
+  )
+}
+
+/**
+ * The account gate, deduped while in flight.
+ *
+ * `applySession` runs from the bootstrap `getSession()` AND from `onAuthStateChange`, which fires
+ * `INITIAL_SESSION` and then `SIGNED_IN` within the same tick — three identical `profiles` requests
+ * on every app start. Only concurrent calls are shared: a later `TOKEN_REFRESHED` must re-run the
+ * gate for real, because a suspended account has to be caught on its next event, not cached past it.
+ */
+function accountGate(userId: string): Promise<AccountGateResult> {
+  const running = accountGateInFlight.get(userId)
+  if (running) return running
+  const task = runAccountGate(userId).finally(() => accountGateInFlight.delete(userId))
+  accountGateInFlight.set(userId, task)
+  return task
+}
+
 /**
  * Single source of truth for session + profile bootstrap. Must wrap any tree that calls `useAuth`.
  * (Previously each `useAuth()` call had its own state, so AppShell re-entered `loading: true` after
@@ -135,9 +160,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
 
       const u = session.user
-      const { data: prof, error } = await withMetric('auth.accountGate', () =>
-        supabase.from('profiles').select('*').eq('id', u.id).maybeSingle(),
-      )
+      const { data: prof, error } = await accountGate(u.id)
 
       if (error) {
         console.warn('[auth] account gate failed', error)

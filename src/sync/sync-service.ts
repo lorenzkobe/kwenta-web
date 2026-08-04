@@ -185,8 +185,19 @@ export const TABLE_NAMES = [
 ] as const
 
 export type TableName = (typeof TABLE_NAMES)[number]
-type FullSyncResult = { pushed: number; pulled: number; errors: string[] }
-const fullSyncInFlight = new Map<string, Promise<FullSyncResult>>()
+export type SyncRoundTripResult = {
+  pushed: number
+  /** Rows the server sent. Always the caller's whole row set, so this says nothing about change. */
+  pulled: number
+  /**
+   * Rows this round trip actually wrote to Dexie — the only honest answer to "did anything move?".
+   * Callers use it to decide whether server-backed screens need to re-read; `pulled` cannot, because
+   * every bundle is complete and so is large on a round trip that changed nothing.
+   */
+  changed: number
+  errors: string[]
+}
+const fullSyncInFlight = new Map<string, Promise<SyncRoundTripResult>>()
 
 export function syncErrMessage(err: unknown): string {
   // Shared with the UI error paths: Supabase hands back PostgrestError as a plain object, so an
@@ -770,20 +781,13 @@ async function getRelevantBillIds(userId: string): Promise<string[]> {
   return rows.map((r) => r.id)
 }
 
-export async function fullSync(userId: string): Promise<FullSyncResult> {
+export async function fullSync(userId: string): Promise<SyncRoundTripResult> {
   if (isRuntimeFlagEnabled('dedupeSyncEnabled')) {
     const running = fullSyncInFlight.get(userId)
     if (running) return running
   }
 
-  const job = withMetric('sync.fullSync', async () => {
-    const roundTrip = await syncRoundTrip(userId)
-    return {
-      pushed: roundTrip.pushed,
-      pulled: roundTrip.pulled,
-      errors: roundTrip.errors,
-    }
-  })
+  const job = withMetric('sync.fullSync', () => syncRoundTrip(userId))
 
   if (!isRuntimeFlagEnabled('dedupeSyncEnabled')) {
     return job
@@ -810,24 +814,27 @@ export function isPullBundle(x: unknown): x is KwentaSyncPullBundle {
  * set (see {@link PULL_SINCE_EPOCH}) and mirror it into Dexie.
  * Falls back to pushChanges + pullChanges if the RPC is missing (older DB).
  */
-export async function syncRoundTrip(userId: string): Promise<{
-  pushed: number
-  pulled: number
-  errors: string[]
-}> {
+export async function syncRoundTrip(userId: string): Promise<SyncRoundTripResult> {
+  const nothingHappened = (errors: string[] = []): SyncRoundTripResult => ({
+    pushed: 0,
+    pulled: 0,
+    changed: 0,
+    errors,
+  })
+
   const {
     data: { session },
   } = await supabase.auth.getSession()
   if (!session?.user?.id) {
-    return { pushed: 0, pulled: 0, errors: ['Sync skipped: not signed in'] }
+    return nothingHappened(['Sync skipped: not signed in'])
   }
 
   let ctx: PushFilterContext
   try {
     ctx = await buildPushFilterContext(userId)
   } catch (err) {
-    if (isDatabaseClosedError(err)) return { pushed: 0, pulled: 0, errors: [] }
-    return { pushed: 0, pulled: 0, errors: [syncErrMessage(err)] }
+    if (isDatabaseClosedError(err)) return nothingHappened()
+    return nothingHappened([syncErrMessage(err)])
   }
   const pPush: Record<string, SyncFields[]> = {}
 
@@ -837,8 +844,8 @@ export async function syncRoundTrip(userId: string): Promise<{
     try {
       allRecords = await table.toArray()
     } catch (err) {
-      if (isDatabaseClosedError(err)) return { pushed: 0, pulled: 0, errors: [] }
-      return { pushed: 0, pulled: 0, errors: [syncErrMessage(err)] }
+      if (isDatabaseClosedError(err)) return nothingHappened()
+      return nothingHappened([syncErrMessage(err)])
     }
     const unsyncedRaw = allRecords.filter((r: SyncFields) => {
       if (r.synced_at === null) return true
@@ -906,14 +913,18 @@ export async function syncRoundTrip(userId: string): Promise<{
       return {
         pushed: pushResult.pushed,
         pulled: pullResult.pulled,
+        // The legacy path does not report how many rows it applied. Treating every pulled row as a
+        // possible change costs a redundant re-read; claiming none would leave a real change on
+        // screen unrefreshed, so this degrades toward the harmless side.
+        changed: pullResult.pulled,
         errors: [...pushResult.errors, ...pullResult.errors],
       }
     }
-    return { pushed: 0, pulled: 0, errors: [`kwenta_sync: ${syncErrMessage(rpcError)}`] }
+    return nothingHappened([`kwenta_sync: ${syncErrMessage(rpcError)}`])
   }
 
   if (!isPullBundle(bundle)) {
-    return { pushed: 0, pulled: 0, errors: ['kwenta_sync: invalid response shape'] }
+    return nothingHappened(['kwenta_sync: invalid response shape'])
   }
 
   // Index the bundle by id per table once. Used twice below: to decide whether a pushed row was
@@ -977,6 +988,7 @@ export async function syncRoundTrip(userId: string): Promise<{
   }
 
   let pulled = 0
+  let changed = 0
   for (const tableName of TABLE_NAMES) {
     const rows = (bundle[tableName] as SyncFields[]) ?? []
     pulled += rows.length
@@ -990,10 +1002,10 @@ export async function syncRoundTrip(userId: string): Promise<{
     for (const r of pPush[tableName] ?? []) {
       pushedUpdatedAt.set((r as SyncFields).id, (r as SyncFields).updated_at)
     }
-    // One bulkGet + one bulkPut per table. Every sync now applies the whole dataset, so the old
+    // One bulkGet + one bulkPut per table. Every sync applies the whole dataset, so the old
     // per-row `await get` + `await update` pair meant thousands of serial IndexedDB round trips on
-    // the main thread on each of the many triggers (mutation, route change, focus, backup timer,
-    // realtime burst) — the UI stalled after saving a bill and while tabbing between screens.
+    // the main thread on each trigger (tab activation, backup timer, realtime burst, an offline
+    // write replaying) — the UI stalled while the mirror caught up.
     const existingRows = await table.bulkGet(rows.map((r) => r.id))
     const toPut: SyncFields[] = []
     for (let i = 0; i < rows.length; i++) {
@@ -1003,6 +1015,14 @@ export async function syncRoundTrip(userId: string): Promise<{
       const existing = existingRows[i] as { updated_at: string; synced_at: string | null } | undefined
       // Guard: do not clobber a newer unsynced local edit made during the round-trip.
       if (!shouldApplyPulledRow(existing, row.updated_at)) continue
+      // A complete bundle is mostly rows this device already holds unchanged. Rewriting them costs
+      // an IndexedDB put each and — worse — would make `changed` equal the whole dataset on a sync
+      // that moved nothing, which is exactly the signal callers need to be able to trust.
+      const isNew = existing === undefined
+      const contentMoved = isNew || compareTimestamps(existing.updated_at, row.updated_at) !== 0
+      const needsSyncStamp = !isNew && existing.synced_at !== row.updated_at
+      if (!contentMoved && !needsSyncStamp) continue
+      if (contentMoved) changed++
       toPut.push({ ...(existing ?? {}), ...row, synced_at: row.updated_at })
     }
     if (toPut.length > 0) await table.bulkPut(toPut)
@@ -1015,5 +1035,5 @@ export async function syncRoundTrip(userId: string): Promise<{
     pushedCount += rows.length
   }
 
-  return { pushed: pushedCount, pulled, errors: [] }
+  return { pushed: pushedCount, pulled, changed, errors: [] }
 }

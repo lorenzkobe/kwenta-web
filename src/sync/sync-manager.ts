@@ -18,10 +18,13 @@ const SYNC_BACKUP_INTERVAL_MS = 5 * 60 * 1000
 const BACKUP_REFRESH_STALE_AFTER_MS = 15 * 60 * 1000
 
 /**
- * 'navigation' is a PASSIVE refresh: it never queues a re-run and never touches the retry
- * schedule. See {@link requestRefreshOnNavigation}.
+ * 'user' is the Refresh button. It is the one reason that ALWAYS re-reads the screens, even when
+ * the sync moved no local row: pressing Refresh is an explicit request for fresh data, and a
+ * server-side change that alters no row this device holds — a counterparty renaming their own
+ * account, whose profile is outside this user's pull scope by design — would otherwise never
+ * reach the screen at all.
  */
-type SyncRunReason = 'initial' | 'explicit' | 'backup' | 'online' | 'navigation'
+type SyncRunReason = 'initial' | 'explicit' | 'user' | 'backup' | 'online'
 const BACKOFF_INITIAL_MS = 30_000
 const BACKOFF_MAX_MS = 5 * 60 * 1000
 const TRIGGER_DEBOUNCE_MS = 400
@@ -73,9 +76,39 @@ function onBrowserOnline() {
   void runSync('online')
 }
 
-function onVisibilityActive() {
+/**
+ * Minimum gap between refreshes triggered by the tab becoming active.
+ *
+ * `focus` and `visibilitychange` BOTH fire when a user returns to the tab, and each pull is the
+ * caller's complete row set. Without this, one tab switch cost two full round trips: the second
+ * call landed while the first was in flight, set `rerunRequested`, and ran again after it.
+ */
+const ACTIVATION_REFRESH_MIN_INTERVAL_MS = 5_000
+let lastActivationRefreshAt = Number.NEGATIVE_INFINITY
+
+/**
+ * Monotonic time source. `Date.now()` can jump BACKWARDS (NTP correcting a fast clock, a manual
+ * date change, a phone re-syncing after travel), which would make `now - last` negative — always
+ * under the interval — and silently disable the refresh for the whole duration of the skew.
+ * That is the same device-clock dependency the pull cursor was removed to escape.
+ */
+function monotonicNow(): number {
+  return typeof performance !== 'undefined' && typeof performance.now === 'function'
+    ? performance.now()
+    : Date.now()
+}
+
+function onTabActivated() {
   if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return
-  void runSync('online')
+  const nowMs = monotonicNow()
+  if (nowMs - lastActivationRefreshAt < ACTIVATION_REFRESH_MIN_INTERVAL_MS) return
+  const previous = lastActivationRefreshAt
+  lastActivationRefreshAt = nowMs
+  void runSync('online').then((ran) => {
+    // runSync bails out before doing any work when offline, without a session yet, or with one
+    // already in flight. Claiming the window anyway would swallow the next real activation.
+    if (!ran && lastActivationRefreshAt === nowMs) lastActivationRefreshAt = previous
+  })
 }
 
 async function resolveSessionWithRetry() {
@@ -97,16 +130,11 @@ async function resolveSessionWithRetry() {
  * (offline, no session yet, one already in flight, backup tick with nothing to do).
  */
 async function runSync(reason: SyncRunReason): Promise<boolean> {
-  // A passive refresh must not participate in the error/backoff state machine at all: it is a
-  // read triggered by the user looking at a screen, not by anything that needs delivering.
-  const isPassiveRefresh = reason === 'navigation'
-
   if (isSyncing) {
     // A sync is already in flight. If this is a new request driven by a local mutation
     // or coming back online, remember to run once more afterwards so the newer write
-    // (not in the in-flight snapshot) still gets pushed. A navigation refresh has no write to
-    // deliver, so queueing one here just chains full-bundle round trips behind every tap.
-    if (reason === 'explicit' || reason === 'online') rerunRequested = true
+    // (not in the in-flight snapshot) still gets pushed.
+    if (reason === 'explicit' || reason === 'user' || reason === 'online') rerunRequested = true
     return false
   }
 
@@ -127,9 +155,7 @@ async function runSync(reason: SyncRunReason): Promise<boolean> {
 
   isSyncing = true
   useAppStore.getState().setSyncStatus('syncing')
-  // A passive refresh does not own the retry schedule, so it must not blank the countdown either —
-  // the timer it belongs to is still running, and hiding it just makes recovery look stalled.
-  if (!isPassiveRefresh) useAppStore.getState().setSyncRetryAt(null)
+  useAppStore.getState().setSyncRetryAt(null)
 
   try {
     // After sign-out we clear IndexedDB + the refresh marker; on the next sign-in use one kwenta_sync round-trip
@@ -143,7 +169,7 @@ async function runSync(reason: SyncRunReason): Promise<boolean> {
         useAppStore.getState().setSyncStatus('error')
         useAppStore.getState().setPullStale(true)
         useAppStore.getState().setInitialCloudHydration('failed')
-        if (!isPassiveRefresh) scheduleRetry()
+        scheduleRetry()
         return true
       }
       await hydrateLinkedRemoteProfilesForActor(userId)
@@ -168,7 +194,7 @@ async function runSync(reason: SyncRunReason): Promise<boolean> {
       if (!readLastRefreshAt()) {
         useAppStore.getState().setInitialCloudHydration('failed')
       }
-      if (!isPassiveRefresh) scheduleRetry()
+      scheduleRetry()
     } else {
       await markPendingMutationsApplied(userId)
       resetBackoff()
@@ -176,7 +202,15 @@ async function runSync(reason: SyncRunReason): Promise<boolean> {
       useAppStore.getState().setPullStale(false)
       // Server-backed screens read through RPCs, not Dexie, so `useLiveQuery` sees nothing when
       // a sync brings in remote changes. This is the signal that makes them re-fetch.
-      useAppStore.getState().bumpDataVersion()
+      //
+      // Only when something actually moved. Bumping unconditionally made every sync invalidate
+      // every mounted screen, so each one fetched on mount and then again the moment the
+      // concurrent sync resolved — the duplicated request pairs visible in the network panel.
+      // `pulled` cannot gate this: every bundle is complete, so it is large even when nothing
+      // changed.
+      if (reason === 'user' || result.pushed > 0 || result.changed > 0) {
+        useAppStore.getState().bumpDataVersion()
+      }
       await flushQueuedKwentaNotifications({ assumeCloudAck: true })
       await hydrateLinkedRemoteProfilesForActor(userId)
       void maybeAutoRepairData(userId)
@@ -193,7 +227,7 @@ async function runSync(reason: SyncRunReason): Promise<boolean> {
     if (!readLastRefreshAt()) {
       useAppStore.getState().setInitialCloudHydration('failed')
     }
-    if (!isPassiveRefresh) scheduleRetry()
+    scheduleRetry()
   } finally {
     isSyncing = false
     if (rerunRequested) {
@@ -211,8 +245,8 @@ export function startSyncManager() {
   backupTimer = setInterval(() => void runSync('backup'), SYNC_BACKUP_INTERVAL_MS)
 
   window.addEventListener('online', onBrowserOnline)
-  window.addEventListener('visibilitychange', onVisibilityActive)
-  window.addEventListener('focus', onVisibilityActive)
+  window.addEventListener('visibilitychange', onTabActivated)
+  window.addEventListener('focus', onTabActivated)
 
   return () => {
     if (backupTimer) {
@@ -225,8 +259,8 @@ export function startSyncManager() {
       debounceTimer = null
     }
     window.removeEventListener('online', onBrowserOnline)
-    window.removeEventListener('visibilitychange', onVisibilityActive)
-    window.removeEventListener('focus', onVisibilityActive)
+    window.removeEventListener('visibilitychange', onTabActivated)
+    window.removeEventListener('focus', onTabActivated)
   }
 }
 
@@ -245,48 +279,10 @@ export function triggerSync() {
 /** User-triggered sync from the UI (e.g. header). Runs immediately, no debounce. */
 export function requestSyncNow() {
   resetBackoff()
-  void runSync('explicit')
+  void runSync('user')
 }
 
-/**
- * Minimum gap between navigation-driven refreshes. Every refresh pulls the full bundle, so
- * without this, tapping through screens would fire one RPC per route change.
- */
-const NAVIGATION_REFRESH_MIN_INTERVAL_MS = 5_000
-let lastNavigationRefreshAt = Number.NEGATIVE_INFINITY
-
-/**
- * Monotonic time source. `Date.now()` can jump BACKWARDS (NTP correcting a fast clock, a manual
- * date change, a phone re-syncing after travel), which would make `now - last` negative — always
- * under the interval — and silently disable navigation refresh for the whole duration of the skew.
- * That is the same device-clock dependency the pull cursor was removed to escape.
- */
-function monotonicNow(): number {
-  return typeof performance !== 'undefined' && typeof performance.now === 'function'
-    ? performance.now()
-    : Date.now()
-}
-
-/**
- * Call on route change so opening a screen shows server truth rather than whatever the cache
- * happened to hold. Rate-limited; a skipped refresh is harmless because focus/online/backup
- * triggers and realtime still run.
- */
-export function requestRefreshOnNavigation() {
-  const nowMs = monotonicNow()
-  if (nowMs - lastNavigationRefreshAt < NAVIGATION_REFRESH_MIN_INTERVAL_MS) return
-  const previousRefreshAt = lastNavigationRefreshAt
-  lastNavigationRefreshAt = nowMs
-  void runSync('navigation').then((ran) => {
-    // runSync can bail before doing any work — offline, a sync already in flight, or (right after
-    // sign-in, exactly when this hook first fires) a session that has not resolved yet. Claiming
-    // the window anyway means the next screen change is swallowed by the throttle and renders
-    // whatever the cache held, which is the staleness this hook exists to remove. Give it back.
-    if (!ran && lastNavigationRefreshAt === nowMs) lastNavigationRefreshAt = previousRefreshAt
-  })
-}
-
-/** Test-only: reset the navigation rate limiter between cases. */
-export function __resetNavigationRefreshThrottleForTests() {
-  lastNavigationRefreshAt = Number.NEGATIVE_INFINITY
+/** Test-only: reset the tab-activation rate limiter between cases. */
+export function __resetActivationRefreshThrottleForTests() {
+  lastActivationRefreshAt = Number.NEGATIVE_INFINITY
 }

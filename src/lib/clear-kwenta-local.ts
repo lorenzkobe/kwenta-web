@@ -1,6 +1,7 @@
 import { db } from '@/db/db'
 import { useAppStore } from '@/store/app-store'
 import { clearApiCache } from '@/api/cache'
+import { clearPrimedReads } from '@/api/primed-reads'
 import { resetAutoRepairGuard } from '@/lib/kwenta-data-repair'
 import {
   KWENTA_LAST_REFRESH_STORAGE_KEY,
@@ -35,6 +36,9 @@ export async function clearKwentaLocalData(): Promise<void> {
   // Cached RPC responses hold balances and contact names. Leaving them would show the previous
   // account's money to whoever signs in next on this device.
   clearApiCache()
+  // Same reason, in memory: a payload a write primed is the previous account's data too, and the
+  // mounted-endpoint registry describes screens that belong to a session which has just ended.
+  clearPrimedReads()
   // Module state, not storage — it outlives the account that set it. Without this the next
   // account to sign in on this tab (no page reload) is refused its own once-per-session repair.
   resetAutoRepairGuard()

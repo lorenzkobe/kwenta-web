@@ -74,7 +74,7 @@ export function GroupsPage() {
     () => (userId ? fetchGroupsWithBalances(userId) : Promise.reject(new Error('no user'))),
     [userId],
   )
-  const groupsQuery = useServerData(userId ? loadGroups : null, [userId, loadGroups])
+  const groupsQuery = useServerData(userId ? loadGroups : null, [userId, loadGroups], 'groups')
   const groupsWithBalances = groupsQuery.data
 
   const groups = useMemo(() => {

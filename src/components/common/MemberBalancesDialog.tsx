@@ -30,6 +30,9 @@ export function MemberBalancesDialog({
     () => fetchGroupMemberBreakdown(currentUserId, groupId, memberId!),
     [currentUserId, groupId, memberId],
   )
+  // Deliberately no `endpointKey`: `kwenta_group_member_breakdown` is outside `kwenta_read`'s
+  // whitelist, so a write can never recompute it. That is the point — it also backs the
+  // pre-write guards, which must always ask the server directly (migration 064 header).
   const state = useServerData(open && memberId ? load : null, [
     open,
     groupId,

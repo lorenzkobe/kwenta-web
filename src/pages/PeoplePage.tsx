@@ -30,7 +30,7 @@ export function PeoplePage() {
     () => (userId ? fetchContactsWithBalances(userId) : Promise.reject(new Error('no user'))),
     [userId],
   )
-  const contacts = useServerData(userId ? fetchContacts : null, [userId, fetchContacts])
+  const contacts = useServerData(userId ? fetchContacts : null, [userId, fetchContacts], 'contacts')
 
   // Contacts created offline exist only here until they are pushed. The server list cannot
   // contain them, so without this a contact added offline was invisible while the Dexie duplicate

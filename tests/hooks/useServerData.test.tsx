@@ -3,6 +3,11 @@ import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { useServerData } from '@/hooks/useServerData'
 import { useAppStore } from '@/store/app-store'
+import {
+  clearPrimedReads,
+  mountedReadSpecs,
+  rememberReadSpec,
+} from '@/api/primed-reads'
 
 /**
  * The one hook test in the suite, because the defect it pins is not expressible as a pure
@@ -168,5 +173,59 @@ describe('useServerData', () => {
 
     // `fromCache` drives a "showing saved data" line; leaving it set describes nothing at all.
     expect(seen.at(-1)).toMatchObject({ data: undefined, error: null, fromCache: false })
+  })
+})
+
+/**
+ * Declaring which endpoint a screen renders is what lets a mutation ask the server to recompute
+ * exactly those and hand them back with the write. The registration has to track MOUNTING, not
+ * fetching: a key left behind by a closed screen makes every later write pay for a payload nobody
+ * is looking at, and a key that never registers costs a whole extra round trip after every save.
+ */
+function KeyedProbe({ endpointKey }: { endpointKey?: string }) {
+  useServerData(() => Promise.resolve({ data: 1, fromCache: false, fetchedAt: 'x' }), [endpointKey], endpointKey)
+  return null
+}
+
+describe('useServerData endpoint registration', () => {
+  beforeEach(() => clearPrimedReads())
+  afterEach(() => clearPrimedReads())
+
+  it('registers its endpoint while mounted and releases it on unmount', async () => {
+    rememberReadSpec({ key: 'overview', fn: 'kwenta_balances_overview' })
+
+    await act(async () => {
+      root.render(<KeyedProbe endpointKey="overview" />)
+    })
+    expect(mountedReadSpecs().map((s) => s.key)).toEqual(['overview'])
+
+    await act(async () => {
+      root.render(<KeyedProbe endpointKey={undefined} />)
+    })
+    expect(mountedReadSpecs()).toEqual([])
+  })
+
+  it('follows the subject when the same screen moves to another entity', async () => {
+    // /app/people/alice → /app/people/bob reuses this hook without remounting. Holding on to
+    // alice's key would make the next write recompute a person the user has navigated away from.
+    rememberReadSpec({ key: 'person:alice', fn: 'kwenta_person_summary', argName: 'p_person_id', id: 'alice' })
+    rememberReadSpec({ key: 'person:bob', fn: 'kwenta_person_summary', argName: 'p_person_id', id: 'bob' })
+
+    await act(async () => {
+      root.render(<KeyedProbe endpointKey="person:alice" />)
+    })
+    expect(mountedReadSpecs().map((s) => s.key)).toEqual(['person:alice'])
+
+    await act(async () => {
+      root.render(<KeyedProbe endpointKey="person:bob" />)
+    })
+    expect(mountedReadSpecs().map((s) => s.key)).toEqual(['person:bob'])
+  })
+
+  it('registers nothing when the caller declares no endpoint', async () => {
+    await act(async () => {
+      root.render(<KeyedProbe endpointKey={undefined} />)
+    })
+    expect(mountedReadSpecs()).toEqual([])
   })
 })

@@ -1,6 +1,7 @@
 import { supabase } from '@/lib/supabase'
 import { now } from '@/lib/utils'
 import { readCache, writeCache } from '@/api/cache'
+import { consumePrimedRead, rememberReadSpec, rpcArgs, type ReadSpec } from '@/api/primed-reads'
 import type { SettlementMovementLeg } from '@/lib/settlement'
 
 /**
@@ -159,20 +160,45 @@ function toTotals(value: unknown): CurrencyTotals {
 }
 
 /**
- * Call an RPC, caching the result for offline use.
+ * Call a read endpoint, caching the result for offline use.
  *
  * Offline (or on failure) it falls back to the last good copy and flags it, so a screen can say
  * "showing saved data" instead of rendering an empty state that looks like "you have nothing".
+ *
+ * The RPC and the mapper are separate arguments rather than one closure so that a payload arriving
+ * by another route — `kwenta_write` returning this endpoint already recomputed — runs through the
+ * SAME mapper. Those mappers encode real rules (`numeric` as a string, a null total that must be
+ * dropped rather than read as zero); a second copy for the priming path would drift from this one.
  */
-async function fetchWithCache<T>(
+async function fetchEndpoint<T>(
   endpoint: string,
   userId: string,
-  call: () => Promise<T>,
+  spec: Omit<ReadSpec, 'key'>,
+  map: (raw: unknown) => T,
 ): Promise<{ data: T; fromCache: boolean; fetchedAt: string }> {
+  rememberReadSpec({ ...spec, key: endpoint })
+
+  // A write that carried this endpoint already asked the server for it, after applying the
+  // mutation and in the same transaction. Serving that is not a cache hit — it is a server answer
+  // that is strictly newer than anything a fetch started now could return.
+  const primedHit = consumePrimedRead(endpoint)
+  if (primedHit) {
+    try {
+      const data = map(primedHit.raw)
+      const at = now()
+      writeCache(endpoint, userId, data, at)
+      return { data, fromCache: false, fetchedAt: at }
+    } catch {
+      // An unexpected shape must not break the screen; fall through and fetch it properly.
+    }
+  }
+
   const offline = typeof navigator !== 'undefined' && !navigator.onLine
   if (!offline) {
     try {
-      const data = await call()
+      const { data: raw, error } = await supabase.rpc(spec.fn, rpcArgs(spec))
+      if (error) throw error
+      const data = map(raw)
       const at = now()
       writeCache(endpoint, userId, data, at)
       return { data, fromCache: false, fetchedAt: at }
@@ -194,33 +220,39 @@ async function fetchWithCache<T>(
 }
 
 export async function fetchContactsWithBalances(userId: string) {
-  return fetchWithCache<ContactBalanceRow[]>('contacts', userId, async () => {
-    const { data, error } = await supabase.rpc('kwenta_contacts_with_balances')
-    if (error) throw error
-    if (!Array.isArray(data)) throw new Error('unexpected response shape')
-    return (data as Record<string, unknown>[]).map((row) => ({
-      peerId: String(row.peerId ?? ''),
-      displayName: String(row.displayName ?? 'Unknown'),
-      subtitle: typeof row.subtitle === 'string' && row.subtitle ? row.subtitle : undefined,
-      net: toTotals(row.net),
-    }))
-  })
+  return fetchEndpoint<ContactBalanceRow[]>(
+    'contacts',
+    userId,
+    { fn: 'kwenta_contacts_with_balances' },
+    (data) => {
+      if (!Array.isArray(data)) throw new Error('unexpected response shape')
+      return (data as Record<string, unknown>[]).map((row) => ({
+        peerId: String(row.peerId ?? ''),
+        displayName: String(row.displayName ?? 'Unknown'),
+        subtitle: typeof row.subtitle === 'string' && row.subtitle ? row.subtitle : undefined,
+        net: toTotals(row.net),
+      }))
+    },
+  )
 }
 
 export async function fetchBalancesOverview(userId: string) {
-  return fetchWithCache<BalancesOverview>('overview', userId, async () => {
-    const { data, error } = await supabase.rpc('kwenta_balances_overview')
-    if (error) throw error
-    const o = (data ?? {}) as Record<string, unknown>
-    return {
-      personalReceive: toTotals(o.personalReceive),
-      personalPay: toTotals(o.personalPay),
-      combinedReceive: toTotals(o.combinedReceive),
-      combinedPay: toTotals(o.combinedPay),
-      groupReceive: toTotals(o.groupReceive),
-      groupPay: toTotals(o.groupPay),
-    }
-  })
+  return fetchEndpoint<BalancesOverview>(
+    'overview',
+    userId,
+    { fn: 'kwenta_balances_overview' },
+    (data) => {
+      const o = (data ?? {}) as Record<string, unknown>
+      return {
+        personalReceive: toTotals(o.personalReceive),
+        personalPay: toTotals(o.personalPay),
+        combinedReceive: toTotals(o.combinedReceive),
+        combinedPay: toTotals(o.combinedPay),
+        groupReceive: toTotals(o.groupReceive),
+        groupPay: toTotals(o.groupPay),
+      }
+    },
+  )
 }
 
 export type GroupBalanceRow = {
@@ -293,11 +325,11 @@ export type StatementEvent = {
 
 /** The statement's raw events; the running-balance walk stays in `buildMoneyFlowRows`. */
 export async function fetchPersonStatement(userId: string, personId: string) {
-  return fetchWithCache<StatementEvent[]>(`statement:${personId}`, userId, async () => {
-    const { data, error } = await supabase.rpc('kwenta_person_statement', {
-      p_person_id: personId,
-    })
-    if (error) throw error
+  return fetchEndpoint<StatementEvent[]>(
+    `statement:${personId}`,
+    userId,
+    { fn: 'kwenta_person_statement', argName: 'p_person_id', id: personId },
+    (data) => {
     if (!Array.isArray(data)) throw new Error('unexpected response shape')
     return (data as Record<string, unknown>[]).map((e) => ({
       id: String(e.id ?? ''),
@@ -313,7 +345,8 @@ export async function fetchPersonStatement(userId: string, personId: string) {
       rawAmount: Number(e.rawAmount ?? 0),
       delta: Number(e.delta ?? 0),
     }))
-  })
+    },
+  )
 }
 
 export type SearchResults = {
@@ -387,9 +420,11 @@ export type GroupDetail = {
 
 /** Resolves to null when the group is missing, deleted, or the caller is not an active member. */
 export async function fetchGroupDetail(userId: string, groupId: string) {
-  return fetchWithCache<GroupDetail | null>(`group:${groupId}`, userId, async () => {
-    const { data, error } = await supabase.rpc('kwenta_group_detail', { p_group_id: groupId })
-    if (error) throw error
+  return fetchEndpoint<GroupDetail | null>(
+    `group:${groupId}`,
+    userId,
+    { fn: 'kwenta_group_detail', argName: 'p_group_id', id: groupId },
+    (data) => {
     if (!data || typeof data !== 'object') return null
     const o = data as Record<string, unknown>
     const g = (o.group ?? {}) as Record<string, unknown>
@@ -440,7 +475,8 @@ export async function fetchGroupDetail(userId: string, groupId: string) {
         amount: Number(d.amount ?? 0),
       })),
     }
-  })
+    },
+  )
 }
 
 export type BillSplitRow = {
@@ -476,9 +512,11 @@ export type BillDetail = {
 
 /** Resolves to null when the bill is not readable — deleted and not-yours are indistinguishable. */
 export async function fetchBillDetail(userId: string, billId: string) {
-  return fetchWithCache<BillDetail | null>(`bill:${billId}`, userId, async () => {
-    const { data, error } = await supabase.rpc('kwenta_bill_detail', { p_bill_id: billId })
-    if (error) throw error
+  return fetchEndpoint<BillDetail | null>(
+    `bill:${billId}`,
+    userId,
+    { fn: 'kwenta_bill_detail', argName: 'p_bill_id', id: billId },
+    (data) => {
     if (!data || typeof data !== 'object') return null
     const o = data as Record<string, unknown>
     const b = (o.bill ?? {}) as Record<string, unknown>
@@ -525,71 +563,84 @@ export async function fetchBillDetail(userId: string, billId: string) {
         squareOverall: p.squareOverall === true,
       })),
     }
-  })
+    },
+  )
 }
 
 export async function fetchGroupsWithBalances(userId: string) {
-  return fetchWithCache<GroupBalanceRow[]>('groups', userId, async () => {
-    const { data, error } = await supabase.rpc('kwenta_groups_with_balances')
-    if (error) throw error
-    if (!Array.isArray(data)) throw new Error('unexpected response shape')
-    return (data as Record<string, unknown>[]).map((row) => ({
-      groupId: String(row.groupId ?? ''),
-      name: String(row.name ?? ''),
-      currency: String(row.currency ?? ''),
-      memberCount: Number(row.memberCount ?? 0),
-      updatedAt: String(row.updatedAt ?? ''),
-      totalToReceive: Number(row.totalToReceive ?? 0),
-      totalToPay: Number(row.totalToPay ?? 0),
-    }))
-  })
+  return fetchEndpoint<GroupBalanceRow[]>(
+    'groups',
+    userId,
+    { fn: 'kwenta_groups_with_balances' },
+    (data) => {
+      if (!Array.isArray(data)) throw new Error('unexpected response shape')
+      return (data as Record<string, unknown>[]).map((row) => ({
+        groupId: String(row.groupId ?? ''),
+        name: String(row.name ?? ''),
+        currency: String(row.currency ?? ''),
+        memberCount: Number(row.memberCount ?? 0),
+        updatedAt: String(row.updatedAt ?? ''),
+        totalToReceive: Number(row.totalToReceive ?? 0),
+        totalToPay: Number(row.totalToPay ?? 0),
+      }))
+    },
+  )
 }
 
 export async function fetchPersonalBills(userId: string) {
-  return fetchWithCache<PersonalBillBuckets>('personal-bills', userId, async () => {
-    const { data, error } = await supabase.rpc('kwenta_personal_bills')
-    if (error) throw error
-    const o = (data ?? {}) as Record<string, unknown>
-    const bucket = (v: unknown) =>
-      Array.isArray(v) ? (v as Record<string, unknown>[]).map(toBillRow) : []
-    return { mine: bucket(o.mine), shared: bucket(o.shared) }
-  })
+  return fetchEndpoint<PersonalBillBuckets>(
+    'personal-bills',
+    userId,
+    { fn: 'kwenta_personal_bills' },
+    (data) => {
+      const o = (data ?? {}) as Record<string, unknown>
+      const bucket = (v: unknown) =>
+        Array.isArray(v) ? (v as Record<string, unknown>[]).map(toBillRow) : []
+      return { mine: bucket(o.mine), shared: bucket(o.shared) }
+    },
+  )
 }
 
 export async function fetchRecentBills(userId: string, limit = 5) {
-  return fetchWithCache<RecentBill[]>('recent-bills', userId, async () => {
-    const { data, error } = await supabase.rpc('kwenta_recent_bills', { p_limit: limit })
-    if (error) throw error
-    if (!Array.isArray(data)) throw new Error('unexpected response shape')
-    return (data as Record<string, unknown>[]).map((row) => ({
-      id: String(row.id ?? ''),
-      title: String(row.title ?? ''),
-      amount: Number(row.amount ?? 0),
-      currency: String(row.currency ?? ''),
-      createdAt: String(row.createdAt ?? ''),
-      groupName: typeof row.groupName === 'string' && row.groupName ? row.groupName : undefined,
-    }))
-  })
+  return fetchEndpoint<RecentBill[]>(
+    'recent-bills',
+    userId,
+    { fn: 'kwenta_recent_bills', limit },
+    (data) => {
+      if (!Array.isArray(data)) throw new Error('unexpected response shape')
+      return (data as Record<string, unknown>[]).map((row) => ({
+        id: String(row.id ?? ''),
+        title: String(row.title ?? ''),
+        amount: Number(row.amount ?? 0),
+        currency: String(row.currency ?? ''),
+        createdAt: String(row.createdAt ?? ''),
+        groupName: typeof row.groupName === 'string' && row.groupName ? row.groupName : undefined,
+      }))
+    },
+  )
 }
 
 export async function fetchPersonSummary(userId: string, personId: string) {
-  return fetchWithCache<PersonSummary>(`person:${personId}`, userId, async () => {
-    const { data, error } = await supabase.rpc('kwenta_person_summary', { p_person_id: personId })
-    if (error) throw error
-    const o = (data ?? {}) as Record<string, unknown>
-    const groups = Array.isArray(o.groups) ? (o.groups as Record<string, unknown>[]) : []
-    return {
-      personal: toTotals(o.personal),
-      total: toTotals(o.total),
-      groups: groups.map((g) => ({
-        groupId: String(g.groupId ?? ''),
-        groupName: String(g.groupName ?? ''),
-        currency: String(g.currency ?? ''),
-        net: Number(g.net ?? 0),
-        theirNet: Number(g.theirNet ?? 0),
-      })),
-    }
-  })
+  return fetchEndpoint<PersonSummary>(
+    `person:${personId}`,
+    userId,
+    { fn: 'kwenta_person_summary', argName: 'p_person_id', id: personId },
+    (data) => {
+      const o = (data ?? {}) as Record<string, unknown>
+      const groups = Array.isArray(o.groups) ? (o.groups as Record<string, unknown>[]) : []
+      return {
+        personal: toTotals(o.personal),
+        total: toTotals(o.total),
+        groups: groups.map((g) => ({
+          groupId: String(g.groupId ?? ''),
+          groupName: String(g.groupName ?? ''),
+          currency: String(g.currency ?? ''),
+          net: Number(g.net ?? 0),
+          theirNet: Number(g.theirNet ?? 0),
+        })),
+      }
+    },
+  )
 }
 
 export type SettlementRecipient = { toUserId: string; toName: string; amount: number }
@@ -672,41 +723,30 @@ function toHistoryList(data: unknown): SettlementHistoryItem[] {
 }
 
 export async function fetchBillSettlementHistory(userId: string, billId: string) {
-  return fetchWithCache<SettlementHistoryItem[]>(`bill-payments:${billId}`, userId, async () => {
-    const { data, error } = await supabase.rpc('kwenta_bill_settlement_history', {
-      p_bill_id: billId,
-    })
-    if (error) throw error
-    return toHistoryList(data)
-  })
+  return fetchEndpoint<SettlementHistoryItem[]>(
+    `bill-payments:${billId}`,
+    userId,
+    { fn: 'kwenta_bill_settlement_history', argName: 'p_bill_id', id: billId },
+    toHistoryList,
+  )
 }
 
 /** Resolves to null when the caller is not an active member of the group. */
 export async function fetchGroupSettlementHistory(userId: string, groupId: string) {
-  return fetchWithCache<SettlementHistoryItem[] | null>(
+  return fetchEndpoint<SettlementHistoryItem[] | null>(
     `group-payments:${groupId}`,
     userId,
-    async () => {
-      const { data, error } = await supabase.rpc('kwenta_group_settlement_history', {
-        p_group_id: groupId,
-      })
-      if (error) throw error
-      return data === null ? null : toHistoryList(data)
-    },
+    { fn: 'kwenta_group_settlement_history', argName: 'p_group_id', id: groupId },
+    (data) => (data === null ? null : toHistoryList(data)),
   )
 }
 
 export async function fetchPersonSettlementHistory(userId: string, personId: string) {
-  return fetchWithCache<SettlementHistoryItem[]>(
+  return fetchEndpoint<SettlementHistoryItem[]>(
     `person-payments:${personId}`,
     userId,
-    async () => {
-      const { data, error } = await supabase.rpc('kwenta_person_settlement_history', {
-        p_person_id: personId,
-      })
-      if (error) throw error
-      return toHistoryList(data)
-    },
+    { fn: 'kwenta_person_settlement_history', argName: 'p_person_id', id: personId },
+    toHistoryList,
   )
 }
 
@@ -718,21 +758,24 @@ export type GroupSpending = {
 
 /** Resolves to null when the caller is not an active member of the group. */
 export async function fetchGroupSpending(userId: string, groupId: string) {
-  return fetchWithCache<GroupSpending | null>(`group-spending:${groupId}`, userId, async () => {
-    const { data, error } = await supabase.rpc('kwenta_group_spending', { p_group_id: groupId })
-    if (error) throw error
-    if (!data || typeof data !== 'object') return null
-    const o = data as Record<string, unknown>
-    const rows = Array.isArray(o.rows) ? (o.rows as Record<string, unknown>[]) : []
-    return {
-      currency: String(o.currency ?? ''),
-      rows: rows.map((r) => ({
-        userId: String(r.userId ?? ''),
-        displayName: String(r.displayName ?? 'Unknown'),
-        amount: Number(r.amount ?? 0),
-      })),
-    }
-  })
+  return fetchEndpoint<GroupSpending | null>(
+    `group-spending:${groupId}`,
+    userId,
+    { fn: 'kwenta_group_spending', argName: 'p_group_id', id: groupId },
+    (data) => {
+      if (!data || typeof data !== 'object') return null
+      const o = data as Record<string, unknown>
+      const rows = Array.isArray(o.rows) ? (o.rows as Record<string, unknown>[]) : []
+      return {
+        currency: String(o.currency ?? ''),
+        rows: rows.map((r) => ({
+          userId: String(r.userId ?? ''),
+          displayName: String(r.displayName ?? 'Unknown'),
+          amount: Number(r.amount ?? 0),
+        })),
+      }
+    },
+  )
 }
 
 export type MemberPaymentParty = { memberUserId: string; displayName: string; amount: number }
@@ -746,15 +789,7 @@ export type MemberPaymentBreakdown = {
   receives: MemberPaymentParty[]
 }
 
-async function callGroupMemberBreakdown(
-  groupId: string,
-  memberId: string,
-): Promise<MemberPaymentBreakdown | null> {
-  const { data, error } = await supabase.rpc('kwenta_group_member_breakdown', {
-    p_group_id: groupId,
-    p_member_id: memberId,
-  })
-  if (error) throw error
+function toMemberBreakdown(data: unknown): MemberPaymentBreakdown | null {
   if (!data || typeof data !== 'object') return null
   const o = data as Record<string, unknown>
   const parties = (v: unknown) =>
@@ -774,17 +809,33 @@ async function callGroupMemberBreakdown(
   }
 }
 
+async function callGroupMemberBreakdown(
+  groupId: string,
+  memberId: string,
+): Promise<MemberPaymentBreakdown | null> {
+  const { data, error } = await supabase.rpc('kwenta_group_member_breakdown', {
+    p_group_id: groupId,
+    p_member_id: memberId,
+  })
+  if (error) throw error
+  return toMemberBreakdown(data)
+}
+
 /** Throws `ServerDeclinedError` when the caller is not an active member of the group. */
 export async function fetchGroupMemberBreakdown(
   userId: string,
   groupId: string,
   memberId: string,
 ): Promise<{ data: MemberPaymentBreakdown; fromCache: boolean; fetchedAt: string }> {
-  const result = await fetchWithCache<MemberPaymentBreakdown | null>(
+  const result = await fetchEndpoint<MemberPaymentBreakdown | null>(
     `group-breakdown:${groupId}:${memberId}`,
     userId,
-    async () => {
-      const data = await callGroupMemberBreakdown(groupId, memberId)
+    {
+      fn: 'kwenta_group_member_breakdown',
+      extraArgs: { p_group_id: groupId, p_member_id: memberId },
+    },
+    (raw) => {
+      const data = toMemberBreakdown(raw)
       if (data === null) throw new ServerDeclinedError(GROUP_MEMBERSHIP_DECLINED)
       return data
     },

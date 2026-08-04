@@ -63,7 +63,7 @@ export function BillsPage() {
     () => (userId ? fetchPersonalBills(userId) : Promise.reject(new Error('no user'))),
     [userId],
   )
-  const billsQuery = useServerData(userId ? loadBills : null, [userId, loadBills])
+  const billsQuery = useServerData(userId ? loadBills : null, [userId, loadBills], 'personal-bills')
 
   // The one fact the server cannot know: which of these rows this device has not sent yet.
   // Written offline, it is queued locally and must be flagged rather than shown as confirmed.

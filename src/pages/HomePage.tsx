@@ -94,13 +94,13 @@ export function HomePage() {
     () => (userId ? fetchBalancesOverview(userId) : Promise.reject(new Error('no user'))),
     [userId],
   )
-  const overview = useServerData(userId ? loadOverview : null, [userId, loadOverview])
+  const overview = useServerData(userId ? loadOverview : null, [userId, loadOverview], 'overview')
 
   const loadRecentBills = useCallback(
     () => (userId ? fetchRecentBills(userId, 5) : Promise.reject(new Error('no user'))),
     [userId],
   )
-  const recent = useServerData(userId ? loadRecentBills : null, [userId, loadRecentBills])
+  const recent = useServerData(userId ? loadRecentBills : null, [userId, loadRecentBills], 'recent-bills')
 
   // No user yet counts as loading: the zero state is a claim about money, and flashing it before
   // the session resolves tells the user they are settled up when nothing has been asked yet.

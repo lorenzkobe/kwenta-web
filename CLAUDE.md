@@ -42,6 +42,7 @@ Tests are **mandatory** for this project — we create tests and run testing as 
   - `tests/db/`: `operations` (createBill/updateBill/deleteBill, createGroup, addGroupMember, removeGroupMember split redistribution, createSettlement, linkProfileToRemote id rewrites, deleteGroup cascade, getBillWithDetails). The write-path guards mock `@/api/balances` and pin how each DEGRADES when the server cannot answer: the payment cap is skipped (overpaying is legal), member removal is refused. Payment tests assert the ROWS written, not a recomputed balance — that arithmetic is SQL's.
   - `tests/lib/` storage: `kwenta-storage-keys` (refresh marker + legacy-cursor migration, incl. failing storage writes)
   - `tests/sync/`: `sync-service` helpers (`getMillisecondsSinceLastRefresh`, `hasUnsyncedLocalDataForUser` incl. RLS push-filter, `shouldApplyPulledRow`, `compareTimestamps`); `sync-round-trip` (complete-bundle guarantees, echo guard, push stamping); `sync-manager` (navigation refresh: throttle, release, backoff isolation, monotonic clock); `pull-pagination` (PostgREST max-rows paging in the fallback path); `realtime-batch` (burst coalescing + `latestEventCreatedAt`, the server-clock cursor source)
+  - `tests/api/primed-reads.test.ts` + `tests/sync/write-returns-reads.test.ts`: the 066 client contract — a write asks for exactly the mounted endpoints and for nothing when no screen is up; the returned payload is served to the next read with NO request, through the endpoint's own mapper (so `numeric`-as-string still becomes a number), reported fresh rather than as a saved copy, consumed once, and discarded by the next write; a rejected write primes nothing; the mirror-refresh marker is NOT stamped on the `kwenta_write` path but IS on the `kwenta_sync` fallback; and the full fallback chain against a pre-066 and a pre-050 database
   - `tests/db/cloud-first-write.test.ts`: the cloud-first write contract (accept / transport error / silent server-side drop / partial drop; rejected update and delete leave the original intact; multi-leg payment is all-or-nothing; a retry after rejection makes exactly one bill)
   - `tests/sync/cloud-write-idempotency.test.ts`: submission ids (replay reports the original outcome; fallback and probe-caching against a pre-`050` server)
   - `tests/api/`: `cache` (per-user scoping, corrupt entries, quota failure + evict-and-retry, the 60-entry cap, `clearApiCache`). **Injecting a storage failure needs `Object.defineProperty` on the `localStorage` INSTANCE** — plain assignment is swallowed by happy-dom's proxy and `vi.spyOn(Storage.prototype, …)` is never consulted, so either one makes a "survives a failing write" test pass without the failure path running; `balances` (the RPC mappers for every endpoint — overview, contacts, person summary, groups, personal bills, recent bills — PostgREST returns `numeric` as a STRING, and a null total must be DROPPED rather than coerced to a real zero balance; cache fallback, offline, and cross-user isolation); `settlement-history` (the 064 mappers — bundled item shape, legs kept distinct from recipients, a null `groupName` becoming an ABSENT key rather than the string "null", null-vs-empty group history, and that the two GUARD loaders never serve a cached answer)
@@ -143,6 +144,11 @@ SQL coverage so far (`supabase/tests/sql/`):
   member is still SENT the rows by 024 and must still be refused), the person list staying per-leg
   and identity-expanded, currency-scoped spending, breakdown signs with the subject-need-not-be-
   active case, and the owed cap in both directions.
+- `066_write_returns_reads` — the echo carries this submission's rows and NOT the caller's other
+  bills (an echo is not a second pull bundle); `reads` already contains the bill just written and
+  the overview total it moved; an unknown or refused read is dropped without failing the write; a
+  replayed submission applies once but recomputes its reads; the push validators still refuse
+  another user's contact so it can be neither stored nor echoed; and the 065-style grant sweep.
 - `055_fix_merged_contact_double_count` — merging two contacts as the same person used to double
   the Home headline (one 100 bill split evenly showed 100 owed instead of 50). Canonical peers are
   now grouped on the whole identity **cluster** rather than resolved one hop at a time; one-hop
@@ -377,7 +383,7 @@ migration made an offline save invisible, which users read as "it failed" — an
 bill is exactly the duplicate path cloud-first writes were built to close. Staged rows carry no
 money: `settled` is false and pairwise nets are empty, because the server has never seen the row.
 
-**A cached answer must look different from a fresh one.** `fetchWithCache` returns
+**A cached answer must look different from a fresh one.** `fetchEndpoint` returns
 `fromCache`/`fetchedAt`; every screen that renders server money shows `SavedCopyNotice`
 (`src/components/common/SavedCopyNotice.tsx`) when it is serving one. An authorization failure is
 NOT served from cache at all — losing access must not read as staleness.
@@ -392,7 +398,11 @@ What is left in TypeScript is pure transforms of bounded input, each with its Vi
 
 The old incremental cursor (`kwenta_last_pull`) was stamped from the **device clock** after the query ran, so clock skew or a row written mid-round-trip was skipped permanently, and any server-side change that did not bump the client-written `updated_at` could never reach a device — the only cure was wiping local data. Do not reintroduce it (guarded by a test on `PULL_SINCE_EPOCH`).
 
-`kwenta_last_refresh` in `localStorage` records the last successful refresh. It is **display/scheduling only** (staleness chip, backup-timer skip, initial-hydration gate) and never filters a query; `readLastRefreshAt()` migrates the legacy `kwenta_last_pull` key once. Refresh triggers: app start, focus/visibility, reconnect, route change (`useRefreshOnNavigation`, rate-limited to 5s), the 5-minute backup timer, realtime events, and after every mutation.
+`kwenta_last_refresh` in `localStorage` records the last successful refresh. It is **display/scheduling only** (staleness chip, backup-timer skip, initial-hydration gate) and never filters a query; `readLastRefreshAt()` migrates the legacy `kwenta_last_pull` key once. Mirror-refresh triggers: app start, tab activation (one handler for `focus` + `visibilitychange`, rate-limited to 5s), reconnect, the 5-minute backup timer, realtime events, and an offline write replaying.
+
+**Route changes do NOT sync** *(removed 2026-08-04)*. Opening a screen fetches that screen's own scoped endpoint, which IS server truth (rule 7), so pulling the whole bundle per route change bought nothing and cost 213 kB a tap. A write no longer refreshes the mirror either: `kwenta_write` (066) returns only its own rows and deliberately does not stamp `kwenta_last_refresh`.
+
+**`dataVersion` is bumped only when a sync actually moved something** — `pushed > 0 || changed > 0`, where `changed` counts rows written to Dexie. Bumping unconditionally made every mounted screen fetch on mount and then again when the concurrent sync resolved: the duplicated request pairs. `pulled` cannot gate it, because every bundle is complete and so is large on a round trip that changed nothing.
 
 Pushed rows are stamped `synced_at` only for ids the server reports in `applied` (migration 044). Two guards protect an offline write from the full bundle: `shouldApplyPulledRow` (never clobber a newer unsynced local row) and a refusal to apply any echo of a row **older than what this round trip pushed** (a silently dropped push must not be overwritten by the server's stale copy).
 
@@ -589,9 +599,10 @@ Migrations are numbered; there are two `021_` files. Core RPCs:
 | `063` | `kwenta_person_summary` group legs gain `theirNet` — that person's net against the group POOL, which is NOT the leg's pairwise `net`. The Person export card asks the pool question ("receives"/"pays" in this group); with a third member the two diverge (Bob fronting 90 for three is +60 to the pool but only +30 against you). Adds server-internal `kwenta_group_pool_net` |
 | `064` | **The last client-side money.** `kwenta_{bill,group,person}_settlement_history` (payment history, replacing three Dexie scans — one of which read the entire `settlements` table), `kwenta_group_spending` (the Total Spending pie; now currency-scoped, where the client version summed every currency and labelled it with the group's), `kwenta_group_member_breakdown` and `kwenta_owed_in_group`. The last two feed the two write-path guards, which stay CLIENT-side policy on purpose — see the header: `enforceCap` is opt-in because personal overpayment is legal, and the removal check is opt-out via `force` for the `deletePerson` cascade, so an unconditional server rule would break both, and one keyed off a client-supplied flag would not be enforcement. Internal helpers `kwenta_settlement_history_build`, `kwenta_settlement_party_name`, `kwenta_is_active_group_member` are not granted to `authenticated` |
 | `065` | **Apply first — it closes a live privacy hole.** `kwenta_build_pull_bundle` was never REVOKEd from PUBLIC and the `kwenta_push_*` validators were granted to `authenticated`; all take the acting user as an argument, so any signed-in client could read another user's profile/contacts/groups/settlements and write rows attributed to them (both reproduced in the 065 suite). Also: `payorName` in the shared bill bucket resolves through `kwenta_peer_display_name` instead of a pull-rows join that can never see another account (every shared row read "Paid by Someone"); `kwenta_bills_settled_map` computes each counterparty's tab ONCE for a whole list instead of once per bill (`kwenta_bill_settled` kept unchanged as the single-bill answer); `kwenta_bill_detail.mySplitTotal` is NULL again when the viewer holds no split, not `0`; `kwenta_person_statement` events carry `category` |
+| `066` | **A write stops downloading the dataset, and answers the screen.** `kwenta_sync` did two unrelated jobs — apply a push, and return the caller's complete row set — so saving a bill pulled ~213 kB to confirm one row, and the screen then fetched AGAIN because the balance a write moves is computed in SQL and is not derivable from the echoed rows. `kwenta_write(p_push, p_submission_id, p_reads)` returns the same envelope (nine table keys + `applied`, so the client's confirm/mirror loop is unchanged) carrying ONLY this submission's rows, read back through `kwenta_pull_rows_*`, plus `reads`: the payloads for the endpoints the caller named, recomputed AFTER the push in the same transaction. `kwenta_read` is the dispatch — a **whitelist**, because a client that could name any function would have a remote procedure call primitive; it is SECURITY INVOKER and adds no authority. `kwenta_write_echo` takes the acting user as an argument and is service_role only (rule 5). A failing or non-whitelisted read is dropped, never fatal to the write. Replay returns the stored `applied` but RECOMPUTES `reads` — a read is a view of current state, not an outcome |
 | `049` | Pull follows linked profiles: personal settlements, `bills_for_sync` / `relevant_bill_ids_for_user`, `kwenta_fetch_bill_bundle` and additive `FOR SELECT` policies route by identity, so a row that missed canonicalization still reaches the right account. **Reads only** — `user_is_participant_on_personal_bill` stays literal-id because it is the `USING` clause of the `FOR ALL` policies in `007` and the `WHERE` of the push validators in `044`; widening it granted the account behind a linked contact UPDATE/DELETE over the linker's bills. The widened read predicate is the separate `user_can_read_personal_bill`. |
 
-The `kwenta_sync` RPC is the single entry point for all sync: accepts push payload, applies it server-side, returns the pull bundle for `p_since` (the client always passes the epoch — see "Reads are always fresh"). Push validators enforce the same RLS rules the client filters apply.
+**Two write RPCs, one set of validators.** `kwenta_write` (066) is the mutation path: it applies the push and returns ONLY the rows it stored plus the recomputed payloads for the screens that were on display. `kwenta_sync` is the mirror-refresh and offline-replay path, and the fallback for a database without 066: it applies the push and returns the complete pull bundle for `p_since` (the client always passes the epoch — see "Reads are always fresh"). Both go through the same `kwenta_push_*` validators, which enforce the same RLS rules the client filters apply.
 
 **Deletion is server-authoritative.** A device is sent only its own profile plus its own local contacts, so it cannot judge whether a person, bill or group exists — a client that soft-deletes from its cache will eventually delete real data (it did: personal payments between two accounts with no shared group). `kwenta_repair_settlements` (048) makes that decision server-side; `src/lib/kwenta-data-repair.ts` only calls it and mirrors the result. Never reintroduce client-side soft-deletes driven by "I can't find X".
 
@@ -651,6 +662,7 @@ The `kwenta_sync` RPC is the single entry point for all sync: accepts push paylo
 | `src/sync/cloud-first-mutations.ts` | `finalizeMutationSync`, pending mutation tracking |
 | `src/sync/realtime-events.ts` | Supabase Realtime subscription + event processing |
 | `src/api/balances.ts` | Every server-computed read (balances, lists, detail screens, history) |
+| `src/api/primed-reads.ts` | Which endpoints are on screen, and the payloads a write already answered |
 | `src/hooks/useServerData.ts` | Fetch + `dataVersion` invalidation for server-backed screens |
 | `src/lib/people.ts` | Profile display, linking, identity expansion, contact discovery |
 | `src/lib/settlement.ts` | Settlement view-model types + `buildMovementChains` |
@@ -775,7 +787,7 @@ Each of these reflects a real past correction in this repo:
 2. **Deletion is server-authoritative.** A device is sent only its own profile plus its own
    local contacts, so it can never conclude that a person/bill/group does not exist. No
    client-side soft-delete driven by a missing row — ever.
-3. **Migrations are append-only.** Next number: **`066`**. Never edit a past migration.
+3. **Migrations are append-only.** Next number: **`067`**. Never edit a past migration.
    **Every migration carries its own explanatory header** — what broke, why the shape is
    what it is, and whether it must be applied before the code that uses it ships. That
    header is the canonical record; read it rather than trusting any summary. A signature or
@@ -798,7 +810,10 @@ Each of these reflects a real past correction in this repo:
    complete bundle", 2026-08-04.)* A screen fetches what that screen shows. **Online, the
    server response IS the list** — the cache exists for offline display and is never
    consulted to decide whether a row exists, so a scoped read can never be mistaken for a
-   deletion. `kwenta_sync` remains the **write** path. Still forbidden: **stamping any sync
+   deletion. `kwenta_write` (066) is the **write** path and `kwenta_sync` the mirror refresh.
+   A write returns the recomputed payloads for the mounted endpoints, so the re-read it triggers
+   costs no request; those payloads run through the endpoint's normal mapper, never a second copy
+   of its shape rules. Still forbidden: **stamping any sync
    cursor from the device clock** — the realtime cursor takes the max *server-supplied*
    `created_at`. A fast clock writes a cursor into the future and then silently filters out
    every later event, permanently.
