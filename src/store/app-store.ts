@@ -1,14 +1,16 @@
 import { create } from 'zustand'
-import { KWENTA_LAST_PULL_STORAGE_KEY } from '@/lib/kwenta-storage-keys'
+import { readLastRefreshAt } from '@/lib/kwenta-storage-keys'
 
 type SyncStatus = 'idle' | 'syncing' | 'error'
 
-/** First cloud pull after sign-in (no last-pull cursor) — gate shell until success or offline/error escape hatch. */
+/** First cloud refresh after sign-in (no refresh marker) — gate shell until success or offline/error escape hatch. */
 export type InitialCloudHydration = 'pending' | 'ready' | 'failed'
 
 function initialCloudHydrationFromStorage(): InitialCloudHydration {
   if (typeof localStorage === 'undefined') return 'pending'
-  return localStorage.getItem(KWENTA_LAST_PULL_STORAGE_KEY) ? 'ready' : 'pending'
+  // readLastRefreshAt() migrates the legacy cursor key, so an upgraded install counts as
+  // hydrated instead of re-gating the shell behind a fresh refresh.
+  return readLastRefreshAt() ? 'ready' : 'pending'
 }
 type RuntimeFlagKey =
   | 'dedupeSyncEnabled'

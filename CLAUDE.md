@@ -25,14 +25,19 @@ Tests are **mandatory** for this project — we create tests and run testing as 
 - `tests/setup.ts` (registered as `setupFiles`) imports `fake-indexeddb/auto` so any module that touches `@/db/db` can open the DB. For Dexie-backed functions, use the factories + `resetDb()` in `tests/helpers/db.ts` (call `resetDb()` in `beforeEach`).
 - **Mocking Supabase / sync side-effects:** modules that import `@/lib/supabase` or fire sync/notifications (e.g. `operations.ts`, `kwenta-notifications.ts`, `sync-service.ts`) are tested by `vi.mock`-ing the network/side-effect deps and asserting Dexie/localStorage state. Use `vi.hoisted` to share controllable mock state with the hoisted `vi.mock` factory (see `tests/lib/kwenta-notifications.test.ts`, `tests/lib/cloud-first-mutations.test.ts`, `tests/db/operations.test.ts`). A benign `@/lib/supabase` stub (`rpc → {data:null,error:null}`) keeps `fetchRemoteProfileIntoDexie` offline.
 - When adding or changing behavior, add/extend unit tests that cover it. Prefer the pure-logic modules (`src/lib/splits.ts`, `src/lib/utils.ts`, `src/lib/bill-split-form.ts`, etc.). DB-coupled modules (`settlement.ts`, `people.ts`, `personal-bill-status.ts`, `operations.ts`) are tested against `fake-indexeddb`.
-- Run `npm test` before considering any change complete — it must pass (currently **389 tests / 30 files**).
+- Run `npm test` before considering any change complete — **it must pass in full**.
+  - No count is pinned here on purpose. A hard-coded total goes stale the moment anyone adds a test file, and a stale figure is worse than none: the next contributor sees a different number and cannot tell whether they broke something or fixed it. A green suite is the signal.
+  - What the number was really guarding is worth stating directly instead: **never delete a test, weaken an assertion, or skip a case to make a change pass.** If a test is genuinely wrong, say so and why in the change itself. (This is not hypothetical — a batch of repair-rule tests was dropped when those rules moved into SQL, and `npm test` stayed green while the behaviour went uncovered.)
 - Coverage inventory:
   - `tests/lib/` pure logic: `splits`, `utils` (incl. `roundMoney`/`isEffectivelyZero`/`MONEY_EPSILON`), `amount-input`, `bill-split-form`, `bill-navigation`, `balance-rollups`, `db-query-helpers`, `account-gate-messages`, `export-utils`, `bill-categories`, `auth-session-flags`, `runtime-flags`, `client-metrics`
   - `tests/lib/` DB-backed: `settlement` (incl. `listSettlementHistoryForBill`), `people`, `personal-bill-status`, `clear-kwenta-local`, `export-csv`
   - `tests/lib/` with mocked deps: `kwenta-notifications` (outbox/senders/flush/dead-letter), `cloud-first-mutations` (pending-mutation + conflict tracking)
   - `tests/db/`: `operations` (createBill/updateBill/deleteBill, createGroup, addGroupMember, removeGroupMember split redistribution, createSettlement, linkProfileToRemote id rewrites, deleteGroup cascade, getBillWithDetails)
-  - `tests/sync/`: `sync-service` helpers (`getMillisecondsSinceLastPull`, `hasUnsyncedLocalDataForUser` incl. RLS push-filter)
-  - Remaining gaps (network-orchestration heavy, lower ROI): `sync-service` push/pull/round-trip, `sync-manager` timers, `realtime-events` subscriptions, `export-pdf` (jsPDF rendering), `db/hooks.ts` (React `useLiveQuery`).
+  - `tests/lib/` storage: `kwenta-storage-keys` (refresh marker + legacy-cursor migration, incl. failing storage writes)
+  - `tests/sync/`: `sync-service` helpers (`getMillisecondsSinceLastRefresh`, `hasUnsyncedLocalDataForUser` incl. RLS push-filter, `shouldApplyPulledRow`, `compareTimestamps`); `sync-round-trip` (complete-bundle guarantees, echo guard, push stamping); `sync-manager` (navigation refresh: throttle, release, backoff isolation, monotonic clock); `pull-pagination` (PostgREST max-rows paging in the fallback path); `realtime-batch` (burst coalescing + `latestEventCreatedAt`, the server-clock cursor source)
+  - `tests/lib/kwenta-data-repair`: the CLIENT contract only (asks, never decides; mirrors; surfaces a failed mirror). The repair RULES are SQL — see below.
+  - Remaining gaps (network-orchestration heavy, lower ROI): `realtime-events` subscriptions, `export-pdf` (jsPDF rendering), `db/hooks.ts` (React `useLiveQuery`).
+  - **Uncovered by design of the runner:** everything that lives in SQL — the `kwenta_repair_settlements` rules (which decide what gets soft-deleted), the read/write predicate split in `049`, and `relevant_bill_ids_for_user` (which gates what every user pulls, so a wrong set is a cross-account leak, not a slow query). Vitest has no Postgres. If you change any of them, verify against a branch database by hand; `npm test` cannot tell you they are wrong.
 
 After every edit, run `npm run build` to confirm no TypeScript errors. If the build reports `TS1127: Invalid character`, the Edit tool introduced Unicode curly quotes (`'`, `'`, `"`, `"`) into string literals. Fix with:
 
@@ -106,9 +111,11 @@ Cloud-first covers only the **write path**. The UI always reads from Dexie. Dexi
 
 `kwenta_build_pull_bundle` controls what each user receives on pull. Profiles are scoped:
 ```sql
-WHERE p.id = uid OR (p.is_local IS TRUE AND p.owner_id = uid)
+WHERE p.id = uid
+   OR (p.is_local IS TRUE AND p.owner_id = uid)
+   OR (p.is_local IS TRUE AND p.linked_profile_id = uid AND p.is_deleted IS FALSE)
 ```
-A user **never** receives another user's local contacts, even when sharing a group. This is intentional.
+A user does **not** receive another user's local contacts merely because they share a group. The single exception (migration `049`) is a contact explicitly **linked to you** — a row that already asserts "this contact IS your account". Without it, `049`'s identity-routed settlements arrive referencing a profile id the receiving device can never resolve, so `expandProfileIdsForSplitMatching` cannot match them and the payment stays invisible on the device the widening exists to reach.
 
 Consequence: `db.profiles.get(userId)` returns `undefined` for local contacts owned by someone else. **Always fall back to `group_members.display_name` when resolving names in a group context:**
 ```typescript
@@ -145,10 +152,10 @@ Three profile flavors in Dexie (`src/types/index.ts`):
 **`kwenta_user_events`** — `realtime-events.ts` subscribes for entity change events.
 - On event: call targeted bundle fetch RPC (bill/group/settlement)
 - On reconnect: catch up via `catchUpSince` from last-seen event id (localStorage)
-- `catchUpSince` bulk path (>5 missed events): before bulk `syncRoundTrip`, checks fetched events and does a targeted query for profile link events — if any found, clears `KWENTA_LAST_PULL_STORAGE_KEY` so the bulk sync does a full pull from epoch (bill records with old `updated_at` would otherwise be skipped)
+- `catchUpSince` bulk path (>5 missed events): one `syncRoundTrip` instead of N per-event RPCs. It needs no profile-link special-casing any more — every pull is already a complete bundle — and it advances the cursor to the max `created_at` of the events it fetched, not `now()`
 - `realtimeCatchupSingleRun` flag deduplicates concurrent catch-ups
 - `targetedRealtimeReconcile` flag: use `kwenta_reconcile_user_event` RPC instead of full pull
-- `coalesceRealtimeBatch` flag (default on): `flush()` drains the whole queue per burst and runs `planRealtimeBatch` (`src/sync/realtime-batch.ts`, pure/tested). A lone fresh event keeps the targeted reconcile; **≥2 fresh events collapse into one `syncRoundTrip`** instead of one reconcile RPC per event. A bundled settle-up fans out into one settlement event *per leg per member* (trigger `kwenta_on_settlement_changed` is `FOR EACH ROW`), so this turns N reconcile RPCs into a single round trip. The last-seen cursor still advances to the batch's max `created_at`; a profile-link event in the batch clears `KWENTA_LAST_PULL_STORAGE_KEY` first to force a full pull.
+- `coalesceRealtimeBatch` flag (default on): `flush()` drains the whole queue per burst and runs `planRealtimeBatch` (`src/sync/realtime-batch.ts`, pure/tested). A lone fresh event keeps the targeted reconcile; **≥2 fresh events collapse into one `syncRoundTrip`** instead of one reconcile RPC per event. A bundled settle-up fans out into one settlement event *per leg per member* (trigger `kwenta_on_settlement_changed` is `FOR EACH ROW`), so this turns N reconcile RPCs into a single round trip. The last-seen cursor always advances to the max **server-supplied** `created_at` of the events drained — on both the batch path and the bulk catch-up path. Never stamp it from the device clock: a fast clock writes a cursor into the future and `.gt('created_at', cursor)` then filters out every event the server creates until real time catches up, permanently. Profile-link events need no special handling any more (every pull is a complete bundle).
 
 ---
 
@@ -189,7 +196,15 @@ Current version: **14** (v14 added optional `settlements.method` — cash/transf
 - **`syncRoundTrip(userId)`** — atomic: single `kwenta_sync` RPC call, applies push payload server-side, returns pull bundle; updates `synced_at` on both sides
 - **`fullSync(userId)`** — dedup wrapper around `syncRoundTrip`; if `dedupeSyncEnabled` flag is on, concurrent calls share one in-flight Promise
 
-Last pull timestamp stored in `localStorage` as `kwenta_last_pull` (ISO string). Passed as `p_since` to `kwenta_sync`; only rows with `updated_at > p_since` are returned.
+### Reads are always fresh (no pull cursor)
+
+**Every pull requests the COMPLETE bundle** — `p_since` is always `PULL_SINCE_EPOCH` (`sync-service.ts`), never a stored timestamp. The cloud is the truth and Dexie is a mirror of it; a complete bundle is a true snapshot because nothing is ever hard-deleted (soft-deleted rows are still sent), so absence from the bundle means nothing and no local pruning exists.
+
+The old incremental cursor (`kwenta_last_pull`) was stamped from the **device clock** after the query ran, so clock skew or a row written mid-round-trip was skipped permanently, and any server-side change that did not bump the client-written `updated_at` could never reach a device — the only cure was wiping local data. Do not reintroduce it (guarded by a test on `PULL_SINCE_EPOCH`).
+
+`kwenta_last_refresh` in `localStorage` records the last successful refresh. It is **display/scheduling only** (staleness chip, backup-timer skip, initial-hydration gate) and never filters a query; `readLastRefreshAt()` migrates the legacy `kwenta_last_pull` key once. Refresh triggers: app start, focus/visibility, reconnect, route change (`useRefreshOnNavigation`, rate-limited to 5s), the 5-minute backup timer, realtime events, and after every mutation.
+
+Pushed rows are stamped `synced_at` only for ids the server reports in `applied` (migration 044). Two guards protect an offline write from the full bundle: `shouldApplyPulledRow` (never clobber a newer unsynced local row) and a refusal to apply any echo of a row **older than what this round trip pushed** (a silently dropped push must not be overwritten by the server's stale copy).
 
 ### Sync Manager Lifecycle
 
@@ -272,7 +287,9 @@ Balance between two people is a **plain signed sum**, per currency: (Σ pairwise
 
 **Payments:** `recordPersonPayment` (`operations.ts`) writes one atomic payment; multi-context allocations share a `bundle_id` (partition the total, never duplicate). "Settle up" = a `RecordPaymentDialog` prefilled to the full balance. The Person page statement (`buildPersonMoneyFlow` + `PersonStatement.tsx`) is the running-balance timeline (the standalone `/ledger` route is retired).
 
-**Data repair:** `src/lib/kwenta-data-repair.ts` (`planKwentaDataRepair` / `applyKwentaDataRepair`, surfaced in Settings via `RepairDataPanel`) safely removes orphaned/duplicate settlements and canonicalizes stale party ids; migration `047` is the server-authoritative backstop. `maybeAutoRepairData` also runs the plan+apply automatically **once per session after a successful sync** (wired in `sync-manager.ts`; fire-and-forget, never throws, deduped by a module-scoped guard) so artifacts are cleaned without the manual button.
+**Data repair:** decided **on the server** by `kwenta_repair_settlements(p_dry_run)` (migration `048`) — orphans, exact duplicates, and party-id canonicalization, self-scoped by `auth.uid()` over the **identity set** (account + contacts linked to it, so the scope matches what `049` delivers). Classification lives in one place, `kwenta_repair_settlement_plan`, so the dry run and the apply cannot disagree. `src/lib/kwenta-data-repair.ts` (`previewSettlementRepair` / `repairSettlementsViaServer`, surfaced in Settings via `RepairDataPanel` as check → apply) only calls the RPC and mirrors the result back via `fullSync`; it holds **no** delete authority, and it throws when the mirror fails rather than reporting a repair that never reached this device. `maybeAutoRepairData` runs it **once per session after a successful sync** (wired in `sync-manager.ts`; fire-and-forget, never throws, deduped by a module-scoped guard that `clearKwentaLocalData` releases on sign-out). The earlier client-side plan/apply judged existence from a cache that is incomplete by design and deleted real payments — see the "Deletion is server-authoritative" note under Supabase Migrations.
+
+Two ordering rules the SQL depends on: orphan detection resolves each party through `kwenta_settlement_party_id` **before** asking whether a live profile exists (judging the literal id soft-deletes payments filed under a contact deleted from the phonebook after being linked), and every UPDATE stamps `GREATEST(now(), updated_at + 1us)` rather than a bare `now()` (the `021b` server-wins trigger returns OLD on a client clock ahead of the server, which silently voided the repair while the counts still reported success).
 
 ---
 
@@ -353,10 +370,14 @@ Migrations are numbered; there are two `021_` files. Core RPCs:
 | `032` | `paid_by` column on bills (uuid, non-null, defaults to `created_by`); update `kwenta_push_bills` to rewrite `paid_by` to linked profile id on push |
 | `033` | Fix bill deletion fanout: remove `is_deleted` filter in `kwenta_fanout_personal_bill_participants` so deletion events reach all historical split participants |
 | `034` | `kwenta_on_profile_linked` trigger: when `linked_profile_id` is set on a profile, emit a `profile_changed` user event to the remote user so they immediately pull historical data |
-| `046` | `settlements.payment_method` column; thread it through `kwenta_push_settlements` (pull bundle already uses `to_jsonb`) |
-| `047` | `kwenta_repair_orphan_settlements()` RPC — server-authoritative soft-delete of orphaned settlements, self-scoped by `auth.uid()` (companion to `src/lib/kwenta-data-repair.ts`) |
+| `046` | `settlements.method` column; thread it through `kwenta_push_settlements` (pull bundle already uses `to_jsonb`) |
+| `047` | `kwenta_repair_orphan_settlements()` RPC — server-authoritative soft-delete of orphaned settlements, self-scoped by `auth.uid()` (superseded by `048`) |
+| `048` | `kwenta_repair_settlements(p_dry_run)` RPC — the whole repair (orphans + exact duplicates + party canonicalization) server-side, scoped to the caller's identity set, returns counts; `p_dry_run` powers the Settings preview. Also defines `kwenta_identity_ids` and `kwenta_settlement_party_id` (linked-account **and** group-roster resolution). The client no longer decides what to delete |
+| `049` | Pull follows linked profiles: personal settlements, `bills_for_sync` / `relevant_bill_ids_for_user`, `kwenta_fetch_bill_bundle` and additive `FOR SELECT` policies route by identity, so a row that missed canonicalization still reaches the right account. **Reads only** — `user_is_participant_on_personal_bill` stays literal-id because it is the `USING` clause of the `FOR ALL` policies in `007` and the `WHERE` of the push validators in `044`; widening it granted the account behind a linked contact UPDATE/DELETE over the linker's bills. The widened read predicate is the separate `user_can_read_personal_bill`. |
 
-The `kwenta_sync` RPC is the single entry point for all sync: accepts push payload, applies it server-side, returns pull bundle for `p_since`. Push validators enforce the same RLS rules the client filters apply.
+The `kwenta_sync` RPC is the single entry point for all sync: accepts push payload, applies it server-side, returns the pull bundle for `p_since` (the client always passes the epoch — see "Reads are always fresh"). Push validators enforce the same RLS rules the client filters apply.
+
+**Deletion is server-authoritative.** A device is sent only its own profile plus its own local contacts, so it cannot judge whether a person, bill or group exists — a client that soft-deletes from its cache will eventually delete real data (it did: personal payments between two accounts with no shared group). `kwenta_repair_settlements` (048) makes that decision server-side; `src/lib/kwenta-data-repair.ts` only calls it and mirrors the result. Never reintroduce client-side soft-deletes driven by "I can't find X".
 
 ---
 

@@ -1,6 +1,10 @@
 import { db } from '@/db/db'
 import { useAppStore } from '@/store/app-store'
-import { KWENTA_LAST_PULL_STORAGE_KEY } from '@/lib/kwenta-storage-keys'
+import { resetAutoRepairGuard } from '@/lib/kwenta-data-repair'
+import {
+  KWENTA_LAST_REFRESH_STORAGE_KEY,
+  KWENTA_LEGACY_LAST_PULL_STORAGE_KEY,
+} from '@/lib/kwenta-storage-keys'
 
 export const KWENTA_LOCAL_USER_KEY = 'kwenta_local_user_id'
 
@@ -22,8 +26,14 @@ export async function clearKwentaLocalData(): Promise<void> {
     /* best effort; next DB access will retry open */
   })
   localStorage.removeItem(KWENTA_LOCAL_USER_KEY)
-  localStorage.removeItem(KWENTA_LAST_PULL_STORAGE_KEY)
+  localStorage.removeItem(KWENTA_LAST_REFRESH_STORAGE_KEY)
+  // Legacy cursor from the incremental-pull era; drop it too so an account switch on an
+  // upgraded device cannot inherit the previous user's marker.
+  localStorage.removeItem(KWENTA_LEGACY_LAST_PULL_STORAGE_KEY)
   useAppStore.getState().setInitialCloudHydration('pending')
+  // Module state, not storage — it outlives the account that set it. Without this the next
+  // account to sign in on this tab (no page reload) is refused its own once-per-session repair.
+  resetAutoRepairGuard()
   for (const k of EXTRA_KEYS) {
     localStorage.removeItem(k)
   }

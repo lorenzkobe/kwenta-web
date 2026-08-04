@@ -29,38 +29,38 @@ export interface RealtimeBatchPlan {
    * reconnect catch-up won't refetch them.
    */
   latestCreatedAt: string | null
-  /**
-   * True when any fresh event is a profile-link. Those expose historical rows
-   * whose `updated_at` predates the pull cursor, so the caller must clear the
-   * cursor to force a full pull rather than an incremental one.
-   */
-  hasProfileLink: boolean
 }
 
-function isRecord(v: unknown): v is Record<string, unknown> {
-  return typeof v === 'object' && v !== null
+/**
+ * Newest `created_at` in a set of events, or null when empty.
+ *
+ * The last-seen cursor must ALWAYS come from here — i.e. from the server clock that stamped the
+ * rows — and never from `Date.now()`/`now()`. A device running fast that writes its own time as the
+ * cursor filters out (`.gt('created_at', cursor)`) every event the server creates until real time
+ * catches up, and the cursor only ever moves forward, so those events are lost for good.
+ */
+export function latestEventCreatedAt(events: readonly UserEventRow[]): string | null {
+  let latest: string | null = null
+  for (const ev of events) {
+    if (latest === null || ev.created_at > latest) latest = ev.created_at
+  }
+  return latest
 }
 
 export function planRealtimeBatch(
   batch: UserEventRow[],
   alreadySeen: (id: string) => boolean,
 ): RealtimeBatchPlan {
-  let latestCreatedAt: string | null = null
   const fresh: UserEventRow[] = []
   const seenInBatch = new Set<string>()
-  let hasProfileLink = false
 
   for (const ev of batch) {
-    if (latestCreatedAt === null || ev.created_at > latestCreatedAt) {
-      latestCreatedAt = ev.created_at
-    }
     if (seenInBatch.has(ev.id) || alreadySeen(ev.id)) continue
     seenInBatch.add(ev.id)
     fresh.push(ev)
-    if (ev.entity_type === 'profiles' && isRecord(ev.payload) && ev.payload.linked_profile_id) {
-      hasProfileLink = true
-    }
   }
 
-  return { fresh, latestCreatedAt, hasProfileLink }
+  // Across the WHOLE batch, including already-seen events, so the cursor advances past everything
+  // drained and reconnect catch-up will not refetch them.
+  return { fresh, latestCreatedAt: latestEventCreatedAt(batch) }
 }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { planRealtimeBatch, type UserEventRow } from '@/sync/realtime-batch'
+import { latestEventCreatedAt, planRealtimeBatch, type UserEventRow } from '@/sync/realtime-batch'
 
 function ev(over: Partial<UserEventRow> & { id: string; created_at: string }): UserEventRow {
   return {
@@ -20,7 +20,6 @@ describe('planRealtimeBatch', () => {
     const plan = planRealtimeBatch([ev({ id: 'a', created_at: '2026-06-25T10:00:00.000Z' })], seenNone)
     expect(plan.fresh.map((e) => e.id)).toEqual(['a'])
     expect(plan.latestCreatedAt).toBe('2026-06-25T10:00:00.000Z')
-    expect(plan.hasProfileLink).toBe(false)
   })
 
   it('keeps every fresh event in a burst and reports the latest timestamp', () => {
@@ -61,7 +60,10 @@ describe('planRealtimeBatch', () => {
     expect(plan.fresh.map((e) => e.id)).toEqual(['a'])
   })
 
-  it('flags a profile-link event so the caller can force a full pull', () => {
+  it('treats a profile-link event like any other', () => {
+    // It used to be flagged so the caller could clear the pull cursor and force a full pull.
+    // Every pull is a full pull now, so the flag drove nothing but a metric that always read
+    // false for the batch path — which always does a full pull.
     const plan = planRealtimeBatch(
       [
         ev({
@@ -74,13 +76,38 @@ describe('planRealtimeBatch', () => {
       ],
       seenNone,
     )
-    expect(plan.hasProfileLink).toBe(true)
+    expect(plan.fresh.map((e) => e.id)).toEqual(['p', 'a'])
   })
 
   it('returns no fresh events and a null timestamp for an empty batch', () => {
     const plan = planRealtimeBatch([], seenNone)
     expect(plan.fresh).toEqual([])
     expect(plan.latestCreatedAt).toBeNull()
-    expect(plan.hasProfileLink).toBe(false)
+  })
+})
+
+describe('latestEventCreatedAt', () => {
+  // The last-seen cursor is written from this and NEVER from the device clock. A fast clock that
+  // stamps its own time writes a cursor into the future; the next catch-up's
+  // `.gt('created_at', cursor)` then filters out every event the server creates until real time
+  // catches up, and the cursor only moves forward — so those events never arrive.
+  it('returns the newest created_at regardless of arrival order', () => {
+    expect(
+      latestEventCreatedAt([
+        ev({ id: 'a', created_at: '2026-06-25T10:00:00.000Z' }),
+        ev({ id: 'c', created_at: '2026-06-25T10:00:02.000Z' }),
+        ev({ id: 'b', created_at: '2026-06-25T10:00:01.000Z' }),
+      ]),
+    ).toBe('2026-06-25T10:00:02.000Z')
+  })
+
+  it('returns null for an empty set so the caller leaves the cursor alone', () => {
+    expect(latestEventCreatedAt([])).toBeNull()
+  })
+
+  it('never invents a timestamp of its own', () => {
+    // Every value it can return must have come from an event row.
+    const events = [ev({ id: 'a', created_at: '2020-01-01T00:00:00.000Z' })]
+    expect(latestEventCreatedAt(events)).toBe('2020-01-01T00:00:00.000Z')
   })
 })

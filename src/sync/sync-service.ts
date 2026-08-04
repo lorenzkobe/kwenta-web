@@ -3,9 +3,9 @@ import { db } from '@/db/db'
 import { supabase } from '@/lib/supabase'
 import { captureMetric, withMetric } from '@/lib/client-metrics'
 import { isRuntimeFlagEnabled } from '@/lib/runtime-flags'
-import { KWENTA_LAST_PULL_STORAGE_KEY } from '@/lib/kwenta-storage-keys'
+import { KWENTA_LAST_REFRESH_STORAGE_KEY, readLastRefreshAt } from '@/lib/kwenta-storage-keys'
 import { useAppStore } from '@/store/app-store'
-import { now } from '@/lib/utils'
+import { describeError, now } from '@/lib/utils'
 import type {
   ActivityLog,
   Bill,
@@ -58,7 +58,56 @@ export async function resolvePaidByForPush(localUserId: string): Promise<string>
   return localUserId
 }
 
-export { KWENTA_LAST_PULL_STORAGE_KEY } from '@/lib/kwenta-storage-keys'
+export { KWENTA_LAST_REFRESH_STORAGE_KEY } from '@/lib/kwenta-storage-keys'
+
+/**
+ * Every pull asks for the COMPLETE bundle, never a delta.
+ *
+ * Cloud-first: the server is the truth and the client holds a mirror, so each refresh replaces
+ * that mirror wholesale. The old incremental cursor was stamped from the device clock after the
+ * query ran, so clock skew (or a row written mid-round-trip) permanently skipped rows, and a
+ * server-side change that did not bump the client-written `updated_at` could never reach any
+ * device — the cache could only be repaired by wiping it. A complete bundle is a true snapshot
+ * because nothing is ever hard-deleted: soft-deleted rows are still sent, so absence from the
+ * bundle carries no meaning and no local pruning is required.
+ */
+export const PULL_SINCE_EPOCH = '1970-01-01T00:00:00.000Z'
+
+/**
+ * PostgREST truncates every response at its configured max-rows (1000 on Supabase by default) and
+ * reports no error when it does. With the cursor gone every fallback query asks for the caller's
+ * whole history, so any table past that cap came back silently short while the pull still reported
+ * success and stamped the refresh marker. Page through explicitly instead.
+ */
+export const PULL_PAGE_SIZE = 1000
+
+type RangeableQuery<T> = {
+  range: (from: number, to: number) => PromiseLike<{ data: T[] | null; error: unknown }>
+}
+
+/**
+ * Run a PostgREST query to exhaustion. `build` must apply a deterministic order (`id`), otherwise
+ * successive ranges may overlap or skip rows.
+ *
+ * Exported for direct unit testing: proving the loop through a full `pullChanges` requires writing
+ * thousands of rows into IndexedDB, which is slow enough to make the test timing-dependent.
+ */
+export async function fetchAllPages<T>(build: () => RangeableQuery<T>): Promise<T[]> {
+  const out: T[] = []
+  for (let from = 0; ; from += PULL_PAGE_SIZE) {
+    const { data, error } = await build().range(from, from + PULL_PAGE_SIZE - 1)
+    if (error) throw error
+    const page = (data ?? []) as T[]
+    out.push(...page)
+    if (page.length < PULL_PAGE_SIZE) return out
+  }
+}
+
+/** Record that a full refresh completed (display/scheduling only — never a query filter). */
+function markRefreshed(): void {
+  localStorage.setItem(KWENTA_LAST_REFRESH_STORAGE_KEY, now())
+  useAppStore.getState().setInitialCloudHydration('ready')
+}
 
 /**
  * Confirm whether a row was successfully applied by the server in this sync.
@@ -67,6 +116,23 @@ export { KWENTA_LAST_PULL_STORAGE_KEY } from '@/lib/kwenta-storage-keys'
  */
 export function isRowApplied(applied: Record<string, string[]> | undefined, table: string, id: string): boolean {
   return Array.isArray(applied?.[table]) && applied![table].includes(id)
+}
+
+/**
+ * Compare two ISO timestamps as instants, never as text.
+ *
+ * Postgres renders timestamptz through `to_jsonb` as `2026-08-03T15:04:05.123+00:00`; the client
+ * writes `Date.toISOString()`, i.e. `2026-08-03T15:04:05.123Z`. Those are the same instant and
+ * different strings, and `'+' (0x2B) < 'Z' (0x5A)` — so a lexicographic compare ranks EVERY
+ * server echo below the local copy it echoes. Anything gated on `serverTs > localTs` then silently
+ * never fires. Returns 0 for unparseable input so a malformed value is treated as "same age"
+ * rather than as older/newer by accident.
+ */
+export function compareTimestamps(a: string, b: string): number {
+  const ta = Date.parse(a)
+  const tb = Date.parse(b)
+  if (Number.isNaN(ta) || Number.isNaN(tb)) return 0
+  return ta === tb ? 0 : ta < tb ? -1 : 1
 }
 
 /**
@@ -87,15 +153,19 @@ export function shouldApplyPulledRow(
   pulledUpdatedAt: string,
 ): boolean {
   if (!local) return true
-  const localUnsynced = local.synced_at === null || local.updated_at > local.synced_at
+  const localUnsynced = local.synced_at === null || compareTimestamps(local.updated_at, local.synced_at) > 0
   if (!localUnsynced) return true
   // local has an unsynced edit; only let the server row win if it is strictly newer.
-  return pulledUpdatedAt > local.updated_at
+  return compareTimestamps(pulledUpdatedAt, local.updated_at) > 0
 }
 
-/** Time since we last advanced `KWENTA_LAST_PULL_STORAGE_KEY` after a successful sync. */
-export function getMillisecondsSinceLastPull(): number {
-  const v = localStorage.getItem(KWENTA_LAST_PULL_STORAGE_KEY)
+/**
+ * Time since the last successful full refresh. Used only to schedule the backup sync and to show
+ * staleness — never to filter a query, so device-clock error can delay a refresh but can never
+ * hide a row.
+ */
+export function getMillisecondsSinceLastRefresh(): number {
+  const v = readLastRefreshAt()
   if (!v) return Number.POSITIVE_INFINITY
   const t = Date.parse(v)
   if (Number.isNaN(t)) return Number.POSITIVE_INFINITY
@@ -119,20 +189,15 @@ type FullSyncResult = { pushed: number; pulled: number; errors: string[] }
 const fullSyncInFlight = new Map<string, Promise<FullSyncResult>>()
 
 function syncErrMessage(err: unknown): string {
-  if (err instanceof Error) return err.message
-  if (
-    err &&
-    typeof err === 'object' &&
-    'message' in err &&
-    typeof (err as { message: unknown }).message === 'string'
-  ) {
-    return (err as { message: string }).message
-  }
-  try {
-    return JSON.stringify(err)
-  } catch {
-    return String(err)
-  }
+  // Shared with the UI error paths: Supabase hands back PostgrestError as a plain object, so an
+  // `instanceof Error` test alone loses the server's message.
+  return describeError(err, (() => {
+    try {
+      return JSON.stringify(err)
+    } catch {
+      return String(err)
+    }
+  })())
 }
 
 function isDatabaseClosedError(err: unknown): boolean {
@@ -453,47 +518,58 @@ export async function prefetchPullContext(userId: string): Promise<PullPrefetchC
   const billIds = await getRelevantBillIds(userId)
   let itemIds: string[] = []
   if (billIds.length > 0) {
-    const { data, error } = await supabase.from('bill_items').select('id').in('bill_id', billIds)
-    if (error) throw error
-    itemIds = (data ?? []).map((r) => r.id)
+    const rows = await fetchAllPages<{ id: string }>(() =>
+      supabase.from('bill_items').select('id').in('bill_id', billIds).order('id'),
+    )
+    itemIds = rows.map((r) => r.id)
   }
   return { groupIds, billIds, itemIds }
 }
 
 /**
- * Pull all remote records updated since our last pull timestamp.
- * Insert or update them into local Dexie.
- * Does not advance last-pull time unless every table pull succeeds.
+ * Pull the caller's COMPLETE remote record set (see {@link PULL_SINCE_EPOCH}) and mirror it into
+ * Dexie. Fallback path used when the `kwenta_sync` RPC is unavailable and by realtime recovery.
+ * Does not mark the refresh complete unless every table pull succeeds.
  */
 export async function pullChanges(userId: string): Promise<{ pulled: number; errors: string[] }> {
   const startedAt = performance.now()
   let pulled = 0
   const errors: string[] = []
-  const lastPull = localStorage.getItem(KWENTA_LAST_PULL_STORAGE_KEY) ?? '1970-01-01T00:00:00.000Z'
 
-  const prefetch = await prefetchPullContext(userId)
+  // Report a prefetch failure through the result instead of throwing out of the function: callers
+  // (realtime recovery) invoke this from their own catch blocks, and `getGroupIdsForUser` used to
+  // swallow query errors and return an empty group list — which reads as "you are in no groups"
+  // and quietly pulls none of that data. Failing loudly is right; failing past the contract is not.
+  let prefetch: PullPrefetchContext
+  try {
+    prefetch = await prefetchPullContext(userId)
+  } catch (err) {
+    if (isDatabaseClosedError(err)) return { pulled, errors }
+    errors.push(`Pull context: ${syncErrMessage(err)}`)
+    captureMetric('sync.pullChanges', false, performance.now() - startedAt, { pulled, errors: errors.length })
+    return { pulled, errors }
+  }
 
   for (const tableName of TABLE_NAMES) {
     try {
-      const rows = await fetchRemoteRows(tableName, lastPull, userId, prefetch)
+      const rows = await fetchRemoteRows(tableName, userId, prefetch)
       if (rows.length === 0) continue
 
       const table = getLocalTable(tableName)
 
-      for (const row of rows) {
-        const existing = await table.get(row.id)
-        if (existing) {
-          // Same guard as syncRoundTrip's pull-apply: never clobber a newer unsynced local edit
-          // with an older server snapshot. pullChanges is the realtime / RPC-missing fallback
-          // path, so without this an in-flight local edit could vanish depending on which sync
-          // path happened to fire.
-          if (shouldApplyPulledRow(existing as { updated_at: string; synced_at: string | null }, row.updated_at)) {
-            await table.update(row.id, { ...row, synced_at: row.updated_at })
-          }
-        } else {
-          await table.add({ ...row, synced_at: row.updated_at })
-        }
+      // Same guard as syncRoundTrip's pull-apply: never clobber a newer unsynced local edit with
+      // an older server snapshot. pullChanges is the realtime / RPC-missing fallback path, so
+      // without this an in-flight local edit could vanish depending on which sync path fired.
+      // Batched for the same reason as there — this now carries the caller's whole history.
+      const existingRows = await table.bulkGet(rows.map((r) => r.id))
+      const toPut: SyncFields[] = []
+      for (let i = 0; i < rows.length; i++) {
+        const row = rows[i]
+        const existing = existingRows[i] as { updated_at: string; synced_at: string | null } | undefined
+        if (!shouldApplyPulledRow(existing, row.updated_at)) continue
+        toPut.push({ ...(existing ?? {}), ...row, synced_at: row.updated_at })
       }
+      if (toPut.length > 0) await table.bulkPut(toPut)
 
       pulled += rows.length
     } catch (err) {
@@ -506,8 +582,7 @@ export async function pullChanges(userId: string): Promise<{ pulled: number; err
   }
 
   if (errors.length === 0) {
-    localStorage.setItem(KWENTA_LAST_PULL_STORAGE_KEY, now())
-    useAppStore.getState().setInitialCloudHydration('ready')
+    markRefreshed()
   }
 
   captureMetric('sync.pullChanges', errors.length === 0, performance.now() - startedAt, { pulled, errors: errors.length })
@@ -515,185 +590,176 @@ export async function pullChanges(userId: string): Promise<{ pulled: number; err
 }
 
 async function fetchSettlementRows(
-  since: string,
   userId: string,
   groupIds: string[],
 ): Promise<SyncFields[]> {
   const rows: SyncFields[] = []
   if (groupIds.length > 0) {
-    const { data: g, error: e1 } = await supabase
-      .from('settlements')
-      .select('*')
-      .gt('updated_at', since)
-      .in('group_id', groupIds)
-    if (e1) throw e1
-    if (g) rows.push(...(g as SyncFields[]))
+    rows.push(
+      ...(await fetchAllPages<SyncFields>(() =>
+        supabase
+          .from('settlements')
+          .select('*')
+          .in('group_id', groupIds)
+          .order('id'),
+      )),
+    )
   }
-  const { data: p, error: e2 } = await supabase
-    .from('settlements')
-    .select('*')
-    .gt('updated_at', since)
-    .is('group_id', null)
-    .or(`from_user_id.eq.${userId},to_user_id.eq.${userId}`)
-  if (e2) throw e2
-  if (p) rows.push(...(p as SyncFields[]))
+  // Literal id match only. The `kwenta_sync` RPC — the primary path — routes personal rows by
+  // identity (account + local contacts linked to it, migration 049); this PostgREST fallback
+  // cannot, because a device never holds another user's local contacts (the pull-bundle privacy
+  // boundary), so it cannot compute its own identity set. A row still filed under a
+  // not-yet-canonicalized contact id is therefore delivered by the next round trip rather than by
+  // this recovery path.
+  rows.push(
+    ...(await fetchAllPages<SyncFields>(() =>
+      supabase
+        .from('settlements')
+        .select('*')
+        .is('group_id', null)
+        .or(`from_user_id.eq.${userId},to_user_id.eq.${userId}`)
+        .order('id'),
+    )),
+  )
+  // The two queries are disjoint (group_id null vs not null); dedup only guards against a row
+  // being re-classified between them.
   const dedup = new Map<string, SyncFields>()
   for (const r of rows) {
-    const id = (r as SyncFields).id
-    const prev = dedup.get(id)
-    if (!prev || (r as SyncFields).updated_at > prev.updated_at) {
-      dedup.set(id, r as SyncFields)
+    const prev = dedup.get(r.id)
+    if (!prev || compareTimestamps(r.updated_at, prev.updated_at) > 0) {
+      dedup.set(r.id, r)
     }
   }
   return [...dedup.values()]
 }
 
 async function getGroupIdsForUser(userId: string): Promise<string[]> {
-  const { data } = await supabase
-    .from('group_members')
-    .select('group_id')
-    .eq('user_id', userId)
-    .eq('is_deleted', false)
-
-  return (data ?? []).map((r) => r.group_id)
+  const rows = await fetchAllPages<{ group_id: string }>(() =>
+    supabase
+      .from('group_members')
+      .select('group_id')
+      .eq('user_id', userId)
+      .eq('is_deleted', false)
+      .order('group_id'),
+  )
+  return rows.map((r) => r.group_id)
 }
 
+/**
+ * Fetch a table's COMPLETE remote row set for this user.
+ *
+ * There is deliberately no `since` parameter and no `updated_at` filter. This used to take one, and
+ * every caller passed the epoch — which made the filter always true and left the shape of a delta
+ * cursor sitting in the code for someone to "optimise" back into a real one. That cursor was
+ * stamped from the device clock, so skew silently and permanently skipped rows (see
+ * {@link PULL_SINCE_EPOCH}). Removing the parameter makes "reads are always complete" structural
+ * rather than a convention every future caller has to know about.
+ */
 async function fetchRemoteRows(
   tableName: TableName,
-  since: string,
   userId: string,
   prefetch: PullPrefetchContext,
 ): Promise<SyncFields[]> {
   const { groupIds, billIds, itemIds } = prefetch
-  let query = supabase.from(tableName).select('*').gt('updated_at', since)
+  // A factory, not a builder: paging calls `.range()` once per page, and a PostgREST builder is a
+  // one-shot thenable — reusing the same instance across pages would re-await a settled request.
+  const baseQuery = () => supabase.from(tableName).select('*').order('id')
+  type TableQuery = ReturnType<typeof baseQuery>
+  let applyFilter: ((q: TableQuery) => TableQuery) | null = null
 
   switch (tableName) {
     case 'profiles': {
-      const { data: ownRow, error: e1 } = await supabase
-        .from('profiles')
-        .select('*')
-        .gt('updated_at', since)
-        .eq('id', userId)
-      if (e1) throw e1
-      const { data: ownedLocals, error: e2 } = await supabase
-        .from('profiles')
-        .select('*')
-        .gt('updated_at', since)
-        .eq('owner_id', userId)
-        .eq('is_local', true)
-      if (e2) throw e2
-      const merged = [...(ownRow ?? []), ...(ownedLocals ?? [])]
-      const dedup = new Map<string, SyncFields>()
-      for (const r of merged) {
-        const id = (r as Profile).id
-        const prev = dedup.get(id)
-        if (!prev || (r as SyncFields).updated_at > prev.updated_at) {
-          dedup.set(id, r as SyncFields)
-        }
-      }
-      return [...dedup.values()]
+      const ownRow = await fetchAllPages<SyncFields>(() =>
+        supabase.from('profiles').select('*').eq('id', userId).order('id'),
+      )
+      const ownedLocals = await fetchAllPages<SyncFields>(() =>
+        supabase
+          .from('profiles')
+          .select('*')
+          .eq('owner_id', userId)
+          .eq('is_local', true)
+          .order('id'),
+      )
+      return dedupeById([...ownRow, ...ownedLocals])
     }
     case 'groups': {
       if (groupIds.length === 0) return []
-      const { data: incGroups, error: eGroupsInc } = await supabase
-        .from('groups')
-        .select('*')
-        .in('id', groupIds)
-        .gt('updated_at', since)
-      if (eGroupsInc) throw eGroupsInc
-      const { data: recentMemberships, error: eRecentGm } = await supabase
-        .from('group_members')
-        .select('group_id')
-        .eq('user_id', userId)
-        .eq('is_deleted', false)
-        .gt('updated_at', since)
-      if (eRecentGm) throw eRecentGm
-      const recentGroupIds = [
-        ...new Set((recentMemberships ?? []).map((r) => r.group_id).filter((gid) => groupIds.includes(gid))),
-      ]
-      let extraGroups: SyncFields[] = []
-      if (recentGroupIds.length > 0) {
-        const { data: fullGroups, error: eGroupsFull } = await supabase
-          .from('groups')
-          .select('*')
-          .in('id', recentGroupIds)
-        if (eGroupsFull) throw eGroupsFull
-        extraGroups = (fullGroups ?? []) as SyncFields[]
-      }
-      const dedup = new Map<string, SyncFields>()
-      for (const r of [...(incGroups ?? []), ...extraGroups]) {
-        const row = r as SyncFields
-        const prev = dedup.get(row.id)
-        if (!prev || row.updated_at > prev.updated_at) dedup.set(row.id, row)
-      }
-      return [...dedup.values()]
+      // One query. The second pass this used to make — re-fetching every group whose membership
+      // row had changed since the cursor — existed only to defeat the delta cursor: a group row
+      // that had not itself changed would not come back on its own. Pulls are unconditional now,
+      // so the first query already returns every one of the user's groups and that pass re-fetched
+      // an identical set, leaving the dedup map to collapse only duplicates the code itself made.
+      return await fetchAllPages<SyncFields>(() =>
+        supabase.from('groups').select('*').in('id', groupIds).order('id'),
+      )
     }
     case 'group_members': {
-      const { data: myMembershipRows, error: eMine } = await supabase
-        .from('group_members')
-        .select('*')
-        .eq('user_id', userId)
-        .gt('updated_at', since)
-      if (eMine) throw eMine
+      const myMembershipRows = await fetchAllPages<SyncFields>(() =>
+        supabase.from('group_members').select('*').eq('user_id', userId).order('id'),
+      )
       let inActiveGroups: SyncFields[] = []
       if (groupIds.length > 0) {
-        const { data: gRows, error: eG } = await supabase
-          .from('group_members')
-          .select('*')
-          .in('group_id', groupIds)
-          .gt('updated_at', since)
-        if (eG) throw eG
-        inActiveGroups = (gRows ?? []) as SyncFields[]
+        inActiveGroups = await fetchAllPages<SyncFields>(() =>
+          supabase
+            .from('group_members')
+            .select('*')
+            .in('group_id', groupIds)
+            .order('id'),
+        )
       }
-      const dedupGm = new Map<string, SyncFields>()
-      for (const r of [...(myMembershipRows ?? []), ...inActiveGroups]) {
-        const row = r as SyncFields
-        const prev = dedupGm.get(row.id)
-        if (!prev || row.updated_at > prev.updated_at) dedupGm.set(row.id, row)
-      }
-      return [...dedupGm.values()]
+      // Genuinely overlapping: my own row inside one of my active groups matches both queries.
+      return dedupeById([...myMembershipRows, ...inActiveGroups])
     }
     case 'bills': {
-      const { data: rpcRows, error: rpcError } = await supabase.rpc('bills_for_sync', {
-        p_since: since,
-      })
-      if (rpcError) throw rpcError
-      return (rpcRows ?? []) as SyncFields[]
+      return await fetchAllPages<SyncFields>(() =>
+        supabase.rpc('bills_for_sync', { p_since: PULL_SINCE_EPOCH }).order('id'),
+      )
     }
     case 'bill_items': {
       if (billIds.length === 0) return []
-      query = query.in('bill_id', billIds)
+      applyFilter = (q) => q.in('bill_id', billIds)
       break
     }
     case 'item_splits': {
       if (itemIds.length === 0) return []
-      query = query.in('item_id', itemIds)
+      applyFilter = (q) => q.in('item_id', itemIds)
       break
     }
     case 'settlements':
-      return await fetchSettlementRows(since, userId, groupIds)
+      return await fetchSettlementRows(userId, groupIds)
     case 'activity_log':
-      if (groupIds.length === 0) {
-        query = query.eq('user_id', userId)
-      } else {
-        query = query.or(`user_id.eq.${userId},group_id.in.(${groupIds.join(',')})`)
-      }
+      applyFilter =
+        groupIds.length === 0
+          ? (q) => q.eq('user_id', userId)
+          : (q) => q.or(`user_id.eq.${userId},group_id.in.(${groupIds.join(',')})`)
       break
     case 'profile_peer_links':
-      query = query.eq('owner_user_id', userId)
+      applyFilter = (q) => q.eq('owner_user_id', userId)
       break
   }
 
-  const { data, error } = await query
-  if (error) throw error
-  return (data ?? []) as SyncFields[]
+  return await fetchAllPages<SyncFields>(() => {
+    const q = baseQuery()
+    return applyFilter ? applyFilter(q) : q
+  })
+}
+
+/** Keep the newest copy of each id across overlapping queries. */
+function dedupeById(rows: SyncFields[]): SyncFields[] {
+  const dedup = new Map<string, SyncFields>()
+  for (const row of rows) {
+    const prev = dedup.get(row.id)
+    if (!prev || compareTimestamps(row.updated_at, prev.updated_at) > 0) dedup.set(row.id, row)
+  }
+  return [...dedup.values()]
 }
 
 async function getRelevantBillIds(userId: string): Promise<string[]> {
   void userId
-  const { data, error } = await supabase.rpc('relevant_bill_ids_for_user')
-  if (error) throw error
-  return (data ?? []).map((r: { id: string }) => r.id)
+  const rows = await fetchAllPages<{ id: string }>(() =>
+    supabase.rpc('relevant_bill_ids_for_user').order('id'),
+  )
+  return rows.map((r) => r.id)
 }
 
 export async function fullSync(userId: string): Promise<FullSyncResult> {
@@ -732,7 +798,8 @@ function isPullBundle(x: unknown): x is KwentaSyncPullBundle {
 }
 
 /**
- * One RPC: apply push payload on the server, return all visible rows changed since `since`.
+ * One RPC: apply the push payload on the server, then return the caller's COMPLETE visible row
+ * set (see {@link PULL_SINCE_EPOCH}) and mirror it into Dexie.
  * Falls back to pushChanges + pullChanges if the RPC is missing (older DB).
  */
 export async function syncRoundTrip(userId: string): Promise<{
@@ -746,8 +813,6 @@ export async function syncRoundTrip(userId: string): Promise<{
   if (!session?.user?.id) {
     return { pushed: 0, pulled: 0, errors: ['Sync skipped: not signed in'] }
   }
-
-  const lastPull = localStorage.getItem(KWENTA_LAST_PULL_STORAGE_KEY) ?? '1970-01-01T00:00:00.000Z'
 
   let ctx: PushFilterContext
   try {
@@ -818,7 +883,7 @@ export async function syncRoundTrip(userId: string): Promise<{
     'sync.kwentaSyncRpc',
     () =>
       supabase.rpc('kwenta_sync', {
-        p_since: lastPull,
+        p_since: PULL_SINCE_EPOCH,
         p_push: pPush,
       }),
     { hasPushPayload: Object.keys(pPush).length > 0 },
@@ -843,25 +908,44 @@ export async function syncRoundTrip(userId: string): Promise<{
     return { pushed: 0, pulled: 0, errors: ['kwenta_sync: invalid response shape'] }
   }
 
-  // Stamp pushed rows as synced ONLY if the server applied them (per the applied map from migration 044).
-  // BACKWARD-COMPAT: if applied is undefined (older server pre-044), stamp all (current behavior).
-  // Rows NOT in applied stay unsynced and will retry on the next sync.
-  // Then apply the pull bundle. The pull carries server-authoritative updated_at.
+  // Index the bundle by id per table once. Used twice below: to decide whether a pushed row was
+  // really stored, and to apply the pull.
+  const bundleRowsById = new Map<TableName, Map<string, SyncFields>>()
+  for (const tableName of TABLE_NAMES) {
+    const byId = new Map<string, SyncFields>()
+    for (const row of (bundle[tableName] as SyncFields[]) ?? []) byId.set(row.id, row)
+    bundleRowsById.set(tableName, byId)
+  }
+
+  // Stamp pushed rows as synced ONLY on evidence that the server stored them.
+  //
+  // With migration 044 the server says so outright via the `applied` map. Against an older server
+  // (`applied === undefined`) the honest evidence is the echo in this same bundle: the bundle is
+  // the caller's COMPLETE row set, so anything the server accepted comes back at least as new as
+  // what we sent. Stamping unconditionally there — the previous behaviour — marks a SILENTLY
+  // DROPPED push (validator or RLS rejection) as synced. The row then stops being re-pushed, so on
+  // the next round trip nothing guards it, and the complete bundle overwrites the local row with
+  // the server's older copy: the user's edit disappears one sync later. Under the old incremental
+  // cursor that stale copy was never sent, which is why this only surfaces now.
   const applied = (bundle as { applied?: Record<string, string[]> }).applied
   for (const tableName of TABLE_NAMES) {
     const pushedRows = pPush[tableName]
     if (!pushedRows?.length) continue
     const table = getLocalTable(tableName)
+    const echoedRows = bundleRowsById.get(tableName)
     for (const r of pushedRows) {
       const rowId = (r as SyncFields).id
-      // BACKWARD-COMPAT: if applied is undefined, stamp all rows (old server behavior).
-      const shouldStamp = applied === undefined || isRowApplied(applied, tableName, rowId)
+      const syncedAt = (r as SyncFields).updated_at
+      const echo = echoedRows?.get(rowId)
+      const shouldStamp =
+        applied !== undefined
+          ? isRowApplied(applied, tableName, rowId)
+          : echo !== undefined && compareTimestamps(echo.updated_at, syncedAt) >= 0
       if (!shouldStamp) {
-        // Row not applied: leave synced_at unchanged so it stays unsynced and retries.
-        // Still preserve canonicalization write-backs for applied rows only.
+        // Not stored (or not provably stored): leave synced_at alone so the row stays unsynced
+        // and retries on the next round trip.
         continue
       }
-      const syncedAt = (r as SyncFields).updated_at
       if (tableName === 'item_splits') {
         const s = r as ItemSplit
         await table.update(s.id, { synced_at: syncedAt, user_id: s.user_id })
@@ -886,24 +970,37 @@ export async function syncRoundTrip(userId: string): Promise<{
 
   let pulled = 0
   for (const tableName of TABLE_NAMES) {
-    const rows = bundle[tableName] as SyncFields[]
-    const table = getLocalTable(tableName)
-    for (const row of rows) {
-      const existing = await table.get(row.id)
-      if (existing) {
-        // Guard: do not clobber a newer unsynced local edit made during the round-trip.
-        if (shouldApplyPulledRow(existing, row.updated_at)) {
-          await table.update(row.id, { ...row, synced_at: row.updated_at })
-        }
-      } else {
-        await table.add({ ...row, synced_at: row.updated_at })
-      }
-    }
+    const rows = (bundle[tableName] as SyncFields[]) ?? []
     pulled += rows.length
+    if (rows.length === 0) continue
+    const table = getLocalTable(tableName)
+    // What we sent for each row this round trip. The bundle carries the caller's COMPLETE row set
+    // (not just rows newer than a cursor), so the server's copy of everything we just pushed comes
+    // back on every sync — including a copy that predates our push if the server silently dropped
+    // it. Refusing to apply an echo older than what we sent keeps that write queued.
+    const pushedUpdatedAt = new Map<string, string>()
+    for (const r of pPush[tableName] ?? []) {
+      pushedUpdatedAt.set((r as SyncFields).id, (r as SyncFields).updated_at)
+    }
+    // One bulkGet + one bulkPut per table. Every sync now applies the whole dataset, so the old
+    // per-row `await get` + `await update` pair meant thousands of serial IndexedDB round trips on
+    // the main thread on each of the many triggers (mutation, route change, focus, backup timer,
+    // realtime burst) — the UI stalled after saving a bill and while tabbing between screens.
+    const existingRows = await table.bulkGet(rows.map((r) => r.id))
+    const toPut: SyncFields[] = []
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i]
+      const sentUpdatedAt = pushedUpdatedAt.get(row.id)
+      if (sentUpdatedAt !== undefined && compareTimestamps(row.updated_at, sentUpdatedAt) < 0) continue
+      const existing = existingRows[i] as { updated_at: string; synced_at: string | null } | undefined
+      // Guard: do not clobber a newer unsynced local edit made during the round-trip.
+      if (!shouldApplyPulledRow(existing, row.updated_at)) continue
+      toPut.push({ ...(existing ?? {}), ...row, synced_at: row.updated_at })
+    }
+    if (toPut.length > 0) await table.bulkPut(toPut)
   }
 
-  localStorage.setItem(KWENTA_LAST_PULL_STORAGE_KEY, now())
-  useAppStore.getState().setInitialCloudHydration('ready')
+  markRefreshed()
 
   let pushedCount = 0
   for (const rows of Object.values(pPush)) {

@@ -2,46 +2,67 @@ import { useState } from 'react'
 import { Wrench } from 'lucide-react'
 import { toast } from 'sonner'
 import {
-  planKwentaDataRepair,
-  applyKwentaDataRepair,
-  type KwentaDataRepairPlan,
+  previewSettlementRepair,
+  repairSettlementsViaServer,
+  type KwentaRepairResult,
 } from '@/lib/kwenta-data-repair'
+import { describeError } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 
 /**
- * Advanced tool: dry-run a safe data repair (orphans / duplicates / non-canonical ids) on the
- * signed-in user's own settlements, then apply. Non-destructive to real payments; kept out of
+ * Advanced tool: ask the server to repair this user's settlements (orphans / duplicates /
+ * non-canonical ids) and mirror the result back. Non-destructive to real payments; kept out of
  * the normal flow.
+ *
+ * Two steps on purpose. The apply soft-deletes rows across the account — and, for group
+ * settlements, rows other members also see — with no undo, so it is not a thing to trigger on one
+ * tap with nothing shown first. The preview is NOT computed here: a guess from this device's cache
+ * is exactly what used to delete real payments. It is the same server-side classification the
+ * apply uses (migration 048), run with p_dry_run.
  */
 export function RepairDataPanel({ userId }: { userId: string }) {
-  const [plan, setPlan] = useState<KwentaDataRepairPlan | null>(null)
-  const [scanning, setScanning] = useState(false)
-  const [applying, setApplying] = useState(false)
+  const [result, setResult] = useState<KwentaRepairResult | null>(null)
+  const [busy, setBusy] = useState<'preview' | 'apply' | null>(null)
 
-  async function scan() {
-    setScanning(true)
+  async function check() {
+    setBusy('preview')
     try {
-      setPlan(await planKwentaDataRepair(userId))
+      const res = await previewSettlementRepair()
+      setResult(res)
+      toast.success(
+        res.total === 0
+          ? 'Nothing to repair — your data is clean.'
+          : `Found ${res.total} to fix. Review below, then apply.`,
+      )
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : 'Could not scan your data.')
+      // Clear first: leaving the previous run's counts on screen under a failed run reads as
+      // though this run produced them.
+      setResult(null)
+      toast.error(describeError(e, 'Could not check your data.'))
     } finally {
-      setScanning(false)
+      setBusy(null)
     }
   }
 
   async function apply() {
-    if (!plan) return
-    setApplying(true)
+    setBusy('apply')
     try {
-      const res = await applyKwentaDataRepair(userId, plan)
-      toast.success(`Repaired: removed ${res.softDeleted}, canonicalized ${res.rewritten}.`)
-      setPlan(await planKwentaDataRepair(userId))
+      const res = await repairSettlementsViaServer(userId)
+      setResult(res)
+      toast.success(
+        res.total === 0
+          ? 'Nothing to repair — your data is clean.'
+          : `Repaired: removed ${res.orphans + res.duplicates}, fixed ${res.canonicalized} ids.`,
+      )
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : 'Could not apply the repair.')
+      setResult(null)
+      toast.error(describeError(e, 'Could not run the repair.'))
     } finally {
-      setApplying(false)
+      setBusy(null)
     }
   }
+
+  const pending = result?.dryRun === true && result.total > 0
 
   return (
     <div className="rounded-3xl border border-stone-200 bg-white p-5 shadow-sm">
@@ -50,20 +71,37 @@ export function RepairDataPanel({ userId }: { userId: string }) {
         <div className="min-w-0 flex-1">
           <h2 className="text-lg font-semibold">Repair data</h2>
           <p className="mt-1 text-sm text-stone-600">
-            Scan your payments for orphaned rows, exact duplicates, and stale ids. Real payments are
-            never removed — only artifacts. Changes sync to the cloud.
+            Checks your payments for orphaned rows, exact duplicates, and stale ids. Runs on the
+            server, where every account is visible. Real payments are never removed — only
+            artifacts.
           </p>
 
-          {plan && (
+          {result && (
             <div className="mt-3 rounded-2xl border border-stone-200 bg-stone-50/60 p-4 text-sm">
-              {plan.summary.total === 0 ? (
+              {result.total === 0 ? (
                 <p className="text-stone-600">Nothing to repair — your data is clean.</p>
               ) : (
-                <ul className="space-y-1 text-stone-700">
-                  <li>Orphaned rows: <strong>{plan.summary.orphans}</strong></li>
-                  <li>Duplicate rows: <strong>{plan.summary.duplicates}</strong></li>
-                  <li>Stale-id rows: <strong>{plan.summary.nonCanonical}</strong></li>
-                </ul>
+                <>
+                  <ul className="space-y-1 text-stone-700">
+                    <li>
+                      Orphaned rows {result.dryRun ? 'to remove' : 'removed'}:{' '}
+                      <strong>{result.orphans}</strong>
+                    </li>
+                    <li>
+                      Duplicate rows {result.dryRun ? 'to remove' : 'removed'}:{' '}
+                      <strong>{result.duplicates}</strong>
+                    </li>
+                    <li>
+                      Stale ids {result.dryRun ? 'to fix' : 'fixed'}:{' '}
+                      <strong>{result.canonicalized}</strong>
+                    </li>
+                  </ul>
+                  {result.dryRun && (
+                    <p className="mt-2 text-xs text-stone-500">
+                      Nothing has been changed yet. Removals are permanent once applied.
+                    </p>
+                  )}
+                </>
               )}
             </div>
           )}
@@ -74,20 +112,20 @@ export function RepairDataPanel({ userId }: { userId: string }) {
               variant="outline"
               size="sm"
               className="rounded-xl"
-              disabled={scanning || applying}
-              onClick={() => void scan()}
+              disabled={busy !== null}
+              onClick={() => void check()}
             >
-              {scanning ? 'Scanning…' : plan ? 'Re-scan' : 'Scan for issues'}
+              {busy === 'preview' ? 'Checking…' : 'Check my data'}
             </Button>
-            {plan && plan.summary.total > 0 && (
+            {pending && (
               <Button
                 type="button"
                 size="sm"
                 className="rounded-xl"
-                disabled={applying}
+                disabled={busy !== null}
                 onClick={() => void apply()}
               >
-                {applying ? 'Applying…' : `Apply repair (${plan.summary.total})`}
+                {busy === 'apply' ? 'Repairing…' : 'Apply repair'}
               </Button>
             )}
           </div>

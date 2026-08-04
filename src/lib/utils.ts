@@ -24,6 +24,28 @@ export function now(): string {
 }
 
 /**
+ * Human-readable message for anything thrown or returned as an error.
+ *
+ * `e instanceof Error` is not enough: Supabase returns `PostgrestError` as a PLAIN OBJECT on every
+ * path that does not use `throwOnError`, so an `instanceof` check silently drops the server's
+ * message ("not authenticated", a constraint name) and leaves the user with a generic failure.
+ */
+export function describeError(err: unknown, fallback = 'Something went wrong.'): string {
+  if (err instanceof Error) return err.message
+  if (
+    err &&
+    typeof err === 'object' &&
+    'message' in err &&
+    typeof (err as { message: unknown }).message === 'string' &&
+    (err as { message: string }).message.length > 0
+  ) {
+    return (err as { message: string }).message
+  }
+  if (typeof err === 'string' && err.length > 0) return err
+  return fallback
+}
+
+/**
  * Single tolerance (in currency units) for treating a money value as zero/settled.
  * Amounts are stored cent-rounded, so genuine differences are 0 or >= 0.01; a 0.005
  * threshold cleanly separates rounding noise from a real one-cent obligation. Use this

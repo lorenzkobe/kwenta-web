@@ -4,20 +4,24 @@ import { flushQueuedKwentaNotifications, hasQueuedKwentaNotifications } from '@/
 import { markPendingMutationsApplied, markPendingMutationsConflict } from '@/sync/cloud-first-mutations'
 import { supabase } from '@/lib/supabase'
 import { useAppStore } from '@/store/app-store'
-import { KWENTA_LAST_PULL_STORAGE_KEY } from '@/lib/kwenta-storage-keys'
+import { readLastRefreshAt } from '@/lib/kwenta-storage-keys'
 import {
   fullSync,
-  getMillisecondsSinceLastPull,
+  getMillisecondsSinceLastRefresh,
   hasUnsyncedLocalDataForUser,
   syncRoundTrip,
 } from './sync-service'
 
 /** Slow backup in case a CRUD-triggered sync was missed */
 const SYNC_BACKUP_INTERVAL_MS = 5 * 60 * 1000
-/** When there is nothing to upload, still pull at most this often from the backup timer (avoids empty RPCs every tick). */
-const BACKUP_PULL_STALE_AFTER_MS = 15 * 60 * 1000
+/** When there is nothing to upload, still refresh at most this often from the backup timer (avoids empty RPCs every tick). */
+const BACKUP_REFRESH_STALE_AFTER_MS = 15 * 60 * 1000
 
-type SyncRunReason = 'initial' | 'explicit' | 'backup' | 'online'
+/**
+ * 'navigation' is a PASSIVE refresh: it never queues a re-run and never touches the retry
+ * schedule. See {@link requestRefreshOnNavigation}.
+ */
+type SyncRunReason = 'initial' | 'explicit' | 'backup' | 'online' | 'navigation'
 const BACKOFF_INITIAL_MS = 30_000
 const BACKOFF_MAX_MS = 5 * 60 * 1000
 const TRIGGER_DEBOUNCE_MS = 400
@@ -88,39 +92,50 @@ async function resolveSessionWithRetry() {
   return session
 }
 
-async function runSync(reason: SyncRunReason) {
+/**
+ * @returns whether a sync was actually attempted. False means it bailed out before doing any work
+ * (offline, no session yet, one already in flight, backup tick with nothing to do).
+ */
+async function runSync(reason: SyncRunReason): Promise<boolean> {
+  // A passive refresh must not participate in the error/backoff state machine at all: it is a
+  // read triggered by the user looking at a screen, not by anything that needs delivering.
+  const isPassiveRefresh = reason === 'navigation'
+
   if (isSyncing) {
     // A sync is already in flight. If this is a new request driven by a local mutation
     // or coming back online, remember to run once more afterwards so the newer write
-    // (not in the in-flight snapshot) still gets pushed.
+    // (not in the in-flight snapshot) still gets pushed. A navigation refresh has no write to
+    // deliver, so queueing one here just chains full-bundle round trips behind every tap.
     if (reason === 'explicit' || reason === 'online') rerunRequested = true
-    return
+    return false
   }
 
   const { isOnline } = useAppStore.getState()
-  if (!isOnline) return
+  if (!isOnline) return false
 
   const session = await resolveSessionWithRetry()
-  if (!session?.user) return
+  if (!session?.user) return false
 
   const userId = session.user.id
 
   if (reason === 'backup') {
     const needsPush = await hasUnsyncedLocalDataForUser(userId)
-    const needsPull = getMillisecondsSinceLastPull() >= BACKUP_PULL_STALE_AFTER_MS
+    const needsPull = getMillisecondsSinceLastRefresh() >= BACKUP_REFRESH_STALE_AFTER_MS
     const needsNotificationFlush = await hasQueuedKwentaNotifications(userId)
-    if (!needsPush && !needsPull && !needsNotificationFlush) return
+    if (!needsPush && !needsPull && !needsNotificationFlush) return false
   }
 
   isSyncing = true
   useAppStore.getState().setSyncStatus('syncing')
-  useAppStore.getState().setSyncRetryAt(null)
+  // A passive refresh does not own the retry schedule, so it must not blank the countdown either —
+  // the timer it belongs to is still running, and hiding it just makes recovery look stalled.
+  if (!isPassiveRefresh) useAppStore.getState().setSyncRetryAt(null)
 
   try {
-    // After sign-out we clear IndexedDB + last-pull; on the next sign-in use one kwenta_sync round-trip
+    // After sign-out we clear IndexedDB + the refresh marker; on the next sign-in use one kwenta_sync round-trip
     // (syncRoundTrip) instead of many pullChanges HTTP calls. Auth gates sync until Dexie has the profile row.
     // If something is still unsynced after that (e.g. offline edits), fullSync runs next.
-    const needsInitialPull = !localStorage.getItem(KWENTA_LAST_PULL_STORAGE_KEY)
+    const needsInitialPull = !readLastRefreshAt()
     if (needsInitialPull) {
       const initialResult = await syncRoundTrip(userId)
       if (initialResult.errors.length > 0) {
@@ -128,8 +143,8 @@ async function runSync(reason: SyncRunReason) {
         useAppStore.getState().setSyncStatus('error')
         useAppStore.getState().setPullStale(true)
         useAppStore.getState().setInitialCloudHydration('failed')
-        scheduleRetry()
-        return
+        if (!isPassiveRefresh) scheduleRetry()
+        return true
       }
       await hydrateLinkedRemoteProfilesForActor(userId)
       const stillUnsynced = await hasUnsyncedLocalDataForUser(userId)
@@ -139,7 +154,7 @@ async function runSync(reason: SyncRunReason) {
         useAppStore.getState().setPullStale(false)
         await flushQueuedKwentaNotifications({ assumeCloudAck: true })
         void maybeAutoRepairData(userId)
-        return
+        return true
       }
     }
 
@@ -149,10 +164,10 @@ async function runSync(reason: SyncRunReason) {
       await markPendingMutationsConflict(userId, 'replay_sync_error', result.errors.join(' | '))
       useAppStore.getState().setSyncStatus('error')
       useAppStore.getState().setPullStale(true)
-      if (!localStorage.getItem(KWENTA_LAST_PULL_STORAGE_KEY)) {
+      if (!readLastRefreshAt()) {
         useAppStore.getState().setInitialCloudHydration('failed')
       }
-      scheduleRetry()
+      if (!isPassiveRefresh) scheduleRetry()
     } else {
       await markPendingMutationsApplied(userId)
       resetBackoff()
@@ -166,15 +181,15 @@ async function runSync(reason: SyncRunReason) {
     if (isDatabaseClosedError(err)) {
       // Expected during sign-out/local wipe races; don't escalate/retry.
       useAppStore.getState().setSyncStatus('idle')
-      return
+      return true
     }
     console.warn('[sync] failed:', err)
     useAppStore.getState().setSyncStatus('error')
     useAppStore.getState().setPullStale(true)
-    if (!localStorage.getItem(KWENTA_LAST_PULL_STORAGE_KEY)) {
+    if (!readLastRefreshAt()) {
       useAppStore.getState().setInitialCloudHydration('failed')
     }
-    scheduleRetry()
+    if (!isPassiveRefresh) scheduleRetry()
   } finally {
     isSyncing = false
     if (rerunRequested) {
@@ -182,6 +197,7 @@ async function runSync(reason: SyncRunReason) {
       void runSync('explicit')
     }
   }
+  return true
 }
 
 export function startSyncManager() {
@@ -226,4 +242,47 @@ export function triggerSync() {
 export function requestSyncNow() {
   resetBackoff()
   void runSync('explicit')
+}
+
+/**
+ * Minimum gap between navigation-driven refreshes. Every refresh pulls the full bundle, so
+ * without this, tapping through screens would fire one RPC per route change.
+ */
+const NAVIGATION_REFRESH_MIN_INTERVAL_MS = 5_000
+let lastNavigationRefreshAt = Number.NEGATIVE_INFINITY
+
+/**
+ * Monotonic time source. `Date.now()` can jump BACKWARDS (NTP correcting a fast clock, a manual
+ * date change, a phone re-syncing after travel), which would make `now - last` negative — always
+ * under the interval — and silently disable navigation refresh for the whole duration of the skew.
+ * That is the same device-clock dependency the pull cursor was removed to escape.
+ */
+function monotonicNow(): number {
+  return typeof performance !== 'undefined' && typeof performance.now === 'function'
+    ? performance.now()
+    : Date.now()
+}
+
+/**
+ * Call on route change so opening a screen shows server truth rather than whatever the cache
+ * happened to hold. Rate-limited; a skipped refresh is harmless because focus/online/backup
+ * triggers and realtime still run.
+ */
+export function requestRefreshOnNavigation() {
+  const nowMs = monotonicNow()
+  if (nowMs - lastNavigationRefreshAt < NAVIGATION_REFRESH_MIN_INTERVAL_MS) return
+  const previousRefreshAt = lastNavigationRefreshAt
+  lastNavigationRefreshAt = nowMs
+  void runSync('navigation').then((ran) => {
+    // runSync can bail before doing any work — offline, a sync already in flight, or (right after
+    // sign-in, exactly when this hook first fires) a session that has not resolved yet. Claiming
+    // the window anyway means the next screen change is swallowed by the throttle and renders
+    // whatever the cache held, which is the staleness this hook exists to remove. Give it back.
+    if (!ran && lastNavigationRefreshAt === nowMs) lastNavigationRefreshAt = previousRefreshAt
+  })
+}
+
+/** Test-only: reset the navigation rate limiter between cases. */
+export function __resetNavigationRefreshThrottleForTests() {
+  lastNavigationRefreshAt = Number.NEGATIVE_INFINITY
 }

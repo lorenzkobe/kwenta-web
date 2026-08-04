@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 import {
   cn,
+  describeError,
   formatCurrency,
   generateId,
   getDeviceId,
@@ -130,5 +131,27 @@ describe('timeAgo', () => {
 
   it('reports days', () => {
     expect(timeAgo(isoAgo(3 * 24 * 60 * 60 * 1000))).toBe('3d ago')
+  })
+})
+
+describe('describeError', () => {
+  it('uses the message of a real Error', () => {
+    expect(describeError(new Error('boom'))).toBe('boom')
+  })
+
+  it('reads the message off a plain object', () => {
+    // Supabase returns PostgrestError as a PLAIN OBJECT on every non-throwOnError path, so an
+    // `instanceof Error` test alone drops the server's message and shows a generic failure.
+    expect(describeError({ message: 'not authenticated', code: '42501' })).toBe('not authenticated')
+  })
+
+  it('accepts a bare string', () => {
+    expect(describeError('plain failure')).toBe('plain failure')
+  })
+
+  it('falls back for values that carry no message', () => {
+    expect(describeError(null, 'Could not run the repair.')).toBe('Could not run the repair.')
+    expect(describeError({ code: '500' }, 'fallback')).toBe('fallback')
+    expect(describeError({ message: '' }, 'fallback')).toBe('fallback')
   })
 })

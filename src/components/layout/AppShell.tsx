@@ -6,7 +6,7 @@ import { InstallPrompt } from '@/components/common/InstallPrompt'
 import { OfflineBanner } from '@/components/common/OfflineBanner'
 import { useOnlineStatus } from '@/hooks/useOnlineStatus'
 import { useAuth } from '@/hooks/useAuth'
-import { useSync } from '@/hooks/useSync'
+import { useRefreshOnNavigation, useSync } from '@/hooks/useSync'
 import { useRealtime } from '@/hooks/useRealtime'
 import { useAppStore } from '@/store/app-store'
 
@@ -16,6 +16,7 @@ export function AppShell() {
   const initialCloudHydration = useAppStore((s) => s.initialCloudHydration)
   const isOnline = useAppStore((s) => s.isOnline)
   useSync(Boolean(user && authReady))
+  useRefreshOnNavigation(Boolean(user && authReady))
   useRealtime(Boolean(user && authReady), user?.id)
 
   if (loading) {

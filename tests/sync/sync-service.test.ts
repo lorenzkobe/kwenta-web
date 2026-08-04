@@ -1,14 +1,17 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { db } from '@/db/db'
 import {
-  getMillisecondsSinceLastPull,
+  getMillisecondsSinceLastRefresh,
   hasUnsyncedLocalDataForUser,
   isEntityUnsyncedForActor,
   resolvePaidByForPush,
   isRowApplied,
   shouldApplyPulledRow,
-  KWENTA_LAST_PULL_STORAGE_KEY,
+  compareTimestamps,
+  KWENTA_LAST_REFRESH_STORAGE_KEY,
+  PULL_SINCE_EPOCH,
 } from '@/sync/sync-service'
+import { KWENTA_LEGACY_LAST_PULL_STORAGE_KEY } from '@/lib/kwenta-storage-keys'
 import { makeBill, makeMember, makeProfile, makeSettlement, resetDb } from '../helpers/db'
 
 // sync-service imports the Supabase client at module load; neither function
@@ -26,30 +29,51 @@ beforeEach(async () => {
   localStorage.clear()
 })
 
-describe('getMillisecondsSinceLastPull', () => {
-  it('returns Infinity when no cursor is stored', () => {
-    expect(getMillisecondsSinceLastPull()).toBe(Number.POSITIVE_INFINITY)
+describe('getMillisecondsSinceLastRefresh', () => {
+  it('returns Infinity when no refresh has completed', () => {
+    expect(getMillisecondsSinceLastRefresh()).toBe(Number.POSITIVE_INFINITY)
   })
 
-  it('returns Infinity for an unparseable cursor', () => {
-    localStorage.setItem(KWENTA_LAST_PULL_STORAGE_KEY, 'not-a-date')
-    expect(getMillisecondsSinceLastPull()).toBe(Number.POSITIVE_INFINITY)
+  it('returns Infinity for an unparseable marker', () => {
+    localStorage.setItem(KWENTA_LAST_REFRESH_STORAGE_KEY, 'not-a-date')
+    expect(getMillisecondsSinceLastRefresh()).toBe(Number.POSITIVE_INFINITY)
   })
 
-  it('returns the elapsed time for a valid cursor', () => {
+  it('returns the elapsed time for a valid marker', () => {
     const tenMinutesAgo = new Date(Date.now() - 10 * 60 * 1000).toISOString()
-    localStorage.setItem(KWENTA_LAST_PULL_STORAGE_KEY, tenMinutesAgo)
-    const elapsed = getMillisecondsSinceLastPull()
+    localStorage.setItem(KWENTA_LAST_REFRESH_STORAGE_KEY, tenMinutesAgo)
+    const elapsed = getMillisecondsSinceLastRefresh()
     expect(elapsed).toBeGreaterThanOrEqual(10 * 60 * 1000 - 2000)
     expect(elapsed).toBeLessThan(11 * 60 * 1000)
   })
 
-  it('never returns a negative value for a future cursor', () => {
+  it('never returns a negative value for a future marker', () => {
     localStorage.setItem(
-      KWENTA_LAST_PULL_STORAGE_KEY,
+      KWENTA_LAST_REFRESH_STORAGE_KEY,
       new Date(Date.now() + 60_000).toISOString(),
     )
-    expect(getMillisecondsSinceLastPull()).toBe(0)
+    expect(getMillisecondsSinceLastRefresh()).toBe(0)
+  })
+
+  it('adopts the legacy pull cursor so an upgraded install is not re-gated', () => {
+    const tenMinutesAgo = new Date(Date.now() - 10 * 60 * 1000).toISOString()
+    localStorage.setItem(KWENTA_LEGACY_LAST_PULL_STORAGE_KEY, tenMinutesAgo)
+
+    expect(getMillisecondsSinceLastRefresh()).toBeLessThan(11 * 60 * 1000)
+    // Migrated across and the legacy key retired, so this happens exactly once.
+    expect(localStorage.getItem(KWENTA_LAST_REFRESH_STORAGE_KEY)).toBe(tenMinutesAgo)
+    expect(localStorage.getItem(KWENTA_LEGACY_LAST_PULL_STORAGE_KEY)).toBeNull()
+  })
+})
+
+describe('PULL_SINCE_EPOCH', () => {
+  // The whole point of the cloud-first read path: pulls are never filtered by a client-held
+  // timestamp, so no clock skew or mid-round-trip write can permanently hide a row, and a
+  // server-side change always reaches the device. Guarding the constant keeps a future "small
+  // optimisation" from quietly reintroducing an incremental cursor.
+  it('is the epoch, so every pull requests the complete bundle', () => {
+    expect(PULL_SINCE_EPOCH).toBe('1970-01-01T00:00:00.000Z')
+    expect(Date.parse(PULL_SINCE_EPOCH)).toBe(0)
   })
 })
 
@@ -158,6 +182,52 @@ describe('shouldApplyPulledRow', () => {
         '2026-06-23T12:00:00.000Z',
       ),
     ).toBe(true)
+  })
+
+  it('compares Postgres-formatted and client-formatted timestamps as instants', () => {
+    // The server sends `+00:00`, the client writes `Z`. As text '+' sorts below 'Z', so a
+    // same-instant server row read as OLDER and a genuinely newer one could read as older too.
+    expect(
+      shouldApplyPulledRow(
+        { updated_at: '2026-06-23T11:00:00.000Z', synced_at: null },
+        '2026-06-23T12:00:00.000+00:00',
+      ),
+    ).toBe(true)
+    // Same instant, different rendering: not strictly newer, so the local edit still wins.
+    expect(
+      shouldApplyPulledRow(
+        { updated_at: '2026-06-23T12:00:00.000Z', synced_at: null },
+        '2026-06-23T12:00:00.000+00:00',
+      ),
+    ).toBe(false)
+    // A synced local row whose synced_at came back in server format must not read as unsynced.
+    expect(
+      shouldApplyPulledRow(
+        { updated_at: '2026-06-23T12:00:00.000Z', synced_at: '2026-06-23T12:00:00.000+00:00' },
+        '2026-06-23T11:00:00.000Z',
+      ),
+    ).toBe(true)
+  })
+})
+
+describe('compareTimestamps', () => {
+  it('treats the same instant in either rendering as equal', () => {
+    expect(compareTimestamps('2026-08-03T15:04:05.123Z', '2026-08-03T15:04:05.123+00:00')).toBe(0)
+  })
+
+  it('orders by instant, not by text', () => {
+    // Lexicographically '...+00:00' < '...Z', which is the inversion this replaces.
+    expect(compareTimestamps('2026-08-03T15:04:06.000+00:00', '2026-08-03T15:04:05.000Z')).toBe(1)
+    expect(compareTimestamps('2026-08-03T15:04:04.000+00:00', '2026-08-03T15:04:05.000Z')).toBe(-1)
+  })
+
+  it('handles a non-UTC offset', () => {
+    expect(compareTimestamps('2026-08-03T23:04:05.000+08:00', '2026-08-03T15:04:05.000Z')).toBe(0)
+  })
+
+  it('reports "same age" for unparseable input rather than guessing an order', () => {
+    expect(compareTimestamps('not-a-date', '2026-08-03T15:04:05.000Z')).toBe(0)
+    expect(compareTimestamps('2026-08-03T15:04:05.000Z', '')).toBe(0)
   })
 })
 

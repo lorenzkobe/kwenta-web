@@ -15,8 +15,8 @@ import type {
   ActivityLog,
   ProfilePeerLink,
 } from '@/types'
-import { KWENTA_LAST_PULL_STORAGE_KEY, pullChanges, syncRoundTrip } from '@/sync/sync-service'
-import { planRealtimeBatch, type UserEventRow } from '@/sync/realtime-batch'
+import { pullChanges, syncRoundTrip } from '@/sync/sync-service'
+import { latestEventCreatedAt, planRealtimeBatch, type UserEventRow } from '@/sync/realtime-batch'
 type ReconcileBundle = Partial<
   Record<
     | 'profiles'
@@ -138,12 +138,11 @@ function rememberEventId(recentOrder: string[], recentSet: Set<string>, eventId:
 export async function processEvent(userId: string, ev: UserEventRow): Promise<void> {
   const startedAt = performance.now()
 
-  // A profile link event means this user now has access to historical bills and
-  // groups that were previously owned by a local contact. Incremental pulls
-  // (p_since = last pull) won't return those rows since their updated_at hasn't
-  // changed. Clear the pull cursor so syncRoundTrip fetches everything from scratch.
+  // A profile link event means this user now has access to historical bills and groups that
+  // were previously owned by a local contact. Those rows carry old updated_at values, which the
+  // former incremental pull skipped; every round trip now fetches the complete bundle, so the
+  // link case needs nothing special beyond a sync.
   if (ev.entity_type === 'profiles' && isRecord(ev.payload) && ev.payload.linked_profile_id) {
-    localStorage.removeItem(KWENTA_LAST_PULL_STORAGE_KEY)
     await syncRoundTrip(userId)
     captureMetric('realtime.event.process', true, performance.now() - startedAt, {
       entity: ev.entity_type,
@@ -277,19 +276,6 @@ export async function processEvent(userId: string, ev: UserEventRow): Promise<vo
 // Above this threshold, per-event RPCs are more expensive than a single syncRoundTrip.
 const CATCH_UP_BULK_THRESHOLD = 5
 
-async function hasMissedProfileLinkEvent(userId: string, sinceIso: string): Promise<boolean> {
-  const { data } = await supabase
-    .from('kwenta_user_events')
-    .select('payload')
-    .eq('user_id', userId)
-    .eq('entity_type', 'profiles')
-    .gt('created_at', sinceIso)
-    .limit(10)
-  return (data ?? []).some(
-    (ev) => isRecord(ev.payload) && Boolean((ev.payload as Record<string, unknown>).linked_profile_id),
-  )
-}
-
 async function catchUpSince(userId: string, sinceIso: string, onEvent: (ev: UserEventRow) => Promise<void>): Promise<void> {
   const { data, error } = await supabase
     .from('kwenta_user_events')
@@ -308,19 +294,18 @@ async function catchUpSince(userId: string, sinceIso: string, onEvent: (ev: User
   if (events.length === 0) return
 
   if (events.length > CATCH_UP_BULK_THRESHOLD) {
-    // Many missed events — one syncRoundTrip is far cheaper than N individual RPCs.
-    // But first check if a profile link event was missed: those require a full pull
-    // (cursor reset) because the newly accessible bill records have old updated_at
-    // values that a delta pull would skip.
-    const batchHasLink = events.some(
-      (ev) => ev.entity_type === 'profiles' && isRecord(ev.payload) && ev.payload.linked_profile_id,
-    )
-    const needsFullPull = batchHasLink || await hasMissedProfileLinkEvent(userId, sinceIso)
-    if (needsFullPull) {
-      localStorage.removeItem(KWENTA_LAST_PULL_STORAGE_KEY)
-    }
+    // Many missed events — one syncRoundTrip is far cheaper than N individual RPCs. It pulls the
+    // complete bundle, so a missed profile-link event needs no special handling (it used to
+    // require probing kwenta_user_events and resetting the pull cursor).
     await syncRoundTrip(userId)
-    localStorage.setItem(LAST_SEEN_EVENT_KEY(userId), now())
+    // Advance from the SERVER clock, never this device's. `kwenta_user_events.created_at` is
+    // stamped by Postgres; writing now() here means a device whose clock runs fast stores a cursor
+    // in the future, and the next catch-up's `.gt('created_at', cursor)` filters out every event
+    // the server creates until real time catches up — and the cursor only moves forward. It also
+    // skipped anything created between the query above and this write. The sibling batch path
+    // already advances from the event rows themselves.
+    const latestCreatedAt = latestEventCreatedAt(events)
+    if (latestCreatedAt) localStorage.setItem(LAST_SEEN_EVENT_KEY(userId), latestCreatedAt)
     return
   }
 
@@ -398,14 +383,10 @@ export function startRealtimeForUser(userId: string): () => void {
     for (const ev of plan.fresh) rememberEventId(recentEventOrder, recentEventSet, ev.id)
     const startedAt = performance.now()
     try {
-      // Profile-link events expose historical rows older than the pull cursor;
-      // clear it so the round trip pulls them from scratch.
-      if (plan.hasProfileLink) localStorage.removeItem(KWENTA_LAST_PULL_STORAGE_KEY)
       await syncRoundTrip(userId)
       captureMetric('realtime.batch.coalesced', true, performance.now() - startedAt, {
         events: batch.length,
         fresh: plan.fresh.length,
-        fullPull: plan.hasProfileLink,
       })
     } catch (error) {
       console.warn('[realtime] coalesced batch sync failed; falling back to pull', { error })
