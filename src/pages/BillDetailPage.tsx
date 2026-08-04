@@ -14,6 +14,7 @@ import { db } from '@/db/db'
 import { BILL_BACK_QUERY, billDetailBackPath, withBillBackQuery } from '@/lib/bill-navigation'
 import {
   computePairwiseNetAllContexts,
+  loadBalanceSnapshot,
   computePairwiseNetForBill,
   dedupeParticipantIds,
   expandProfileIdsForSplitMatching,
@@ -152,6 +153,8 @@ export function BillDetailPage() {
     const reps = await dedupeParticipantIds(union, userId)
     const others = reps.filter((id) => !myIds.has(id))
     const rows: { otherId: string; displayName: string; net: number; squareOverall: boolean }[] = []
+    // One bulk load shared by every participant on this bill.
+    const snapshot = await loadBalanceSnapshot()
     for (const oid of others) {
       const net = await computePairwiseNetForBill(billId, userId, oid)
       if (Math.abs(net) < 0.005) continue
@@ -159,7 +162,7 @@ export function BillDetailPage() {
       // Whether you're square with this person overall (combined tab) — status lives on the
       // person, not the bill, so a payment there settles this bill's contribution too. Scope
       // to this bill's currency so an unrelated balance in another currency doesn't flip it.
-      const tab = await computePairwiseNetAllContexts(userId, oid)
+      const tab = await computePairwiseNetAllContexts(userId, oid, snapshot)
       const squareOverall = isEffectivelyZero(tab.get(bill.currency) ?? 0)
       rows.push({ otherId: oid, displayName: disp.displayName, net, squareOverall })
     }

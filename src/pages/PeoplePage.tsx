@@ -1,11 +1,13 @@
 import { useState, useEffect } from 'react'
 import { Link } from 'react-router-dom'
+import { toast } from 'sonner'
 import { BookUser, ChevronRight, Loader2, Plus, UserPlus } from 'lucide-react'
 import { useLiveQuery } from 'dexie-react-hooks'
 import {
   computePairwiseNetAllContexts,
   formatPairwiseSummary,
   listCanonicalRelatedProfileIds,
+  loadBalanceSnapshot,
   resolveProfileDisplay,
 } from '@/lib/people'
 import { createLocalProfile } from '@/db/operations'
@@ -25,7 +27,11 @@ export function PeoplePage() {
 
   const rows = useLiveQuery(async () => {
     if (!userId) return []
-    const ids = await listCanonicalRelatedProfileIds(userId)
+    // One bulk load shared across contact discovery AND every contact's balance. Previously
+    // each contact re-scanned every bill and re-queried its items and splits, which is what
+    // made this page slow to open.
+    const snapshot = await loadBalanceSnapshot()
+    const ids = await listCanonicalRelatedProfileIds(userId, snapshot)
     const out: {
       id: string
       displayName: string
@@ -35,7 +41,7 @@ export function PeoplePage() {
       lines: string[]
     }[] = []
     for (const id of ids) {
-      const net = await computePairwiseNetAllContexts(userId, id)
+      const net = await computePairwiseNetAllContexts(userId, id, snapshot)
       const disp = await resolveProfileDisplay(id, userId)
       const { lines, primaryLabel, tone } = formatPairwiseSummary(net)
       out.push({
@@ -75,6 +81,12 @@ export function PeoplePage() {
       }
       setNewName('')
       setShowAdd(false)
+    } catch (error) {
+      // Adding a contact is now cloud-first: on rejection nothing is written anywhere, so
+      // without this the form just sits there and the user cannot tell it failed.
+      toast.error(
+        error instanceof Error ? error.message : 'Could not add this contact right now.',
+      )
     } finally {
       setAdding(false)
     }

@@ -2,6 +2,7 @@ import { db } from '@/db/db'
 import { CATEGORY_LABELS } from '@/lib/bill-categories'
 import type { BillCategory } from '@/lib/bill-categories'
 import { isPersonalBillFullySettled } from '@/lib/personal-bill-status'
+import { loadBalanceSnapshot } from '@/lib/people'
 import {
   computePairwiseNetForBill,
   listBillsInvolvingPair,
@@ -76,6 +77,10 @@ export async function exportBillsToCSV(userId: string): Promise<void> {
     csvRow('Date', 'Bill Title', 'Category', 'Currency', 'Total Amount', 'My Share', 'Settled'),
   ]
 
+  // One bulk load + one tab per counterparty for the whole export. Without these, each bill
+  // re-loaded the entire working set once per participant.
+  const snapshot = await loadBalanceSnapshot()
+  const settledTabCache = new Map<string, Map<string, number>>()
   for (const bill of bills) {
     const date = new Date(bill.created_at).toLocaleDateString()
     const catLabel = bill.category ? (CATEGORY_LABELS[bill.category as BillCategory] ?? bill.category) : ''
@@ -85,7 +90,7 @@ export async function exportBillsToCSV(userId: string): Promise<void> {
       const splits = (await db.item_splits.where('item_id').equals(item.id).toArray()).filter((s) => !s.is_deleted)
       for (const s of splits) if (s.user_id === userId) myShare += s.computed_amount
     }
-    const settled = await isPersonalBillFullySettled(bill.id, userId)
+    const settled = await isPersonalBillFullySettled(bill.id, userId, settledTabCache, snapshot)
     lines.push(csvRow(date, bill.title, catLabel, bill.currency, bill.total_amount, myShare || '', settled ? 'Yes' : 'No'))
   }
 

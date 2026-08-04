@@ -23,7 +23,7 @@ import type {
  * Prefer linked Kwenta account id when set; otherwise keep id.
  * Used for bill splits, settlements, and group_members so the server stores auth.profile ids.
  */
-async function resolveSplitUserIdForPush(localUserId: string): Promise<string> {
+export async function resolveSplitUserIdForPush(localUserId: string): Promise<string> {
   const p = await db.profiles.get(localUserId)
   if (!p || p.is_deleted) {
     return localUserId
@@ -35,7 +35,7 @@ async function resolveSplitUserIdForPush(localUserId: string): Promise<string> {
 }
 
 /** Prefer linked Kwenta account id for settlement parties when available. */
-async function resolveSettlementPartyIdForPush(localUserId: string): Promise<string> {
+export async function resolveSettlementPartyIdForPush(localUserId: string): Promise<string> {
   const p = await db.profiles.get(localUserId)
   if (!p || p.is_deleted) {
     return localUserId
@@ -104,7 +104,7 @@ export async function fetchAllPages<T>(build: () => RangeableQuery<T>): Promise<
 }
 
 /** Record that a full refresh completed (display/scheduling only — never a query filter). */
-function markRefreshed(): void {
+export function markRefreshed(): void {
   localStorage.setItem(KWENTA_LAST_REFRESH_STORAGE_KEY, now())
   useAppStore.getState().setInitialCloudHydration('ready')
 }
@@ -172,7 +172,7 @@ export function getMillisecondsSinceLastRefresh(): number {
   return Math.max(0, Date.now() - t)
 }
 
-const TABLE_NAMES = [
+export const TABLE_NAMES = [
   'profiles',
   'groups',
   'group_members',
@@ -184,11 +184,11 @@ const TABLE_NAMES = [
   'profile_peer_links',
 ] as const
 
-type TableName = (typeof TABLE_NAMES)[number]
+export type TableName = (typeof TABLE_NAMES)[number]
 type FullSyncResult = { pushed: number; pulled: number; errors: string[] }
 const fullSyncInFlight = new Map<string, Promise<FullSyncResult>>()
 
-function syncErrMessage(err: unknown): string {
+export function syncErrMessage(err: unknown): string {
   // Shared with the UI error paths: Supabase hands back PostgrestError as a plain object, so an
   // `instanceof Error` test alone loses the server's message.
   return describeError(err, (() => {
@@ -217,7 +217,7 @@ type PushFilterContext = {
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-function getLocalTable(name: TableName): Table<any, string> {
+export function getLocalTable(name: TableName): Table<any, string> {
   return db[name]
 }
 
@@ -791,7 +791,7 @@ export async function fullSync(userId: string): Promise<FullSyncResult> {
 
 type KwentaSyncPullBundle = Record<(typeof TABLE_NAMES)[number], unknown[]>
 
-function isPullBundle(x: unknown): x is KwentaSyncPullBundle {
+export function isPullBundle(x: unknown): x is KwentaSyncPullBundle {
   if (!x || typeof x !== 'object') return false
   const o = x as Record<string, unknown>
   return TABLE_NAMES.every((t) => Array.isArray(o[t]))

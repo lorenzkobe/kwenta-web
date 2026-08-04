@@ -1,6 +1,6 @@
 import { db } from './db'
-import { requestSyncNow, triggerSync } from '@/sync/sync-manager'
 import type {
+  ActivityLog,
   Bill,
   BillItem,
   Group,
@@ -9,10 +9,12 @@ import type {
   MutationEntityType,
   Profile,
   ProfilePeerLink,
+  Settlement,
   SplitType,
 } from '@/types'
 import { generateId, getDeviceId, now } from '@/lib/utils'
-import { finalizeMutationSync } from '@/sync/cloud-first-mutations'
+import { enqueuePendingMutation } from '@/sync/cloud-first-mutations'
+import { commitCloudFirstWrite, type CloudWritePayload } from '@/sync/cloud-write'
 import {
   notifyAddedToGroup,
   notifyBillParticipantsCreated,
@@ -28,23 +30,54 @@ import {
   participantUnionForBill,
 } from '@/lib/people'
 
-async function notifySyncAfterMutation(meta?: {
+/**
+ * Commit a mutation's complete rows cloud-first, deriving the offline staging from the payload.
+ *
+ * Every row in the payload is a whole record, so staging is just a bulkPut per table — there is
+ * no need for each operation to hand-write its own local transaction. Online, nothing is written
+ * until the server confirms; offline, the rows are staged and queued for replay.
+ */
+async function commitRows(input: {
   actorUserId: string
-  operation: string
-  entityType: MutationEntityType
-  entityId?: string | null
-  payload?: unknown
-  routeHint?: string | null
-}) {
-  if (meta) {
-    await finalizeMutationSync(meta)
-    return
+  payload: CloudWritePayload
+  pending: {
+    operation: string
+    entityType: MutationEntityType
+    entityId: string | null
+    payload: unknown
+    routeHint: string
   }
-  if (typeof navigator !== 'undefined' && navigator.onLine) {
-    requestSyncNow()
-    return
-  }
-  triggerSync()
+}): Promise<void> {
+  const tables = (Object.keys(input.payload) as (keyof CloudWritePayload)[]).filter(
+    (t) => (input.payload[t]?.length ?? 0) > 0,
+  )
+
+  await commitCloudFirstWrite({
+    actorUserId: input.actorUserId,
+    payload: input.payload,
+    stageOffline: async () => {
+      await db.transaction(
+        'rw',
+        tables.map((t) => db[t]),
+        async () => {
+          for (const t of tables) {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            await (db[t] as any).bulkPut(input.payload[t])
+          }
+        },
+      )
+    },
+    queueOffline: async () => {
+      await enqueuePendingMutation({
+        actorUserId: input.actorUserId,
+        operation: input.pending.operation,
+        entityType: input.pending.entityType,
+        entityId: input.pending.entityId,
+        payload: input.pending.payload,
+        routeHint: input.pending.routeHint,
+      })
+    },
+  })
 }
 
 /** Group membership must use the Kwenta account id so Postgres RLS and sync match `auth.uid()`. */
@@ -206,55 +239,88 @@ export async function createBill(input: CreateBillInput): Promise<string> {
     return sum + item.amount
   }, 0)
 
-  await db.transaction('rw', [db.bills, db.bill_items, db.item_splits, db.activity_log], async () => {
-    const bill: Bill = {
-      ...syncFields({ id: billId }),
-      title: input.title,
-      group_id: input.groupId,
-      currency: input.currency,
-      created_by: input.createdBy,
-      paid_by: resolvedPaidBy,
-      total_amount: totalAmount,
-      note: input.note,
-      category: input.category ?? null,
-    }
-    await db.bills.add(bill)
+  // BUILD — pure, in memory. Nothing touches Dexie until the server has accepted these rows
+  // (or we know we are offline). See `commitCloudFirstWrite`.
+  const bill: Bill = {
+    ...syncFields({ id: billId }),
+    title: input.title,
+    group_id: input.groupId,
+    currency: input.currency,
+    created_by: input.createdBy,
+    paid_by: resolvedPaidBy,
+    total_amount: totalAmount,
+    note: input.note,
+    category: input.category ?? null,
+  }
 
-    for (const item of input.items) {
-      const itemId = generateId()
-      const billItem: BillItem = {
-        ...syncFields({ id: itemId }),
-        bill_id: billId,
-        name: item.name,
-        amount: item.amount,
-      }
-      await db.bill_items.add(billItem)
-
-      if (item.splits.length > 0) {
-        const computed = computeSplits(item.amount, item.splits as SplitInput[])
-        for (let i = 0; i < item.splits.length; i++) {
-          const split: ItemSplit = {
-            ...syncFields(),
-            item_id: itemId,
-            user_id: resolvedSplitUserId.get(item.splits[i].userId) ?? item.splits[i].userId,
-            split_type: item.splits[i].splitType,
-            split_value: item.splits[i].splitValue,
-            computed_amount: computed[i].computedAmount,
-          }
-          await db.item_splits.add(split)
-        }
-      }
-    }
-
-    await db.activity_log.add({
-      ...syncFields(),
-      group_id: input.groupId,
-      user_id: input.createdBy,
-      action: 'created',
-      entity_type: 'bill',
-      entity_id: billId,
-      description: `Created bill "${input.title}"`,
+  const billItems: BillItem[] = []
+  const itemSplits: ItemSplit[] = []
+  for (const item of input.items) {
+    const itemId = generateId()
+    billItems.push({
+      ...syncFields({ id: itemId }),
+      bill_id: billId,
+      name: item.name,
+      amount: item.amount,
     })
+    if (item.splits.length === 0) continue
+    const computed = computeSplits(item.amount, item.splits as SplitInput[])
+    for (let i = 0; i < item.splits.length; i++) {
+      itemSplits.push({
+        ...syncFields(),
+        item_id: itemId,
+        user_id: resolvedSplitUserId.get(item.splits[i].userId) ?? item.splits[i].userId,
+        split_type: item.splits[i].splitType,
+        split_value: item.splits[i].splitValue,
+        computed_amount: computed[i].computedAmount,
+      })
+    }
+  }
+
+  const activity = {
+    ...syncFields(),
+    group_id: input.groupId,
+    user_id: input.createdBy,
+    action: 'created' as const,
+    entity_type: 'bill' as const,
+    entity_id: billId,
+    description: `Created bill "${input.title}"`,
+  }
+
+  const payload: CloudWritePayload = {
+    bills: [bill],
+    bill_items: billItems,
+    item_splits: itemSplits,
+    activity_log: [activity],
+  }
+
+  // COMMIT — cloud first. A rejection throws here and leaves Dexie untouched, so a failed
+  // save cannot leave a bill on screen that the user retries into a duplicate.
+  await commitCloudFirstWrite({
+    actorUserId: input.createdBy,
+    payload,
+    stageOffline: async () => {
+      await db.transaction(
+        'rw',
+        [db.bills, db.bill_items, db.item_splits, db.activity_log],
+        async () => {
+          await db.bills.add(bill)
+          if (billItems.length > 0) await db.bill_items.bulkAdd(billItems)
+          if (itemSplits.length > 0) await db.item_splits.bulkAdd(itemSplits)
+          await db.activity_log.add(activity)
+        },
+      )
+    },
+    queueOffline: async () => {
+      await enqueuePendingMutation({
+        actorUserId: input.createdBy,
+        operation: 'create_bill',
+        entityType: 'bill',
+        entityId: billId,
+        payload: { title: input.title, groupId: input.groupId },
+        routeHint: input.groupId ? `/app/groups/${input.groupId}` : '/app/bills',
+      })
+    },
   })
 
   const recipientIds = new Set<string>()
@@ -271,14 +337,9 @@ export async function createBill(input: CreateBillInput): Promise<string> {
   }
   const actor = await db.profiles.get(input.createdBy)
 
-  await notifySyncAfterMutation({
-    actorUserId: input.createdBy,
-    operation: 'create_bill',
-    entityType: 'bill',
-    entityId: billId,
-    payload: { title: input.title, groupId: input.groupId },
-    routeHint: input.groupId ? `/app/groups/${input.groupId}` : '/app/bills',
-  })
+  // No post-write sync call: `commitCloudFirstWrite` above already round-tripped through the
+  // server (online) or queued for replay (offline). Calling finalizeMutationSync here would
+  // push a second time for the same mutation.
 
   void notifyBillParticipantsCreated({
     actorId: input.createdBy,
@@ -294,6 +355,36 @@ export async function createBill(input: CreateBillInput): Promise<string> {
 }
 
 export type UpdateBillItemsInput = CreateBillInput['items']
+
+/**
+ * Complete rows for soft-deleting a bill's live items and their splits.
+ *
+ * Shared by updateBill (which replaces the line items) and deleteBill. Returns whole rows
+ * rather than patches because the server upsert takes full records — and because the same
+ * rows have to be stage-able locally on the offline path.
+ *
+ * `updated_at` is bumped without clearing `synced_at`: a row counts as unsynced when
+ * `updated_at > synced_at`, so this marks the change for push exactly as the previous
+ * per-row `update()` calls did.
+ */
+async function buildBillChildSoftDeletes(
+  billId: string,
+  timestamp: string,
+): Promise<{ items: BillItem[]; splits: ItemSplit[] }> {
+  const items: BillItem[] = []
+  const splits: ItemSplit[] = []
+  const existingItems = await db.bill_items.where('bill_id').equals(billId).toArray()
+  for (const item of existingItems) {
+    if (item.is_deleted) continue
+    items.push({ ...item, is_deleted: true, updated_at: timestamp })
+    const itemSplits = await db.item_splits.where('item_id').equals(item.id).toArray()
+    for (const s of itemSplits) {
+      if (s.is_deleted) continue
+      splits.push({ ...s, is_deleted: true, updated_at: timestamp })
+    }
+  }
+  return { items, splits }
+}
 
 export async function updateBill(
   billId: string,
@@ -337,118 +428,159 @@ export async function updateBill(
     return sum + item.amount
   }, 0)
 
-  await db.transaction('rw', [db.bills, db.bill_items, db.item_splits, db.activity_log], async () => {
-    const existingItems = await db.bill_items.where('bill_id').equals(billId).toArray()
-    for (const item of existingItems) {
-      if (!item.is_deleted) {
-        await db.bill_items.update(item.id, { is_deleted: true, updated_at: timestamp })
-        const splits = await db.item_splits.where('item_id').equals(item.id).toArray()
-        for (const s of splits) {
-          if (!s.is_deleted) {
-            await db.item_splits.update(s.id, { is_deleted: true, updated_at: timestamp })
-          }
-        }
-      }
-    }
+  // BUILD — the replaced items/splits are soft-deleted and the new ones created. The upsert
+  // needs COMPLETE rows, so each change is expressed as a whole row rather than a patch.
+  const { items: retiredItems, splits: retiredSplits } = await buildBillChildSoftDeletes(
+    billId,
+    timestamp,
+  )
 
-    await db.bills.update(billId, {
-      title: patch.title,
-      note: patch.note,
-      currency: patch.currency,
-      ...(resolvedPaidBy !== undefined && { paid_by: resolvedPaidBy }),
-      category: patch.category ?? null,
-      total_amount: totalAmount,
-      updated_at: timestamp,
-      synced_at: null,
+  const updatedBill: Bill = {
+    ...bill,
+    title: patch.title,
+    note: patch.note,
+    currency: patch.currency,
+    ...(resolvedPaidBy !== undefined && { paid_by: resolvedPaidBy }),
+    category: patch.category ?? null,
+    total_amount: totalAmount,
+    updated_at: timestamp,
+    synced_at: null,
+  }
+
+  const newItems: BillItem[] = []
+  const newSplits: ItemSplit[] = []
+  for (const item of patch.items) {
+    const itemId = generateId()
+    newItems.push({
+      ...syncFields({ id: itemId }),
+      bill_id: billId,
+      name: item.name,
+      amount: item.amount,
     })
-
-    for (const item of patch.items) {
-      const itemId = generateId()
-      const billItem: BillItem = {
-        ...syncFields({ id: itemId }),
-        bill_id: billId,
-        name: item.name,
-        amount: item.amount,
-      }
-      await db.bill_items.add(billItem)
-
-      if (item.splits.length > 0) {
-        const computed = computeSplits(item.amount, item.splits as SplitInput[])
-        for (let i = 0; i < item.splits.length; i++) {
-          await db.item_splits.add({
-            ...syncFields(),
-            item_id: itemId,
-            user_id: resolvedSplitUserId.get(item.splits[i].userId) ?? item.splits[i].userId,
-            split_type: item.splits[i].splitType,
-            split_value: item.splits[i].splitValue,
-            computed_amount: computed[i].computedAmount,
-          })
-        }
-      }
+    if (item.splits.length === 0) continue
+    const computed = computeSplits(item.amount, item.splits as SplitInput[])
+    for (let i = 0; i < item.splits.length; i++) {
+      newSplits.push({
+        ...syncFields(),
+        item_id: itemId,
+        user_id: resolvedSplitUserId.get(item.splits[i].userId) ?? item.splits[i].userId,
+        split_type: item.splits[i].splitType,
+        split_value: item.splits[i].splitValue,
+        computed_amount: computed[i].computedAmount,
+      })
     }
+  }
 
-    await db.activity_log.add({
-      ...syncFields(),
-      group_id: bill.group_id,
-      user_id: editorUserId,
-      action: 'updated',
-      entity_type: 'bill',
-      entity_id: billId,
-      description: `Updated bill "${patch.title}"`,
-    })
-  })
-  await notifySyncAfterMutation({
+  const activity = {
+    ...syncFields(),
+    group_id: bill.group_id,
+    user_id: editorUserId,
+    action: 'updated' as const,
+    entity_type: 'bill' as const,
+    entity_id: billId,
+    description: `Updated bill "${patch.title}"`,
+  }
+
+  const billItemRows = [...retiredItems, ...newItems]
+  const itemSplitRows = [...retiredSplits, ...newSplits]
+
+  await commitCloudFirstWrite({
     actorUserId: editorUserId,
-    operation: 'update_bill',
-    entityType: 'bill',
-    entityId: billId,
-    payload: { title: patch.title, currency: patch.currency, groupId: bill.group_id },
-    routeHint: bill.group_id ? `/app/groups/${bill.group_id}` : `/app/bills/${billId}`,
+    payload: {
+      bills: [updatedBill],
+      bill_items: billItemRows,
+      item_splits: itemSplitRows,
+      activity_log: [activity],
+    },
+    stageOffline: async () => {
+      await db.transaction(
+        'rw',
+        [db.bills, db.bill_items, db.item_splits, db.activity_log],
+        async () => {
+          await db.bills.put(updatedBill)
+          if (billItemRows.length > 0) await db.bill_items.bulkPut(billItemRows)
+          if (itemSplitRows.length > 0) await db.item_splits.bulkPut(itemSplitRows)
+          await db.activity_log.add(activity)
+        },
+      )
+    },
+    queueOffline: async () => {
+      await enqueuePendingMutation({
+        actorUserId: editorUserId,
+        operation: 'update_bill',
+        entityType: 'bill',
+        entityId: billId,
+        payload: { title: patch.title, currency: patch.currency, groupId: bill.group_id },
+        routeHint: bill.group_id ? `/app/groups/${bill.group_id}` : `/app/bills/${billId}`,
+      })
+    },
   })
 }
 
 export async function deleteBill(
   billId: string,
   userId: string,
-  options?: { suppressSync?: boolean },
+  options?: { collect?: MutationRowCollector },
 ) {
   const bill = await db.bills.get(billId)
   if (!bill || bill.is_deleted) return
   if (bill.created_by !== userId) return
 
   const timestamp = now()
-  await db.transaction('rw', [db.bills, db.bill_items, db.item_splits, db.activity_log], async () => {
-    await db.bills.update(billId, { is_deleted: true, updated_at: timestamp })
 
-    const items = await db.bill_items.where('bill_id').equals(billId).toArray()
-    for (const item of items) {
-      await db.bill_items.update(item.id, { is_deleted: true, updated_at: timestamp })
-      const splits = await db.item_splits.where('item_id').equals(item.id).toArray()
-      for (const split of splits) {
-        await db.item_splits.update(split.id, { is_deleted: true, updated_at: timestamp })
-      }
-    }
-
-    await db.activity_log.add({
-      ...syncFields(),
-      group_id: bill.group_id,
-      user_id: userId,
-      action: 'deleted',
-      entity_type: 'bill',
-      entity_id: billId,
-      description: `Deleted bill "${bill.title}"`,
-    })
-  })
-  if (!options?.suppressSync) {
-    await notifySyncAfterMutation({
-      actorUserId: userId,
-      operation: 'delete_bill',
-      entityType: 'bill',
-      entityId: billId,
-      payload: { title: bill.title, groupId: bill.group_id },
-      routeHint: bill.group_id ? `/app/groups/${bill.group_id}` : '/app/bills',
-    })
+  const deletedBill: Bill = { ...bill, is_deleted: true, updated_at: timestamp }
+  const { items, splits } = await buildBillChildSoftDeletes(billId, timestamp)
+  const activity = {
+    ...syncFields(),
+    group_id: bill.group_id,
+    user_id: userId,
+    action: 'deleted' as const,
+    entity_type: 'bill' as const,
+    entity_id: billId,
+    description: `Deleted bill "${bill.title}"`,
   }
+
+  // A cascade (deletePerson, deleteGroup) collects these rows and submits the whole cascade in
+  // one round trip, so nothing is written or sent here.
+  if (options?.collect) {
+    options.collect.bills.push(deletedBill)
+    options.collect.bill_items.push(...items)
+    options.collect.item_splits.push(...splits)
+    options.collect.activity_log.push(activity)
+    return
+  }
+
+  await commitCloudFirstWrite({
+    actorUserId: userId,
+    payload: {
+      bills: [deletedBill],
+      bill_items: items,
+      item_splits: splits,
+      activity_log: [activity],
+    },
+    stageOffline: async () => {
+      await db.transaction(
+        'rw',
+        [db.bills, db.bill_items, db.item_splits, db.activity_log],
+        async () => {
+          await db.bills.put(deletedBill)
+          if (items.length > 0) await db.bill_items.bulkPut(items)
+          if (splits.length > 0) await db.item_splits.bulkPut(splits)
+          await db.activity_log.add(activity)
+        },
+      )
+    },
+    queueOffline: async () => {
+      await enqueuePendingMutation({
+        actorUserId: userId,
+        operation: 'delete_bill',
+        entityType: 'bill',
+        entityId: billId,
+        payload: { title: bill.title, groupId: bill.group_id },
+        routeHint: bill.group_id ? `/app/groups/${bill.group_id}` : '/app/bills',
+      })
+    },
+  })
 }
 
 // ── Groups ───────────────────────────────────────────
@@ -463,43 +595,45 @@ export async function createGroup(
 
   const creatorProfile = await db.profiles.get(createdBy)
 
-  await db.transaction('rw', [db.groups, db.group_members, db.activity_log], async () => {
-    const group: Group = {
-      ...syncFields({ id: groupId }),
-      name,
-      currency,
-      created_by: createdBy,
-      invite_code: inviteCode,
-    }
-    await db.groups.add(group)
+  const group: Group = {
+    ...syncFields({ id: groupId }),
+    name,
+    currency,
+    created_by: createdBy,
+    invite_code: inviteCode,
+  }
+  const member: GroupMember = {
+    ...syncFields(),
+    group_id: groupId,
+    user_id: createdBy,
+    display_name: creatorProfile?.display_name ?? createdBy,
+    joined_at: now(),
+  }
 
-    const member: GroupMember = {
-      ...syncFields(),
-      group_id: groupId,
-      user_id: createdBy,
-      display_name: creatorProfile?.display_name ?? createdBy,
-      joined_at: now(),
-    }
-    await db.group_members.add(member)
-
-    await db.activity_log.add({
-      ...syncFields(),
-      group_id: groupId,
-      user_id: createdBy,
-      action: 'created',
-      entity_type: 'group',
-      entity_id: groupId,
-      description: `Created group "${name}"`,
-    })
-  })
-
-  await notifySyncAfterMutation({
+  await commitRows({
     actorUserId: createdBy,
-    operation: 'create_group',
-    entityType: 'group',
-    entityId: groupId,
-    payload: { name, currency },
-    routeHint: `/app/groups/${groupId}`,
+    payload: {
+      groups: [group],
+      group_members: [member],
+      activity_log: [
+        {
+          ...syncFields(),
+          group_id: groupId,
+          user_id: createdBy,
+          action: 'created',
+          entity_type: 'group',
+          entity_id: groupId,
+          description: `Created group "${name}"`,
+        },
+      ],
+    },
+    pending: {
+      operation: 'create_group',
+      entityType: 'group',
+      entityId: groupId,
+      payload: { name, currency },
+      routeHint: `/app/groups/${groupId}`,
+    },
   })
   return groupId
 }
@@ -517,31 +651,31 @@ export async function updateGroup(
   const nextName = patch.name?.trim() ?? group.name
   const nextCurrency = patch.currency ?? group.currency
 
-  await db.transaction('rw', [db.groups, db.activity_log], async () => {
-    await db.groups.update(groupId, {
-      name: nextName,
-      currency: nextCurrency,
-      updated_at: timestamp,
-      synced_at: null,
-    })
-
-    await db.activity_log.add({
-      ...syncFields(),
-      group_id: groupId,
-      user_id: userId,
-      action: 'updated',
-      entity_type: 'group',
-      entity_id: groupId,
-      description: `Updated group "${nextName}"`,
-    })
-  })
-  await notifySyncAfterMutation({
+  await commitRows({
     actorUserId: userId,
-    operation: 'update_group',
-    entityType: 'group',
-    entityId: groupId,
-    payload: { name: nextName, currency: nextCurrency },
-    routeHint: `/app/groups/${groupId}`,
+    payload: {
+      groups: [
+        { ...group, name: nextName, currency: nextCurrency, updated_at: timestamp, synced_at: null },
+      ],
+      activity_log: [
+        {
+          ...syncFields(),
+          group_id: groupId,
+          user_id: userId,
+          action: 'updated',
+          entity_type: 'group',
+          entity_id: groupId,
+          description: `Updated group "${nextName}"`,
+        },
+      ],
+    },
+    pending: {
+      operation: 'update_group',
+      entityType: 'group',
+      entityId: groupId,
+      payload: { name: nextName, currency: nextCurrency },
+      routeHint: `/app/groups/${groupId}`,
+    },
   })
 }
 
@@ -570,17 +704,8 @@ export async function addGroupMember(
     // boundary). Fall back to the synced group_members.display_name so we reuse
     // the existing member instead of minting a duplicate local contact.
     const memberName = ((p && !p.is_deleted ? p.display_name : m.display_name) || '').trim().toLowerCase()
-    if (memberName === normalized) {
-      await notifySyncAfterMutation({
-        actorUserId: addedBy,
-        operation: 'group_member_exists',
-        entityType: 'group_member',
-        entityId: m.id,
-        payload: { groupId, memberUserId: m.user_id },
-        routeHint: `/app/groups/${groupId}`,
-      })
-      return m.user_id
-    }
+    // Already a member — nothing is written, so there is nothing to submit.
+    if (memberName === normalized) return m.user_id
   }
 
   let userId: string | undefined
@@ -597,57 +722,64 @@ export async function addGroupMember(
     const pCheck = await db.profiles.get(userId)
     const rowUid = pCheck ? membershipUserIdForProfile(pCheck) : userId
     const already = await db.group_members.where('[group_id+user_id]').equals([groupId, rowUid]).first()
-    if (already && !already.is_deleted) {
-      await notifySyncAfterMutation({
-        actorUserId: addedBy,
-        operation: 'group_member_exists',
-        entityType: 'group_member',
-        entityId: already.id,
-        payload: { groupId, memberUserId: rowUid },
-        routeHint: `/app/groups/${groupId}`,
-      })
-      return userId
-    }
+    // Already a member — nothing is written, so there is nothing to submit.
+    if (already && !already.is_deleted) return userId
   }
 
   const memberId = generateId()
 
-  await db.transaction('rw', [db.profiles, db.group_members, db.activity_log], async () => {
-    if (!userId) {
-      userId = generateId()
-      await db.profiles.add({
-        ...syncFields({ id: userId }),
-        email: '',
-        display_name: trimmed,
-        avatar_url: null,
-        user_type: 'user',
-        account_status: 'active',
-        is_local: true,
-        linked_profile_id: null,
-        owner_id: addedBy,
-      })
-    }
-
-    const p = await db.profiles.get(userId)
-    const memberRowUserId = p ? membershipUserIdForProfile(p) : userId
-    const member: GroupMember = {
-      ...syncFields({ id: memberId }),
-      group_id: groupId,
-      user_id: memberRowUserId,
-      display_name: p?.display_name ?? trimmed,
-      joined_at: now(),
-    }
-    await db.group_members.add(member)
-
-    await db.activity_log.add({
-      ...syncFields(),
-      group_id: groupId,
-      user_id: addedBy,
-      action: 'created',
-      entity_type: 'group',
-      entity_id: memberId,
-      description: `Added "${p?.display_name ?? trimmed}" to group`,
+  // A brand-new contact and their membership row are built together and submitted as one unit:
+  // a membership pointing at a profile the server never stored would render as "Unknown".
+  const newProfiles: Profile[] = []
+  if (!userId) {
+    userId = generateId()
+    newProfiles.push({
+      ...syncFields({ id: userId }),
+      email: '',
+      display_name: trimmed,
+      avatar_url: null,
+      user_type: 'user',
+      account_status: 'active',
+      is_local: true,
+      linked_profile_id: null,
+      owner_id: addedBy,
     })
+  }
+
+  const existing = newProfiles[0] ?? (await db.profiles.get(userId))
+  const memberRowUserId = existing ? membershipUserIdForProfile(existing) : userId
+  const member: GroupMember = {
+    ...syncFields({ id: memberId }),
+    group_id: groupId,
+    user_id: memberRowUserId,
+    display_name: existing?.display_name ?? trimmed,
+    joined_at: now(),
+  }
+
+  await commitRows({
+    actorUserId: addedBy,
+    payload: {
+      ...(newProfiles.length > 0 && { profiles: newProfiles }),
+      group_members: [member],
+      activity_log: [
+        {
+          ...syncFields(),
+          group_id: groupId,
+          user_id: addedBy,
+          action: 'created',
+          entity_type: 'group',
+          entity_id: memberId,
+          description: `Added "${existing?.display_name ?? trimmed}" to group`,
+        },
+      ],
+    },
+    pending: {
+      operation: 'add_group_member',
+      entityType: 'group_member',
+      entityId: memberId,
+      payload: { groupId, memberUserId: memberRowUserId },
+      routeHint: `/app/groups/${groupId}`,
+    },
   })
 
   const pFinal = await db.profiles.get(userId!)
@@ -668,14 +800,6 @@ export async function addGroupMember(
     })
   }
 
-  await notifySyncAfterMutation({
-    actorUserId: addedBy,
-    operation: 'add_group_member',
-    entityType: 'group_member',
-    entityId: memberId,
-    payload: { groupId, memberUserId: userId },
-    routeHint: `/app/groups/${groupId}`,
-  })
   return userId!
 }
 
@@ -700,24 +824,30 @@ export async function createLocalProfile(
   if (existing) return { outcome: 'already_exists', id: existing.id }
 
   const userId = generateId()
-  await db.profiles.add({
-    ...syncFields({ id: userId }),
-    email: '',
-    display_name: trimmed,
-    avatar_url: null,
-    user_type: 'user',
-    account_status: 'active',
-    is_local: true,
-    linked_profile_id: null,
-    owner_id: ownerUserId,
-  })
-  await notifySyncAfterMutation({
+  await commitRows({
     actorUserId: ownerUserId,
-    operation: 'create_local_profile',
-    entityType: 'profile',
-    entityId: userId,
-    payload: { displayName: trimmed },
-    routeHint: `/app/people/${userId}`,
+    payload: {
+      profiles: [
+        {
+          ...syncFields({ id: userId }),
+          email: '',
+          display_name: trimmed,
+          avatar_url: null,
+          user_type: 'user',
+          account_status: 'active',
+          is_local: true,
+          linked_profile_id: null,
+          owner_id: ownerUserId,
+        },
+      ],
+    },
+    pending: {
+      operation: 'create_local_profile',
+      entityType: 'profile',
+      entityId: userId,
+      payload: { displayName: trimmed },
+      routeHint: `/app/people/${userId}`,
+    },
   })
   return { outcome: 'created', id: userId }
 }
@@ -750,38 +880,44 @@ export async function addExistingGroupMember(
     (existingLocal && !existingLocal.is_deleted) ||
     (existingCanon && !existingCanon.is_deleted)
   ) {
-    await notifySyncAfterMutation({
-      actorUserId: addedBy,
-      operation: 'group_member_exists',
-      entityType: 'group_member',
-      entityId: existingLocal?.id ?? existingCanon?.id ?? null,
-      payload: { groupId, memberUserId: memberRowUserId },
-      routeHint: `/app/groups/${groupId}`,
-    })
+    // Already a member — nothing is written, so there is nothing to submit.
     return
   }
 
   await fetchRemoteProfileIntoDexie(memberRowUserId)
 
   const memberId = generateId()
-  await db.transaction('rw', [db.group_members, db.activity_log], async () => {
-    await db.group_members.add({
-      ...syncFields({ id: memberId }),
-      group_id: groupId,
-      user_id: memberRowUserId,
-      display_name: p.display_name,
-      joined_at: now(),
-    })
-
-    await db.activity_log.add({
-      ...syncFields(),
-      group_id: groupId,
-      user_id: addedBy,
-      action: 'created',
-      entity_type: 'group',
-      entity_id: memberId,
-      description: `Added "${p.display_name}" to group`,
-    })
+  await commitRows({
+    actorUserId: addedBy,
+    payload: {
+      group_members: [
+        {
+          ...syncFields({ id: memberId }),
+          group_id: groupId,
+          user_id: memberRowUserId,
+          display_name: p.display_name,
+          joined_at: now(),
+        },
+      ],
+      activity_log: [
+        {
+          ...syncFields(),
+          group_id: groupId,
+          user_id: addedBy,
+          action: 'created',
+          entity_type: 'group',
+          entity_id: memberId,
+          description: `Added "${p.display_name}" to group`,
+        },
+      ],
+    },
+    pending: {
+      operation: 'add_group_member',
+      entityType: 'group_member',
+      entityId: memberId,
+      payload: { groupId, memberUserId: memberRowUserId },
+      routeHint: `/app/groups/${groupId}`,
+    },
   })
   const group = await db.groups.get(groupId)
   const actor = await db.profiles.get(addedBy)
@@ -795,14 +931,6 @@ export async function addExistingGroupMember(
       groupName: group.name,
     })
   }
-  await notifySyncAfterMutation({
-    actorUserId: addedBy,
-    operation: 'add_group_member',
-    entityType: 'group_member',
-    entityId: memberId,
-    payload: { groupId, memberUserId: memberRowUserId },
-    routeHint: `/app/groups/${groupId}`,
-  })
 }
 
 /** Point a local contact at a synced account (for display & future migration). */
@@ -820,7 +948,15 @@ export async function linkProfileToRemote(
   if (!remote.email?.trim()) return
 
   const timestamp = now()
-  await db.profiles.update(localProfileId, {
+
+  // The link and EVERY id rewrite it implies go in one submission. Landing only some of them
+  // is the failure that produces "Unknown" people and wrong balances: a membership rewritten
+  // to the remote id while the splits still carry the local id (or the reverse) leaves the two
+  // sides of the same person disagreeing on every device.
+  const collect = newRowCollector()
+
+  collect.profiles.push({
+    ...local,
     linked_profile_id: remoteProfileId,
     updated_at: timestamp,
     synced_at: null,
@@ -829,7 +965,8 @@ export async function linkProfileToRemote(
   const memberships = await db.group_members.where('user_id').equals(localProfileId).toArray()
   for (const m of memberships) {
     if (m.is_deleted) continue
-    await db.group_members.update(m.id, {
+    collect.group_members.push({
+      ...m,
       user_id: remoteProfileId,
       updated_at: timestamp,
       synced_at: null,
@@ -856,7 +993,8 @@ export async function linkProfileToRemote(
   const splits = await db.item_splits.where('user_id').equals(localProfileId).toArray()
   for (const split of splits) {
     if (split.is_deleted) continue
-    await db.item_splits.update(split.id, {
+    collect.item_splits.push({
+      ...split,
       user_id: remoteProfileId,
       updated_at: timestamp,
       synced_at: null,
@@ -870,7 +1008,8 @@ export async function linkProfileToRemote(
   const allBills = await db.bills.toArray()
   for (const bill of allBills) {
     if (bill.is_deleted || bill.paid_by !== localProfileId) continue
-    await db.bills.update(bill.id, {
+    collect.bills.push({
+      ...bill,
       paid_by: remoteProfileId,
       updated_at: timestamp,
       synced_at: null,
@@ -886,7 +1025,8 @@ export async function linkProfileToRemote(
   for (const s of [...fromSettlements, ...toSettlements]) {
     if (s.is_deleted || seenSettlementIds.has(s.id)) continue
     seenSettlementIds.add(s.id)
-    await db.settlements.update(s.id, {
+    collect.settlements.push({
+      ...s,
       ...(s.from_user_id === localProfileId ? { from_user_id: remoteProfileId } : {}),
       ...(s.to_user_id === localProfileId ? { to_user_id: remoteProfileId } : {}),
       updated_at: timestamp,
@@ -894,20 +1034,26 @@ export async function linkProfileToRemote(
     })
   }
 
+  await commitRows({
+    actorUserId,
+    payload: collectorToPayload(collect),
+    pending: {
+      operation: 'link_profile',
+      entityType: 'profile',
+      entityId: localProfileId,
+      payload: { remoteProfileId },
+      routeHint: `/app/people/${localProfileId}`,
+    },
+  })
+
+  // Notify only after the link is committed — telling someone they were linked to an account
+  // when the write was rejected would be a lie the other device cannot verify.
   const actor = await db.profiles.get(actorUserId)
   void notifyProfileLinked({
     actorId: actorUserId,
     actorName: actor?.display_name?.trim() || 'Someone',
     recipientId: remoteProfileId,
     linkedAsName: local.display_name,
-  })
-  await notifySyncAfterMutation({
-    actorUserId,
-    operation: 'link_profile',
-    entityType: 'profile',
-    entityId: localProfileId,
-    payload: { remoteProfileId },
-    routeHint: `/app/people/${localProfileId}`,
   })
 }
 
@@ -999,14 +1145,16 @@ export async function addProfilePeerLink(
     anchor_profile_id: anchorLocalId,
     peer_profile_id: peerProfileId,
   }
-  await db.profile_peer_links.add(row)
-  await notifySyncAfterMutation({
+  await commitRows({
     actorUserId,
-    operation: 'add_profile_peer_link',
-    entityType: 'profile_peer_link',
-    entityId: row.id,
-    payload: { anchorLocalId, peerProfileId },
-    routeHint: `/app/people/${anchorLocalId}`,
+    payload: { profile_peer_links: [row] },
+    pending: {
+      operation: 'add_profile_peer_link',
+      entityType: 'profile_peer_link',
+      entityId: row.id,
+      payload: { anchorLocalId, peerProfileId },
+      routeHint: `/app/people/${anchorLocalId}`,
+    },
   })
 }
 
@@ -1018,18 +1166,18 @@ export async function removeProfilePeerLink(linkId: string, actorUserId: string)
   if (isPrimaryAccountLink) return
 
   const timestamp = now()
-  await db.profile_peer_links.update(linkId, {
-    is_deleted: true,
-    updated_at: timestamp,
-    synced_at: null,
-  })
-  await notifySyncAfterMutation({
+  await commitRows({
     actorUserId,
-    operation: 'remove_profile_peer_link',
-    entityType: 'profile_peer_link',
-    entityId: linkId,
-    payload: { anchorLocalId: row.anchor_profile_id, peerProfileId: row.peer_profile_id },
-    routeHint: `/app/people/${row.anchor_profile_id}`,
+    payload: {
+      profile_peer_links: [{ ...row, is_deleted: true, updated_at: timestamp, synced_at: null }],
+    },
+    pending: {
+      operation: 'remove_profile_peer_link',
+      entityType: 'profile_peer_link',
+      entityId: linkId,
+      payload: { anchorLocalId: row.anchor_profile_id, peerProfileId: row.peer_profile_id },
+      routeHint: `/app/people/${row.anchor_profile_id}`,
+    },
   })
 }
 
@@ -1037,7 +1185,7 @@ export async function removeGroupMember(
   groupId: string,
   memberUserId: string,
   removedBy: string,
-  options?: { suppressSync?: boolean; force?: boolean },
+  options?: { force?: boolean; collect?: MutationRowCollector },
 ): Promise<void> {
   const group = await db.groups.get(groupId)
   if (!group || group.is_deleted) return
@@ -1065,33 +1213,38 @@ export async function removeGroupMember(
 
   // Soft-delete the membership ONLY. Past bills/splits are preserved (no redistribution),
   // so historical balances and names stay intact.
-  await db.transaction('rw', [db.group_members, db.activity_log], async () => {
-    await db.group_members.update(membership.id, {
-      is_deleted: true,
-      updated_at: timestamp,
-      synced_at: null,
-    })
-    await db.activity_log.add({
-      ...syncFields(),
-      group_id: groupId,
-      user_id: removedBy,
-      action: 'deleted',
-      entity_type: 'group',
-      entity_id: membership.id,
-      description: `Removed "${displayName}" from group`,
-    })
-  })
+  const removedMembership: GroupMember = {
+    ...membership,
+    is_deleted: true,
+    updated_at: timestamp,
+    synced_at: null,
+  }
+  const removalActivity: ActivityLog = {
+    ...syncFields(),
+    group_id: groupId,
+    user_id: removedBy,
+    action: 'deleted',
+    entity_type: 'group',
+    entity_id: membership.id,
+    description: `Removed "${displayName}" from group`,
+  }
 
-  if (!options?.suppressSync) {
-    await notifySyncAfterMutation({
-      actorUserId: removedBy,
+  if (options?.collect) {
+    options.collect.group_members.push(removedMembership)
+    options.collect.activity_log.push(removalActivity)
+    return
+  }
+  await commitRows({
+    actorUserId: removedBy,
+    payload: { group_members: [removedMembership], activity_log: [removalActivity] },
+    pending: {
       operation: 'remove_group_member',
       entityType: 'group_member',
       entityId: memberUserId,
       payload: { groupId, memberUserId },
       routeHint: `/app/groups/${groupId}`,
-    })
-  }
+    },
+  })
 }
 
 /**
@@ -1102,70 +1255,69 @@ export async function removeGroupMember(
 async function removePersonFromPersonalBills(
   memberUserId: string,
   removedBy: string,
-  options?: { suppressSync?: boolean },
+  collect: MutationRowCollector,
 ): Promise<void> {
   const actorId = removedBy
   const allPersonal = await db.bills
     .filter((b) => !b.is_deleted && (b.group_id === null || b.group_id === undefined))
     .toArray()
 
+  // Bills that involve only you two are removed outright; their rows join the cascade.
+  const deletedBillIds = new Set<string>()
   for (const bill of allPersonal) {
     const union = await participantUnionForBill(bill.id)
     if (!union.has(memberUserId)) continue
 
     const othersBesidesYouTwo = [...union].filter((id) => id !== actorId && id !== memberUserId)
     if (othersBesidesYouTwo.length === 0) {
-      await deleteBill(bill.id, actorId, { suppressSync: options?.suppressSync })
+      await deleteBill(bill.id, actorId, { collect })
+      deletedBillIds.add(bill.id)
     }
   }
 
   const timestamp = now()
-  await db.transaction('rw', [db.bills, db.bill_items, db.item_splits, db.activity_log], async () => {
-    const bills = await db.bills
-      .filter((b) => !b.is_deleted && (b.group_id === null || b.group_id === undefined))
-      .toArray()
 
-    for (const bill of bills) {
-      const items = await db.bill_items.where('bill_id').equals(bill.id).toArray()
-      const activeItems = items.filter((i) => !i.is_deleted)
+  // Bills with other participants keep existing: drop this person's split and redistribute an
+  // equal split across whoever is left. Skip bills already deleted above so the same split is
+  // not queued twice with different states.
+  for (const bill of allPersonal) {
+    if (deletedBillIds.has(bill.id)) continue
+    const items = await db.bill_items.where('bill_id').equals(bill.id).toArray()
+    for (const item of items) {
+      if (item.is_deleted) continue
+      const splits = await db.item_splits.where('item_id').equals(item.id).toArray()
+      const activeSplits = splits.filter((s) => !s.is_deleted)
+      const memberSplit = activeSplits.find((s) => s.user_id === memberUserId)
+      if (!memberSplit) continue
 
-      for (const item of activeItems) {
-        const splits = await db.item_splits.where('item_id').equals(item.id).toArray()
-        const activeSplits = splits.filter((s) => !s.is_deleted)
-        const memberSplit = activeSplits.find((s) => s.user_id === memberUserId)
-        if (!memberSplit) continue
+      collect.item_splits.push({ ...memberSplit, is_deleted: true, updated_at: timestamp })
 
-        await db.item_splits.update(memberSplit.id, {
-          is_deleted: true,
-          updated_at: timestamp,
-        })
-
-        const remaining = activeSplits.filter((s) => s.user_id !== memberUserId)
-        if (memberSplit.split_type === 'equal' && remaining.length > 0) {
-          // floor-to-cent + remainder-to-first so splits sum to item.amount exactly.
-          const base = Math.floor((item.amount / remaining.length) * 100) / 100
-          const cents = Math.round((item.amount - base * remaining.length) * 100) / 100
-          for (let i = 0; i < remaining.length; i++) {
-            await db.item_splits.update(remaining[i].id, {
-              computed_amount: i === 0 ? base + cents : base,
-              updated_at: timestamp,
-              synced_at: null,
-            })
-          }
+      const remaining = activeSplits.filter((s) => s.user_id !== memberUserId)
+      if (memberSplit.split_type === 'equal' && remaining.length > 0) {
+        // floor-to-cent + remainder-to-first so splits sum to item.amount exactly.
+        const base = Math.floor((item.amount / remaining.length) * 100) / 100
+        const cents = Math.round((item.amount - base * remaining.length) * 100) / 100
+        for (let i = 0; i < remaining.length; i++) {
+          collect.item_splits.push({
+            ...remaining[i],
+            computed_amount: i === 0 ? base + cents : base,
+            updated_at: timestamp,
+            synced_at: null,
+          })
         }
       }
     }
+  }
 
-    await db.activity_log.add({
-      ...syncFields(),
-      group_id: null,
-      user_id: removedBy,
-      action: 'deleted',
-      entity_type: 'bill',
-      entity_id: memberUserId,
-      description:
-        'Removed contact from personal bills (bills only between you two were deleted; other bills had their splits updated)',
-    })
+  collect.activity_log.push({
+    ...syncFields(),
+    group_id: null,
+    user_id: removedBy,
+    action: 'deleted',
+    entity_type: 'bill',
+    entity_id: memberUserId,
+    description:
+      'Removed contact from personal bills (bills only between you two were deleted; other bills had their splits updated)',
   })
 }
 
@@ -1180,20 +1332,26 @@ export async function deletePerson(personId: string, actorUserId: string): Promi
 
   const displayName = p.display_name
 
+  // Gather the WHOLE cascade — memberships, personal bills and splits, payments, peer links and
+  // the profile itself — then submit it as one unit. Deleting a person is the widest write in
+  // the app; landing it partly would leave memberships pointing at a profile that is gone, or
+  // payments referencing a contact that no longer exists.
+  const collect = newRowCollector()
+
   const memberships = await db.group_members.where('user_id').equals(personId).toArray()
   const groupIds = [...new Set(memberships.filter((m) => !m.is_deleted).map((m) => m.group_id))]
 
   for (const gid of groupIds) {
-    await removeGroupMember(gid, personId, actorUserId, { suppressSync: true, force: true })
+    await removeGroupMember(gid, personId, actorUserId, { collect, force: true })
   }
 
-  await removePersonFromPersonalBills(personId, actorUserId, { suppressSync: true })
+  await removePersonFromPersonalBills(personId, actorUserId, collect)
 
   const settlements = await db.settlements
     .filter((s) => !s.is_deleted && (s.from_user_id === personId || s.to_user_id === personId))
     .toArray()
   for (const s of settlements) {
-    await deleteSettlement(s.id, actorUserId, { suppressSync: true })
+    await deleteSettlement(s.id, actorUserId, { collect })
   }
 
   const timestamp = now()
@@ -1207,20 +1365,17 @@ export async function deletePerson(personId: string, actorUserId: string): Promi
     )
     .toArray()
   for (const l of peerLinks) {
-    await db.profile_peer_links.update(l.id, {
+    collect.profile_peer_links.push({
+      ...l,
       is_deleted: true,
       updated_at: timestamp,
       synced_at: null,
     })
   }
 
-  await db.profiles.update(personId, {
-    is_deleted: true,
-    updated_at: timestamp,
-    synced_at: null,
-  })
+  collect.profiles.push({ ...p, is_deleted: true, updated_at: timestamp, synced_at: null })
 
-  await db.activity_log.add({
+  collect.activity_log.push({
     ...syncFields(),
     group_id: null,
     user_id: actorUserId,
@@ -1229,78 +1384,169 @@ export async function deletePerson(personId: string, actorUserId: string): Promi
     entity_id: personId,
     description: `Removed contact "${displayName}"`,
   })
-  await notifySyncAfterMutation({
+
+  await commitRows({
     actorUserId,
-    operation: 'delete_person',
-    entityType: 'profile',
-    entityId: personId,
-    payload: { personId },
-    routeHint: '/app/people',
+    payload: collectorToPayload(collect),
+    pending: {
+      operation: 'delete_person',
+      entityType: 'profile',
+      entityId: personId,
+      payload: { personId },
+      routeHint: '/app/people',
+    },
   })
 }
 
 export async function deleteGroup(groupId: string, userId: string) {
+  const group = await db.groups.get(groupId)
+  if (!group) return
+  if (group.created_by !== userId) return
+
   const timestamp = now()
-  await db.transaction(
-    'rw',
-    [db.groups, db.group_members, db.bills, db.bill_items, db.item_splits, db.settlements, db.activity_log],
-    async () => {
-      const group = await db.groups.get(groupId)
-      if (!group) return
-      if (group.created_by !== userId) return
 
-      const bills = await db.bills.where('group_id').equals(groupId).toArray()
-      for (const bill of bills) {
-        if (bill.is_deleted) continue
-        await db.bills.update(bill.id, { is_deleted: true, updated_at: timestamp })
+  // BUILD the whole cascade — group, memberships, bills, their items and splits, and the
+  // group's settlements — then submit it as ONE unit. A partially-applied group deletion is
+  // especially bad: a bill whose group row is gone renders nowhere but still moves balances.
+  const deletedBills: Bill[] = []
+  const deletedItems: BillItem[] = []
+  const deletedSplits: ItemSplit[] = []
+  const groupBills = await db.bills.where('group_id').equals(groupId).toArray()
+  for (const bill of groupBills) {
+    if (bill.is_deleted) continue
+    deletedBills.push({ ...bill, is_deleted: true, updated_at: timestamp })
+    const children = await buildBillChildSoftDeletes(bill.id, timestamp)
+    deletedItems.push(...children.items)
+    deletedSplits.push(...children.splits)
+  }
 
-        const items = await db.bill_items.where('bill_id').equals(bill.id).toArray()
-        for (const item of items) {
-          if (item.is_deleted) continue
-          await db.bill_items.update(item.id, { is_deleted: true, updated_at: timestamp })
-          const splits = await db.item_splits.where('item_id').equals(item.id).toArray()
-          for (const split of splits) {
-            if (split.is_deleted) continue
-            await db.item_splits.update(split.id, { is_deleted: true, updated_at: timestamp })
-          }
-        }
-      }
+  const groupSettlements = (await db.settlements.where('group_id').equals(groupId).toArray())
+    .filter((s) => !s.is_deleted)
+    .map((s) => ({ ...s, is_deleted: true, updated_at: timestamp, synced_at: null }))
 
-      const settlements = await db.settlements.where('group_id').equals(groupId).toArray()
-      for (const s of settlements) {
-        if (s.is_deleted) continue
-        await db.settlements.update(s.id, { is_deleted: true, updated_at: timestamp, synced_at: null })
-      }
+  const members = (await db.group_members.where('group_id').equals(groupId).toArray()).map((m) => ({
+    ...m,
+    is_deleted: true,
+    updated_at: timestamp,
+  }))
 
-      await db.groups.update(groupId, { is_deleted: true, updated_at: timestamp })
-
-      const members = await db.group_members.where('group_id').equals(groupId).toArray()
-      for (const m of members) {
-        await db.group_members.update(m.id, { is_deleted: true, updated_at: timestamp })
-      }
-
-      await db.activity_log.add({
-        ...syncFields(),
-        group_id: groupId,
-        user_id: userId,
-        action: 'deleted',
-        entity_type: 'group',
-        entity_id: groupId,
-        description: `Deleted group "${group.name}"`,
-      })
-    },
-  )
-  await notifySyncAfterMutation({
+  await commitRows({
     actorUserId: userId,
-    operation: 'delete_group',
-    entityType: 'group',
-    entityId: groupId,
-    payload: { groupId },
-    routeHint: '/app/groups',
+    payload: {
+      groups: [{ ...group, is_deleted: true, updated_at: timestamp }],
+      ...(members.length > 0 && { group_members: members }),
+      ...(deletedBills.length > 0 && { bills: deletedBills }),
+      ...(deletedItems.length > 0 && { bill_items: deletedItems }),
+      ...(deletedSplits.length > 0 && { item_splits: deletedSplits }),
+      ...(groupSettlements.length > 0 && { settlements: groupSettlements }),
+      activity_log: [
+        {
+          ...syncFields(),
+          group_id: groupId,
+          user_id: userId,
+          action: 'deleted',
+          entity_type: 'group',
+          entity_id: groupId,
+          description: `Deleted group "${group.name}"`,
+        },
+      ],
+    },
+    pending: {
+      operation: 'delete_group',
+      entityType: 'group',
+      entityId: groupId,
+      payload: { groupId },
+      routeHint: '/app/groups',
+    },
   })
 }
 
 // ── Settlements ─────────────────────────────────────
+
+/**
+ * Rows gathered from several sub-operations so they can be submitted as one unit.
+ *
+ * A bundled payment splits ONE real transfer across contexts (personal + each group). Landing
+ * only some legs would misstate the balance in both directions at once, so the legs are built
+ * up here and committed together rather than written one at a time.
+ */
+export type MutationRowCollector = {
+  profiles: Profile[]
+  groups: Group[]
+  group_members: GroupMember[]
+  bills: Bill[]
+  bill_items: BillItem[]
+  item_splits: ItemSplit[]
+  settlements: Settlement[]
+  activity_log: ActivityLog[]
+  profile_peer_links: ProfilePeerLink[]
+}
+
+function newRowCollector(): MutationRowCollector {
+  return {
+    profiles: [],
+    groups: [],
+    group_members: [],
+    bills: [],
+    bill_items: [],
+    item_splits: [],
+    settlements: [],
+    activity_log: [],
+    profile_peer_links: [],
+  }
+}
+
+/** Drop the empty tables so the payload only names what actually changed. */
+function collectorToPayload(c: MutationRowCollector): CloudWritePayload {
+  const out: CloudWritePayload = {}
+  if (c.profiles.length) out.profiles = c.profiles
+  if (c.groups.length) out.groups = c.groups
+  if (c.group_members.length) out.group_members = c.group_members
+  if (c.bills.length) out.bills = c.bills
+  if (c.bill_items.length) out.bill_items = c.bill_items
+  if (c.item_splits.length) out.item_splits = c.item_splits
+  if (c.settlements.length) out.settlements = c.settlements
+  if (c.activity_log.length) out.activity_log = c.activity_log
+  if (c.profile_peer_links.length) out.profile_peer_links = c.profile_peer_links
+  return out
+}
+
+/**
+ * Commit settlement row changes cloud-first. Shared by the update/delete settlement operations,
+ * which all reduce to "some complete settlement rows plus one activity row".
+ */
+async function commitSettlementRows(input: {
+  actorUserId: string
+  settlements: Settlement[]
+  activity: ActivityLog
+  pending: {
+    operation: string
+    entityId: string | null
+    payload: unknown
+    routeHint: string
+  }
+}): Promise<void> {
+  await commitCloudFirstWrite({
+    actorUserId: input.actorUserId,
+    payload: { settlements: input.settlements, activity_log: [input.activity] },
+    stageOffline: async () => {
+      await db.transaction('rw', [db.settlements, db.activity_log], async () => {
+        await db.settlements.bulkPut(input.settlements)
+        await db.activity_log.add(input.activity)
+      })
+    },
+    queueOffline: async () => {
+      await enqueuePendingMutation({
+        actorUserId: input.actorUserId,
+        operation: input.pending.operation,
+        entityType: 'settlement',
+        entityId: input.pending.entityId,
+        payload: input.pending.payload,
+        routeHint: input.pending.routeHint,
+      })
+    },
+  })
+}
 
 export async function createSettlement(
   groupId: string | null,
@@ -1313,7 +1559,6 @@ export async function createSettlement(
   billId?: string | null,
   options?: {
     suppressNotification?: boolean
-    suppressSync?: boolean
     syncOperation?: string
     routeHint?: string
     enforceCap?: boolean
@@ -1321,6 +1566,8 @@ export async function createSettlement(
     bundleId?: string | null
     /** How the money moved (cash / transfer / …) — audit detail. */
     method?: string | null
+    /** Hand the built rows to an aggregating caller instead of writing or submitting them. */
+    collect?: MutationRowCollector
   },
 ): Promise<string> {
   const settlementId = generateId()
@@ -1357,35 +1604,65 @@ export async function createSettlement(
     }
   }
 
-  await db.transaction('rw', [db.settlements, db.activity_log, db.profiles], async () => {
-    await db.settlements.add({
-      ...syncFields({ id: settlementId }),
-      group_id: groupId,
-      bill_id: billId ?? null,
-      bundle_id: options?.bundleId ?? null,
-      from_user_id: resolvedFromUserId,
-      to_user_id: resolvedToUserId,
-      amount,
-      currency,
-      label: labelTrim,
-      method: options?.method ?? null,
-      is_settled: true,
-    })
+  const settlement: Settlement = {
+    ...syncFields({ id: settlementId }),
+    group_id: groupId,
+    bill_id: billId ?? null,
+    bundle_id: options?.bundleId ?? null,
+    from_user_id: resolvedFromUserId,
+    to_user_id: resolvedToUserId,
+    amount,
+    currency,
+    label: labelTrim,
+    method: options?.method ?? null,
+    is_settled: true,
+  }
 
-    const fromProfile = (await db.profiles.get(resolvedFromUserId)) ?? (await db.profiles.get(fromUserId))
-    const toProfile = (await db.profiles.get(resolvedToUserId)) ?? (await db.profiles.get(toUserId))
-    const labelSuffix = labelTrim ? ` · ${labelTrim}` : ''
+  const fromProfileForLog =
+    (await db.profiles.get(resolvedFromUserId)) ?? (await db.profiles.get(fromUserId))
+  const toProfileForLog =
+    (await db.profiles.get(resolvedToUserId)) ?? (await db.profiles.get(toUserId))
+  const labelSuffix = labelTrim ? ` · ${labelTrim}` : ''
 
-    await db.activity_log.add({
-      ...syncFields(),
-      group_id: groupId,
-      user_id: markedBy,
-      action: 'settled',
-      entity_type: 'settlement',
-      entity_id: settlementId,
-      description: `${fromProfile?.display_name ?? 'Someone'} settled ${new Intl.NumberFormat('en-PH', { style: 'currency', currency, minimumFractionDigits: 0 }).format(amount)} with ${toProfile?.display_name ?? 'someone'}${labelSuffix}`,
+  const settlementActivity: ActivityLog = {
+    ...syncFields(),
+    group_id: groupId,
+    user_id: markedBy,
+    action: 'settled',
+    entity_type: 'settlement',
+    entity_id: settlementId,
+    description: `${fromProfileForLog?.display_name ?? 'Someone'} settled ${new Intl.NumberFormat('en-PH', { style: 'currency', currency, minimumFractionDigits: 0 }).format(amount)} with ${toProfileForLog?.display_name ?? 'someone'}${labelSuffix}`,
+  }
+
+  // A caller aggregating several legs into one logical payment (recordPersonPayment) passes a
+  // collector: this leg's rows are handed over and NOTHING is written or submitted here, so the
+  // caller can land every leg in a single round trip. Collecting rather than staging is what
+  // keeps the payment atomic without needing to undo half-written legs on failure.
+  if (options?.collect) {
+    options.collect.settlements.push(settlement)
+    options.collect.activity_log.push(settlementActivity)
+  } else {
+    await commitCloudFirstWrite({
+      actorUserId: markedBy,
+      payload: { settlements: [settlement], activity_log: [settlementActivity] },
+      stageOffline: async () => {
+        await db.transaction('rw', [db.settlements, db.activity_log], async () => {
+          await db.settlements.add(settlement)
+          await db.activity_log.add(settlementActivity)
+        })
+      },
+      queueOffline: async () => {
+        await enqueuePendingMutation({
+          actorUserId: markedBy,
+          operation: options?.syncOperation ?? 'create_settlement',
+          entityType: 'settlement',
+          entityId: settlementId,
+          payload: { groupId, billId: billId ?? null, amount, currency },
+          routeHint: options?.routeHint ?? (groupId ? `/app/groups/${groupId}` : '/app/settings'),
+        })
+      },
     })
-  })
+  }
 
   const actor = await db.profiles.get(markedBy)
   const fromProfile = (await db.profiles.get(resolvedFromUserId)) ?? (await db.profiles.get(fromUserId))
@@ -1420,16 +1697,8 @@ export async function createSettlement(
     })
   }
 
-  if (!options?.suppressSync) {
-    await notifySyncAfterMutation({
-      actorUserId: markedBy,
-      operation: options?.syncOperation ?? 'create_settlement',
-      entityType: 'settlement',
-      entityId: settlementId,
-      payload: { groupId, billId: billId ?? null, amount, currency },
-      routeHint: options?.routeHint ?? (groupId ? `/app/groups/${groupId}` : '/app/settings'),
-    })
-  }
+  // No trailing sync: the commit above already round-tripped, and a suppressed leg is the
+  // caller's to submit.
   return settlementId
 }
 
@@ -1485,46 +1754,61 @@ export async function createBundledGroupSettlement(params: {
     }
   }
 
-  await db.transaction('rw', [db.settlements, db.activity_log, db.profiles], async () => {
-    for (let i = 0; i < resolvedRecipients.length; i++) {
-      const recipient = resolvedRecipients[i]
-      await db.settlements.add({
-        ...syncFields({ id: settlementIds[i] }),
-        group_id: params.groupId,
-        bill_id: null,
-        bundle_id: bundleId,
-        from_user_id: resolvedFromUserId,
-        to_user_id: recipient.toUserId,
-        amount: recipient.amount,
-        currency: params.currency,
-        label: labelTrim,
-        is_settled: true,
-      })
-    }
+  const bundleRows: Settlement[] = resolvedRecipients.map((recipient, i) => ({
+    ...syncFields({ id: settlementIds[i] }),
+    group_id: params.groupId,
+    bill_id: null,
+    bundle_id: bundleId,
+    from_user_id: resolvedFromUserId,
+    to_user_id: recipient.toUserId,
+    amount: recipient.amount,
+    currency: params.currency,
+    label: labelTrim,
+    method: null,
+    is_settled: true,
+  }))
 
-    const fromProfile =
-      (await db.profiles.get(resolvedFromUserId)) ?? (await db.profiles.get(params.fromUserId))
-    const detailParts: string[] = []
-    for (const recipient of resolvedRecipients) {
-      const toProfile = await db.profiles.get(recipient.toUserId)
-      detailParts.push(
-        `${toProfile?.display_name ?? 'Someone'} ${new Intl.NumberFormat('en-PH', {
-          style: 'currency',
-          currency: params.currency,
-          minimumFractionDigits: 0,
-        }).format(recipient.amount)}`,
-      )
-    }
-    const labelSuffix = labelTrim ? ` · ${labelTrim}` : ''
-    await db.activity_log.add({
+  const payerProfile =
+    (await db.profiles.get(resolvedFromUserId)) ?? (await db.profiles.get(params.fromUserId))
+  const detailParts: string[] = []
+  for (const recipient of resolvedRecipients) {
+    const toProfile = await db.profiles.get(recipient.toUserId)
+    detailParts.push(
+      `${toProfile?.display_name ?? 'Someone'} ${new Intl.NumberFormat('en-PH', {
+        style: 'currency',
+        currency: params.currency,
+        minimumFractionDigits: 0,
+      }).format(recipient.amount)}`,
+    )
+  }
+  const labelSuffix = labelTrim ? ` · ${labelTrim}` : ''
+
+  // One payment to several people is one submission: a partially-landed bundle would clear
+  // some recipients' balances and not others.
+  await commitSettlementRows({
+    actorUserId: params.markedBy,
+    settlements: bundleRows,
+    activity: {
       ...syncFields(),
       group_id: params.groupId,
       user_id: params.markedBy,
       action: 'settled',
       entity_type: 'settlement',
       entity_id: bundleId,
-      description: `${fromProfile?.display_name ?? 'Someone'} paid ${detailParts.join(', ')}${labelSuffix}`,
-    })
+      description: `${payerProfile?.display_name ?? 'Someone'} paid ${detailParts.join(', ')}${labelSuffix}`,
+    },
+    pending: {
+      operation: 'create_settlement_bundle',
+      entityId: bundleId,
+      payload: {
+        groupId: params.groupId,
+        recipients: resolvedRecipients.length,
+        totalAmount:
+          Math.round(resolvedRecipients.reduce((sum, r) => sum + r.amount, 0) * 100) / 100,
+        currency: params.currency,
+      },
+      routeHint: `/app/groups/${params.groupId}`,
+    },
   })
 
   const actor = await db.profiles.get(params.markedBy)
@@ -1550,20 +1834,6 @@ export async function createBundledGroupSettlement(params: {
     groupName: group.name,
     currency: params.currency,
     payments,
-  })
-
-  await notifySyncAfterMutation({
-    actorUserId: params.markedBy,
-    operation: 'create_settlement_bundle',
-    entityType: 'settlement',
-    entityId: bundleId,
-    payload: {
-      groupId: params.groupId,
-      recipients: resolvedRecipients.length,
-      totalAmount: Math.round(resolvedRecipients.reduce((sum, recipient) => sum + recipient.amount, 0) * 100) / 100,
-      currency: params.currency,
-    },
-    routeHint: `/app/groups/${params.groupId}`,
   })
 
   return { bundleId, settlementIds }
@@ -1610,36 +1880,40 @@ export async function recordDecomposedSettlement(params: {
   const labelTrim = (params.label ?? '').trim()
   const settlementIds = resolved.map((r) => r.settlementId)
 
-  await db.transaction('rw', [db.settlements, db.activity_log, db.profiles], async () => {
-    for (const r of resolved) {
-      await db.settlements.add({
-        ...syncFields({ id: r.settlementId }),
-        group_id: params.groupId,
-        bill_id: null,
-        bundle_id: bundleId,
-        from_user_id: r.fromUserId,
-        to_user_id: r.toUserId,
-        amount: r.amount,
-        currency: params.currency,
-        label: labelTrim,
-        is_settled: true,
-      })
-    }
+  const legRows: Settlement[] = resolved.map((r) => ({
+    ...syncFields({ id: r.settlementId }),
+    group_id: params.groupId,
+    bill_id: null,
+    bundle_id: bundleId,
+    from_user_id: r.fromUserId,
+    to_user_id: r.toUserId,
+    amount: r.amount,
+    currency: params.currency,
+    label: labelTrim,
+    method: null,
+    is_settled: true,
+  }))
 
-    const fmt = (amt: number) =>
-      new Intl.NumberFormat('en-PH', {
-        style: 'currency',
-        currency: params.currency,
-        minimumFractionDigits: 0,
-      }).format(amt)
-    const parts: string[] = []
-    for (const r of resolved) {
-      const from = await db.profiles.get(r.fromUserId)
-      const to = await db.profiles.get(r.toUserId)
-      parts.push(`${from?.display_name ?? 'Someone'} -> ${to?.display_name ?? 'Someone'} ${fmt(r.amount)}`)
-    }
-    const labelSuffix = labelTrim ? ` · ${labelTrim}` : ''
-    await db.activity_log.add({
+  const fmt = (amt: number) =>
+    new Intl.NumberFormat('en-PH', {
+      style: 'currency',
+      currency: params.currency,
+      minimumFractionDigits: 0,
+    }).format(amt)
+  const parts: string[] = []
+  for (const r of resolved) {
+    const from = await db.profiles.get(r.fromUserId)
+    const to = await db.profiles.get(r.toUserId)
+    parts.push(`${from?.display_name ?? 'Someone'} -> ${to?.display_name ?? 'Someone'} ${fmt(r.amount)}`)
+  }
+  const labelSuffix = labelTrim ? ` · ${labelTrim}` : ''
+
+  // A decomposed settle-up is one agreed set of transfers. Landing only some legs would leave
+  // the group half-settled in a way no member intended.
+  await commitSettlementRows({
+    actorUserId: params.markedBy,
+    settlements: legRows,
+    activity: {
       ...syncFields(),
       group_id: params.groupId,
       user_id: params.markedBy,
@@ -1647,7 +1921,18 @@ export async function recordDecomposedSettlement(params: {
       entity_type: 'settlement',
       entity_id: bundleId,
       description: `Settle up: ${parts.join(', ')}${labelSuffix}`,
-    })
+    },
+    pending: {
+      operation: 'create_settlement_bundle',
+      entityId: bundleId,
+      payload: {
+        groupId: params.groupId,
+        recipients: resolved.length,
+        totalAmount: Math.round(resolved.reduce((s, r) => s + r.amount, 0) * 100) / 100,
+        currency: params.currency,
+      },
+      routeHint: `/app/groups/${params.groupId}`,
+    },
   })
 
   const actor = await db.profiles.get(params.markedBy)
@@ -1672,20 +1957,6 @@ export async function recordDecomposedSettlement(params: {
     groupName: group.name,
     currency: params.currency,
     payments,
-  })
-
-  await notifySyncAfterMutation({
-    actorUserId: params.markedBy,
-    operation: 'create_settlement_bundle',
-    entityType: 'settlement',
-    entityId: bundleId,
-    payload: {
-      groupId: params.groupId,
-      recipients: resolved.length,
-      totalAmount: Math.round(resolved.reduce((s, r) => s + r.amount, 0) * 100) / 100,
-      currency: params.currency,
-    },
-    routeHint: `/app/groups/${params.groupId}`,
   })
 
   return { bundleId, settlementIds }
@@ -1763,6 +2034,7 @@ export async function recordPersonPayment(params: {
 
   const bundleId = legs.length > 1 ? generateId() : null
   const settlementIds: string[] = []
+  const collect = newRowCollector()
 
   for (const leg of legs) {
     const groupId = leg.context === 'personal' ? null : leg.context.groupId
@@ -1775,12 +2047,40 @@ export async function recordPersonPayment(params: {
       params.markedBy,
       params.note,
       null,
-      { suppressNotification: true, suppressSync: true, bundleId, method: params.method ?? null },
+      { suppressNotification: true, bundleId, method: params.method ?? null, collect },
     )
     settlementIds.push(id)
   }
 
   const notifyEntityId = settlementIds[0] ?? null
+
+  // Submit every leg in ONE round trip. A multi-leg payment partitions one real transfer across
+  // contexts, so a partial landing would misstate the balance in both directions — the group leg
+  // cleared but the personal one not, or the reverse. One RPC is one Postgres transaction, so
+  // either all legs are stored or none are.
+  await commitCloudFirstWrite({
+    actorUserId: params.markedBy,
+    payload: { settlements: collect.settlements, activity_log: collect.activity_log },
+    stageOffline: async () => {
+      await db.transaction('rw', [db.settlements, db.activity_log], async () => {
+        await db.settlements.bulkAdd(collect.settlements)
+        await db.activity_log.bulkAdd(collect.activity_log)
+      })
+    },
+    queueOffline: async () => {
+      await enqueuePendingMutation({
+        actorUserId: params.markedBy,
+        operation: 'record_person_payment',
+        entityType: 'settlement',
+        entityId: notifyEntityId,
+        payload: { totalAmount: params.totalAmount, currency: params.currency, legs: legs.length },
+        routeHint: params.routeHint ?? `/app/people/${params.otherId}`,
+      })
+    },
+  })
+
+  // Notify only AFTER the payment is committed. Emitting first would tell the other person
+  // they were paid even when the write was rejected and nothing was recorded anywhere.
   if (notifyEntityId) {
     // Attribute the notification to a group only when every leg belongs to that one group; a
     // personal-only or mixed-context payment has no single group, so it notifies as personal.
@@ -1798,15 +2098,6 @@ export async function recordPersonPayment(params: {
       settlementId: notifyEntityId,
     })
   }
-
-  await notifySyncAfterMutation({
-    actorUserId: params.markedBy,
-    operation: 'record_person_payment',
-    entityType: 'settlement',
-    entityId: notifyEntityId,
-    payload: { totalAmount: params.totalAmount, currency: params.currency, legs: legs.length },
-    routeHint: params.routeHint ?? `/app/people/${params.otherId}`,
-  })
 
   return { settlementIds, bundleId }
 }
@@ -1833,22 +2124,27 @@ export async function updateSettlement(
     resolveSettlementPartyId(patch.toUserId),
   ])
 
-  await db.transaction('rw', [db.settlements, db.activity_log, db.profiles], async () => {
-    await db.settlements.update(settlementId, {
-      from_user_id: resolvedFromUserId,
-      to_user_id: resolvedToUserId,
-      amount: patch.amount,
-      currency: patch.currency,
-      label: labelTrim,
-      updated_at: timestamp,
-      synced_at: null,
-    })
+  const updated: Settlement = {
+    ...s,
+    from_user_id: resolvedFromUserId,
+    to_user_id: resolvedToUserId,
+    amount: patch.amount,
+    currency: patch.currency,
+    label: labelTrim,
+    updated_at: timestamp,
+    synced_at: null,
+  }
 
-    const fromProfile = (await db.profiles.get(resolvedFromUserId)) ?? (await db.profiles.get(patch.fromUserId))
-    const toProfile = (await db.profiles.get(resolvedToUserId)) ?? (await db.profiles.get(patch.toUserId))
-    const labelSuffix = labelTrim ? ` · ${labelTrim}` : ''
+  const fromProfile =
+    (await db.profiles.get(resolvedFromUserId)) ?? (await db.profiles.get(patch.fromUserId))
+  const toProfile =
+    (await db.profiles.get(resolvedToUserId)) ?? (await db.profiles.get(patch.toUserId))
+  const labelSuffix = labelTrim ? ` · ${labelTrim}` : ''
 
-    await db.activity_log.add({
+  await commitSettlementRows({
+    actorUserId: editorUserId,
+    settlements: [updated],
+    activity: {
       ...syncFields(),
       group_id: s.group_id,
       user_id: editorUserId,
@@ -1856,16 +2152,13 @@ export async function updateSettlement(
       entity_type: 'settlement',
       entity_id: settlementId,
       description: `${fromProfile?.display_name ?? 'Someone'} → ${toProfile?.display_name ?? 'someone'} · ${new Intl.NumberFormat('en-PH', { style: 'currency', currency: patch.currency, minimumFractionDigits: 0 }).format(patch.amount)} (updated)${labelSuffix}`,
-    })
-  })
-
-  await notifySyncAfterMutation({
-    actorUserId: editorUserId,
-    operation: 'update_settlement',
-    entityType: 'settlement',
-    entityId: settlementId,
-    payload: { amount: patch.amount, currency: patch.currency },
-    routeHint: s.group_id ? `/app/groups/${s.group_id}` : '/app/settings',
+    },
+    pending: {
+      operation: 'update_settlement',
+      entityId: settlementId,
+      payload: { amount: patch.amount, currency: patch.currency },
+      routeHint: s.group_id ? `/app/groups/${s.group_id}` : '/app/settings',
+    },
   })
 }
 
@@ -1882,17 +2175,19 @@ export async function updateBundledPaymentLabel(
   const labelTrim = patch.label.trim()
   const first = activeRows[0]
 
-  await db.transaction('rw', [db.settlements, db.activity_log, db.profiles], async () => {
-    for (const row of activeRows) {
-      await db.settlements.update(row.id, {
-        label: labelTrim,
-        updated_at: timestamp,
-        synced_at: null,
-      })
-    }
+  const relabelled: Settlement[] = activeRows.map((row) => ({
+    ...row,
+    label: labelTrim,
+    updated_at: timestamp,
+    synced_at: null,
+  }))
 
-    const fromProfile = await db.profiles.get(first.from_user_id)
-    await db.activity_log.add({
+  const fromProfile = await db.profiles.get(first.from_user_id)
+
+  await commitSettlementRows({
+    actorUserId: editorUserId,
+    settlements: relabelled,
+    activity: {
       ...syncFields(),
       group_id: first.group_id,
       user_id: editorUserId,
@@ -1900,59 +2195,55 @@ export async function updateBundledPaymentLabel(
       entity_type: 'settlement',
       entity_id: bundleId,
       description: `Updated bundled payment label for ${fromProfile?.display_name ?? 'Someone'}`,
-    })
-  })
-
-  await notifySyncAfterMutation({
-    actorUserId: editorUserId,
-    operation: 'update_settlement_bundle_label',
-    entityType: 'settlement',
-    entityId: bundleId,
-    payload: { bundleId, label: labelTrim },
-    routeHint: first.group_id ? `/app/groups/${first.group_id}` : '/app/settings',
+    },
+    pending: {
+      operation: 'update_settlement_bundle_label',
+      entityId: bundleId,
+      payload: { bundleId, label: labelTrim },
+      routeHint: first.group_id ? `/app/groups/${first.group_id}` : '/app/settings',
+    },
   })
 }
 
 export async function deleteSettlement(
   settlementId: string,
   editorUserId: string,
-  options?: { suppressSync?: boolean },
+  options?: { collect?: MutationRowCollector },
 ): Promise<void> {
   const s = await db.settlements.get(settlementId)
   if (!s || s.is_deleted) return
 
   const timestamp = now()
 
-  await db.transaction('rw', [db.settlements, db.activity_log, db.profiles], async () => {
-    await db.settlements.update(settlementId, {
-      is_deleted: true,
-      updated_at: timestamp,
-      synced_at: null,
-    })
+  const deleted: Settlement = { ...s, is_deleted: true, updated_at: timestamp, synced_at: null }
+  const fromProfile = await db.profiles.get(s.from_user_id)
+  const toProfile = await db.profiles.get(s.to_user_id)
+  const activity: ActivityLog = {
+    ...syncFields(),
+    group_id: s.group_id,
+    user_id: editorUserId,
+    action: 'deleted',
+    entity_type: 'settlement',
+    entity_id: settlementId,
+    description: `Removed payment ${fromProfile?.display_name ?? '?'} → ${toProfile?.display_name ?? '?'}`,
+  }
 
-    const fromProfile = await db.profiles.get(s.from_user_id)
-    const toProfile = await db.profiles.get(s.to_user_id)
-
-    await db.activity_log.add({
-      ...syncFields(),
-      group_id: s.group_id,
-      user_id: editorUserId,
-      action: 'deleted',
-      entity_type: 'settlement',
-      entity_id: settlementId,
-      description: `Removed payment ${fromProfile?.display_name ?? '?'} → ${toProfile?.display_name ?? '?'}`,
-    })
-  })
-  if (!options?.suppressSync) {
-    await notifySyncAfterMutation({
-      actorUserId: editorUserId,
+  if (options?.collect) {
+    options.collect.settlements.push(deleted)
+    options.collect.activity_log.push(activity)
+    return
+  }
+  await commitSettlementRows({
+    actorUserId: editorUserId,
+    settlements: [deleted],
+    activity,
+    pending: {
       operation: 'delete_settlement',
-      entityType: 'settlement',
       entityId: settlementId,
       payload: { groupId: s.group_id },
       routeHint: s.group_id ? `/app/groups/${s.group_id}` : '/app/settings',
-    })
-  }
+    },
+  })
 }
 
 export async function deleteBundledPayment(bundleId: string, editorUserId: string): Promise<void> {
@@ -1962,17 +2253,21 @@ export async function deleteBundledPayment(bundleId: string, editorUserId: strin
 
   const timestamp = now()
   const first = activeRows[0]
-  await db.transaction('rw', [db.settlements, db.activity_log, db.profiles], async () => {
-    for (const row of activeRows) {
-      await db.settlements.update(row.id, {
-        is_deleted: true,
-        updated_at: timestamp,
-        synced_at: null,
-      })
-    }
+  const deletedRows: Settlement[] = activeRows.map((row) => ({
+    ...row,
+    is_deleted: true,
+    updated_at: timestamp,
+    synced_at: null,
+  }))
 
-    const fromProfile = await db.profiles.get(first.from_user_id)
-    await db.activity_log.add({
+  const fromProfile = await db.profiles.get(first.from_user_id)
+
+  // Every leg of the bundle goes in one submission: removing only some of them would leave a
+  // half-deleted payment that under- or over-states the balance.
+  await commitSettlementRows({
+    actorUserId: editorUserId,
+    settlements: deletedRows,
+    activity: {
       ...syncFields(),
       group_id: first.group_id,
       user_id: editorUserId,
@@ -1980,16 +2275,17 @@ export async function deleteBundledPayment(bundleId: string, editorUserId: strin
       entity_type: 'settlement',
       entity_id: bundleId,
       description: `Removed bundled payment from ${fromProfile?.display_name ?? 'Someone'}`,
-    })
-  })
-
-  await notifySyncAfterMutation({
-    actorUserId: editorUserId,
-    operation: 'delete_settlement_bundle',
-    entityType: 'settlement',
-    entityId: bundleId,
-    payload: { bundleId, settlementIds: activeRows.map((row) => row.id), groupId: first.group_id },
-    routeHint: first.group_id ? `/app/groups/${first.group_id}` : '/app/settings',
+    },
+    pending: {
+      operation: 'delete_settlement_bundle',
+      entityId: bundleId,
+      payload: {
+        bundleId,
+        settlementIds: activeRows.map((row) => row.id),
+        groupId: first.group_id,
+      },
+      routeHint: first.group_id ? `/app/groups/${first.group_id}` : '/app/settings',
+    },
   })
 }
 

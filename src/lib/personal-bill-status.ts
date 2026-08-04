@@ -1,5 +1,9 @@
 import { db } from '@/db/db'
-import { computePairwiseNetAllContexts, participantUnionForBill } from '@/lib/people'
+import {
+  computePairwiseNetAllContexts,
+  participantUnionForBill,
+  type BalanceSnapshot,
+} from '@/lib/people'
 import { isEffectivelyZero } from '@/lib/utils'
 
 /**
@@ -15,15 +19,17 @@ export async function isPersonalBillFullySettled(
   billId: string,
   currentUserId: string,
   tabCache?: Map<string, Map<string, number>>,
+  snapshot?: BalanceSnapshot,
 ): Promise<boolean> {
-  const bill = await db.bills.get(billId)
+  const bill = snapshot?.personalBills.find((b) => b.id === billId) ?? (await db.bills.get(billId))
   if (!bill || bill.is_deleted) return true
-  const union = await participantUnionForBill(billId)
+  const union =
+    snapshot?.participantsByBill.get(billId) ?? (await participantUnionForBill(billId))
   const others = [...union].filter((id) => id !== currentUserId)
   for (const oid of others) {
     let net = tabCache?.get(oid)
     if (!net) {
-      net = await computePairwiseNetAllContexts(currentUserId, oid)
+      net = await computePairwiseNetAllContexts(currentUserId, oid, snapshot)
       tabCache?.set(oid, net)
     }
     // Scope to THIS bill's currency only. The tab spans every currency; an unrelated open

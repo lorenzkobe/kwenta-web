@@ -35,6 +35,9 @@ Tests are **mandatory** for this project — we create tests and run testing as 
   - `tests/db/`: `operations` (createBill/updateBill/deleteBill, createGroup, addGroupMember, removeGroupMember split redistribution, createSettlement, linkProfileToRemote id rewrites, deleteGroup cascade, getBillWithDetails)
   - `tests/lib/` storage: `kwenta-storage-keys` (refresh marker + legacy-cursor migration, incl. failing storage writes)
   - `tests/sync/`: `sync-service` helpers (`getMillisecondsSinceLastRefresh`, `hasUnsyncedLocalDataForUser` incl. RLS push-filter, `shouldApplyPulledRow`, `compareTimestamps`); `sync-round-trip` (complete-bundle guarantees, echo guard, push stamping); `sync-manager` (navigation refresh: throttle, release, backoff isolation, monotonic clock); `pull-pagination` (PostgREST max-rows paging in the fallback path); `realtime-batch` (burst coalescing + `latestEventCreatedAt`, the server-clock cursor source)
+  - `tests/db/cloud-first-write.test.ts`: the cloud-first write contract (accept / transport error / silent server-side drop / partial drop; rejected update and delete leave the original intact; multi-leg payment is all-or-nothing; a retry after rejection makes exactly one bill)
+  - `tests/sync/cloud-write-idempotency.test.ts`: submission ids (replay reports the original outcome; fallback and probe-caching against a pre-`050` server)
+  - `tests/lib/balance-snapshot.test.ts`: shared `BalanceSnapshot` — identical numbers with and without it, plus a query-count guard that fails if per-contact rescanning returns
   - `tests/lib/kwenta-data-repair`: the CLIENT contract only (asks, never decides; mirrors; surfaces a failed mirror). The repair RULES are SQL — see below.
   - Remaining gaps (network-orchestration heavy, lower ROI): `realtime-events` subscriptions, `export-pdf` (jsPDF rendering), `db/hooks.ts` (React `useLiveQuery`).
   - **Uncovered by design of the runner:** everything that lives in SQL — the `kwenta_repair_settlements` rules (which decide what gets soft-deleted), the read/write predicate split in `049`, and `relevant_bill_ids_for_user` (which gates what every user pulls, so a wrong set is a cross-account leak, not a slow query). Vitest has no Postgres. If you change any of them, verify against a branch database by hand; `npm test` cannot tell you they are wrong.
@@ -96,14 +99,45 @@ DB trigger → kwenta_user_events → Supabase Realtime
 
 ### Cloud-First Mutations
 
-For authenticated users every write is **cloud-first**:
-1. Write to Dexie immediately (local)
-2. Call `finalizeMutationSync` (`src/sync/cloud-first-mutations.ts`)
-3. `finalizeMutationSync` calls `syncRoundTrip` — a single RPC to `kwenta_sync` that pushes all unsynced local rows and returns the pull bundle
-4. Pull bundle is applied back into Dexie
-5. If sync fails: mutation is recorded in `pending_mutations` as a conflict
+The server is the writer of record. Dexie is a **mirror**, not the source of truth.
 
-Cloud-first covers only the **write path**. The UI always reads from Dexie. Dexie is the source of truth; the cloud is kept in sync with it.
+Every operation in `src/db/operations.ts` is split into a **builder** (pure — returns the
+complete rows the mutation implies) and a **commit** through `commitCloudFirstWrite`
+(`src/sync/cloud-write.ts`):
+
+1. Build the rows in memory. Nothing touches Dexie yet.
+2. **Online:** `submitCloudWrite` hands the rows to `kwenta_sync` as `p_push` **directly**, then
+   confirms the server stored them and mirrors the server's returned rows into Dexie. On
+   rejection it throws and **Dexie is left untouched**.
+3. **Offline:** the rows are staged (`synced_at = null`) and queued in `pending_mutations`;
+   the sync manager replays them on reconnect. The app stays fully usable offline.
+
+Why the submit path is separate from `syncRoundTrip`: that function builds its push payload by
+*scanning Dexie for unsynced rows*, so a write had to be committed locally before it could be
+sent. That is the structural reason the old design could not be cloud-first, and why reordering
+calls would not have fixed it.
+
+**Do not reintroduce write-then-sync.** The previous flow committed the Dexie transaction first
+and called the cloud afterwards without rolling back, so a rejected write stayed on screen and
+still moved balances. The user, looking at a filled form and an error toast, pressed Save again
+— minting a *new* row id — and the next background sync pushed both. That is the duplicate-bill
+bug; `tests/db/cloud-first-write.test.ts` pins it closed.
+
+**Atomicity.** One RPC is one Postgres transaction, so a mutation's rows land together. Cascades
+and multi-leg writes use a `MutationRowCollector`: sub-operations contribute rows instead of
+writing them, and the parent submits once. This covers bundled payments (one transfer split
+across contexts), `deletePerson`, `deleteGroup`, and `linkProfileToRemote` (the link plus every
+id rewrite it implies). Collecting rather than staging avoids compensating deletes — an undo
+that itself fails would leave exactly the corruption it was meant to prevent.
+
+**`activity_log` is exempt from the stored-confirmation check.** It is an audit trail, not
+money; failing a bill because its log line could not be confirmed would turn a cosmetic gap
+into a lost write.
+
+**Submission ids** (migration `050`): every write carries one, so replaying the *same*
+submission returns the original outcome instead of applying twice. This covers the case the
+inversion cannot — the request lands, the row is stored, and the response is lost. The client
+falls back to the two-argument RPC if `050` has not been applied.
 
 **Guests** (unauthenticated): Dexie only, no sync.
 
@@ -195,6 +229,28 @@ Current version: **14** (v14 added optional `settlements.method` — cash/transf
 
 - **`syncRoundTrip(userId)`** — atomic: single `kwenta_sync` RPC call, applies push payload server-side, returns pull bundle; updates `synced_at` on both sides
 - **`fullSync(userId)`** — dedup wrapper around `syncRoundTrip`; if `dedupeSyncEnabled` flag is on, concurrent calls share one in-flight Promise
+
+### Reads: a server-sourced mirror, computed locally
+
+The UI reads from Dexie, but Dexie is a mirror of a complete server bundle (see below), so a
+read is *computed over server-sourced rows* rather than over an independent local truth.
+
+Balance arithmetic stays in TypeScript deliberately. Moving it into SQL would freeze balances
+offline — a payment recorded without a connection could not move any number until reconnect —
+which is the opposite of the goal. Keeping it local also keeps ONE implementation of money
+math, covered by `npm test`.
+
+**Performance.** Pairwise balances take an optional `BalanceSnapshot` (`src/lib/people.ts`):
+one bulk load of bills, items, splits and settlements, plus memos for identity expansion and
+per-group summaries. Pass a single snapshot across a whole page. Without it, every contact
+re-scanned every bill and re-queried its items and splits, and `computePairwiseNetBreakdown`
+recomputed a whole group's balances once per contact per group — tens of thousands of
+IndexedDB round trips per page load. `computeGroupPairwiseBalances` already worked this way;
+the personal path simply never adopted it. `tests/lib/balance-snapshot.test.ts` asserts both
+that the numbers are unchanged and that query counts do not grow with contact count.
+
+Use `captureBalanceParitySnapshot` (`src/lib/balance-parity-snapshot.ts`) to diff every
+displayed balance before and after a change against real data.
 
 ### Reads are always fresh (no pull cursor)
 
@@ -373,6 +429,7 @@ Migrations are numbered; there are two `021_` files. Core RPCs:
 | `046` | `settlements.method` column; thread it through `kwenta_push_settlements` (pull bundle already uses `to_jsonb`) |
 | `047` | `kwenta_repair_orphan_settlements()` RPC — server-authoritative soft-delete of orphaned settlements, self-scoped by `auth.uid()` (superseded by `048`) |
 | `048` | `kwenta_repair_settlements(p_dry_run)` RPC — the whole repair (orphans + exact duplicates + party canonicalization) server-side, scoped to the caller's identity set, returns counts; `p_dry_run` powers the Settings preview. Also defines `kwenta_identity_ids` and `kwenta_settlement_party_id` (linked-account **and** group-roster resolution). The client no longer decides what to delete |
+| `050` | `kwenta_write_submissions` + optional `p_submission_id` on `kwenta_sync`: a replayed submission returns its original `applied` map instead of re-applying. Optional argument, so an older client still works |
 | `049` | Pull follows linked profiles: personal settlements, `bills_for_sync` / `relevant_bill_ids_for_user`, `kwenta_fetch_bill_bundle` and additive `FOR SELECT` policies route by identity, so a row that missed canonicalization still reaches the right account. **Reads only** — `user_is_participant_on_personal_bill` stays literal-id because it is the `USING` clause of the `FOR ALL` policies in `007` and the `WHERE` of the push validators in `044`; widening it granted the account behind a linked contact UPDATE/DELETE over the linker's bills. The widened read predicate is the separate `user_can_read_personal_bill`. |
 
 The `kwenta_sync` RPC is the single entry point for all sync: accepts push payload, applies it server-side, returns the pull bundle for `p_since` (the client always passes the epoch — see "Reads are always fresh"). Push validators enforce the same RLS rules the client filters apply.

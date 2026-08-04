@@ -210,6 +210,16 @@ export async function retryNotAppliedChange(change: NotAppliedChange): Promise<b
   return false
 }
 
+/**
+ * @deprecated Superseded by `commitCloudFirstWrite` (`src/sync/cloud-write.ts`) and no longer
+ * called by any operation.
+ *
+ * This is the OLD write-then-sync shape: the caller committed to Dexie first and called this
+ * afterwards, so a rejected write stayed local, still moved balances, and was pushed by a later
+ * background sync — the duplicate-bill bug. Do not wire new operations to it. Kept only so the
+ * pending-mutation/conflict behaviour it exercises stays covered while the offline replay path
+ * (sync-manager) continues to rely on the same helpers; safe to delete with its tests.
+ */
 export async function finalizeMutationSync(input: FinalizeMutationInput): Promise<void> {
   const isOnline = typeof navigator !== 'undefined' && navigator.onLine
   if (!isOnline) {

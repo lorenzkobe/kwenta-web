@@ -1,9 +1,120 @@
 import { db } from '@/db/db'
-import type { Bill } from '@/types'
-import type { SettlementHistoryItem } from '@/lib/settlement'
-import { computeGroupBalances, computeGroupPairwiseNet } from '@/lib/settlement'
+import type { Bill, BillItem, ItemSplit, Settlement } from '@/types'
+import type { GroupPairwiseSummary, SettlementHistoryItem } from '@/lib/settlement'
+import { computeGroupBalances, computeGroupPairwiseBalances } from '@/lib/settlement'
 import { supabase } from '@/lib/supabase'
 import { formatCurrency, MONEY_EPSILON } from '@/lib/utils'
+
+/**
+ * The rows every pairwise balance needs, loaded ONCE.
+ *
+ * Without this, `computePairwiseNetPersonalOnly` re-scanned every bill and re-queried that
+ * bill's items and splits — for each contact — and `computePairwiseNetBreakdown` recomputed a
+ * whole group's balances once per contact per group. At a few hundred bills and a few dozen
+ * people that is tens of thousands of IndexedDB round trips per page load.
+ *
+ * `computeGroupPairwiseBalances` already worked this way (bulk reads, in-memory joins); the
+ * personal path simply never adopted it. Pass one snapshot across a whole page's computation.
+ */
+export type BalanceSnapshot = {
+  /** Every active bill, group and personal. */
+  allBills: Bill[]
+  /** Active non-group bills — the personal tab's inputs. */
+  personalBills: Bill[]
+  itemsByBill: Map<string, BillItem[]>
+  splitsByItem: Map<string, ItemSplit[]>
+  /** Active, settled, non-group settlements. */
+  personalSettlements: Settlement[]
+  /** Every active, settled settlement (any context). */
+  allSettlements: Settlement[]
+  /** Payer + everyone on an active split, per bill. */
+  participantsByBill: Map<string, Set<string>>
+  expandCache: Map<string, Set<string>>
+  groupSummaryCache: Map<string, GroupPairwiseSummary | null>
+}
+
+export async function loadBalanceSnapshot(): Promise<BalanceSnapshot> {
+  const [rawBills, rawSettlements] = await Promise.all([
+    db.bills.toArray(),
+    db.settlements.toArray(),
+  ])
+  const allBills = rawBills.filter((b) => !b.is_deleted)
+  const personalBills = allBills.filter((b) => b.group_id === null)
+  const billIds = allBills.map((b) => b.id)
+
+  const items = (
+    billIds.length > 0 ? await db.bill_items.where('bill_id').anyOf(billIds).toArray() : []
+  ).filter((i) => !i.is_deleted)
+  const itemIds = items.map((i) => i.id)
+  const splits = (
+    itemIds.length > 0 ? await db.item_splits.where('item_id').anyOf(itemIds).toArray() : []
+  ).filter((s) => !s.is_deleted)
+
+  const itemsByBill = new Map<string, BillItem[]>()
+  for (const it of items) {
+    const arr = itemsByBill.get(it.bill_id) ?? []
+    arr.push(it)
+    itemsByBill.set(it.bill_id, arr)
+  }
+  const splitsByItem = new Map<string, ItemSplit[]>()
+  for (const sp of splits) {
+    const arr = splitsByItem.get(sp.item_id) ?? []
+    arr.push(sp)
+    splitsByItem.set(sp.item_id, arr)
+  }
+
+  const participantsByBill = new Map<string, Set<string>>()
+  for (const bill of allBills) {
+    const union = new Set<string>([bill.paid_by])
+    for (const it of itemsByBill.get(bill.id) ?? []) {
+      for (const sp of splitsByItem.get(it.id) ?? []) union.add(sp.user_id)
+    }
+    participantsByBill.set(bill.id, union)
+  }
+
+  const allSettlements = rawSettlements.filter((s) => !s.is_deleted && s.is_settled)
+
+  return {
+    allBills,
+    personalBills,
+    itemsByBill,
+    splitsByItem,
+    personalSettlements: allSettlements.filter((s) => s.group_id === null),
+    allSettlements,
+    participantsByBill,
+    expandCache: new Map(),
+    groupSummaryCache: new Map(),
+  }
+}
+
+/** Memoised `expandProfileIdsForSplitMatching` for one snapshot. */
+async function expandCached(
+  snapshot: BalanceSnapshot | undefined,
+  profileId: string,
+  viewerUserId: string,
+): Promise<Set<string>> {
+  if (!snapshot) return expandProfileIdsForSplitMatching(profileId, viewerUserId)
+  const key = `${viewerUserId}|${profileId}`
+  const hit = snapshot.expandCache.get(key)
+  if (hit) return hit
+  const ids = await expandProfileIdsForSplitMatching(profileId, viewerUserId)
+  snapshot.expandCache.set(key, ids)
+  return ids
+}
+
+/** Memoised `computeGroupPairwiseBalances` for one snapshot (viewer is fixed per page). */
+async function groupSummaryCached(
+  snapshot: BalanceSnapshot | undefined,
+  groupId: string,
+  viewerUserId: string,
+): Promise<GroupPairwiseSummary | null> {
+  if (!snapshot) return computeGroupPairwiseBalances(groupId, viewerUserId)
+  const key = `${viewerUserId}|${groupId}`
+  if (snapshot.groupSummaryCache.has(key)) return snapshot.groupSummaryCache.get(key) ?? null
+  const summary = await computeGroupPairwiseBalances(groupId, viewerUserId)
+  snapshot.groupSummaryCache.set(key, summary)
+  return summary
+}
 
 /**
  * Fetch a profile from the server and insert it into local Dexie if missing.
@@ -222,27 +333,24 @@ export async function computePairwiseNetForBill(
 export async function computePairwiseNetPersonalOnly(
   meId: string,
   otherId: string,
+  snapshot?: BalanceSnapshot,
 ): Promise<Map<string, number>> {
-  const meIds = await expandProfileIdsForSplitMatching(meId, meId)
-  const otherIds = await expandProfileIdsForSplitMatching(otherId, meId)
+  const snap = snapshot ?? (await loadBalanceSnapshot())
+  const meIds = await expandCached(snap, meId, meId)
+  const otherIds = await expandCached(snap, otherId, meId)
 
   // Debt from bills + every personal payment, as a plain signed sum
   // (+ they owe me / − I owe them). Overpayment simply flips the sign — no "credit".
   const billNet = new Map<string, number>()
 
-  const bills = await db.bills.filter((b) => !b.is_deleted && b.group_id === null).toArray()
-
-  for (const bill of bills) {
-    const participantUnion = await participantUnionForBill(bill.id)
+  for (const bill of snap.personalBills) {
+    const participantUnion = snap.participantsByBill.get(bill.id) ?? new Set<string>()
     const meOnBill = profileSetTouchesBill(meIds, bill, participantUnion)
     const otherOnBill = profileSetTouchesBill(otherIds, bill, participantUnion)
     if (!meOnBill || !otherOnBill) continue
 
-    const items = await db.bill_items.where('bill_id').equals(bill.id).toArray()
-    for (const item of items) {
-      if (item.is_deleted) continue
-      const splits = await db.item_splits.where('item_id').equals(item.id).toArray()
-      const active = splits.filter((s) => !s.is_deleted)
+    for (const item of snap.itemsByBill.get(bill.id) ?? []) {
+      const active = snap.splitsByItem.get(item.id) ?? []
       const mySplit = active.find((s) => meIds.has(s.user_id))
       const otherSplit = active.find((s) => otherIds.has(s.user_id))
       const cur = bill.currency
@@ -258,9 +366,7 @@ export async function computePairwiseNetPersonalOnly(
     }
   }
 
-  const settlements = await db.settlements.filter((s) => !s.is_deleted && s.is_settled).toArray()
-  for (const s of settlements) {
-    if (s.group_id !== null) continue
+  for (const s of snap.personalSettlements) {
     const fromMe = meIds.has(s.from_user_id)
     const toMe = meIds.has(s.to_user_id)
     const fromOther = otherIds.has(s.from_user_id)
@@ -308,13 +414,15 @@ export interface PairwiseNetBreakdown {
 export async function computePairwiseNetBreakdown(
   meId: string,
   otherId: string,
+  snapshot?: BalanceSnapshot,
 ): Promise<PairwiseNetBreakdown> {
-  const personal = await computePairwiseNetPersonalOnly(meId, otherId)
+  const snap = snapshot ?? (await loadBalanceSnapshot())
+  const personal = await computePairwiseNetPersonalOnly(meId, otherId, snap)
   const total = new Map<string, number>(personal)
   const groups: PairwiseGroupNet[] = []
 
-  const meIds = await expandProfileIdsForSplitMatching(meId, meId)
-  const otherIds = await expandProfileIdsForSplitMatching(otherId, meId)
+  const meIds = await expandCached(snap, meId, meId)
+  const otherIds = await expandCached(snap, otherId, meId)
 
   const myMemberships = await db.group_members.where('user_id').anyOf([...meIds]).toArray()
   const myGroupIds = [...new Set(myMemberships.filter((m) => !m.is_deleted).map((m) => m.group_id))]
@@ -326,7 +434,9 @@ export async function computePairwiseNetBreakdown(
     const members = await db.group_members.where('group_id').equals(gid).toArray()
     const otherMember = members.find((m) => !m.is_deleted && otherIds.has(m.user_id))
     if (!otherMember) continue
-    const net = await computeGroupPairwiseNet(gid, meId, otherMember.user_id)
+    // Memoised: the whole group's summary is computed once per page, not once per contact.
+    const summary = await groupSummaryCached(snap, gid, meId)
+    const net = summary?.entries.find((e) => e.memberUserId === otherMember.user_id)?.net ?? 0
     if (Math.abs(net) <= MONEY_EPSILON) continue
     const cur = group.currency
     groups.push({
@@ -349,15 +459,20 @@ export async function computePairwiseNetBreakdown(
 export async function computePairwiseNetAllContexts(
   meId: string,
   otherId: string,
+  snapshot?: BalanceSnapshot,
 ): Promise<Map<string, number>> {
-  const { total } = await computePairwiseNetBreakdown(meId, otherId)
+  const { total } = await computePairwiseNetBreakdown(meId, otherId, snapshot)
   return total
 }
 
 /** One logical peer per person (dedupes local contact + linked remote). */
-async function iterCanonicalPeerIds(meId: string): Promise<string[]> {
-  const related = await collectRelatedProfileIds(meId)
-  const meIds = await expandProfileIdsForSplitMatching(meId, meId)
+async function iterCanonicalPeerIds(
+  meId: string,
+  snapshot?: BalanceSnapshot,
+): Promise<string[]> {
+  const snap = snapshot ?? (await loadBalanceSnapshot())
+  const related = await collectRelatedProfileIds(meId, snap)
+  const meIds = await expandCached(snap, meId, meId)
   const seenPeer = new Set<string>()
   const out: string[] = []
   for (const oid of related) {
@@ -396,21 +511,28 @@ async function iterCanonicalPeerIds(meId: string): Promise<string[]> {
 }
 
 /** Related people de-duplicated across local and linked account IDs. */
-export async function listCanonicalRelatedProfileIds(meId: string): Promise<string[]> {
-  return iterCanonicalPeerIds(meId)
+export async function listCanonicalRelatedProfileIds(
+  meId: string,
+  snapshot?: BalanceSnapshot,
+): Promise<string[]> {
+  return iterCanonicalPeerIds(meId, snapshot)
 }
 
 /** Aggregate personal-only pairwise nets (non-group bills + personal settlements) across contacts. */
-export async function computePersonalNetRollup(meId: string): Promise<{
+export async function computePersonalNetRollup(
+  meId: string,
+  sharedSnapshot?: BalanceSnapshot,
+): Promise<{
   toReceiveByCurrency: Map<string, number>
   toPayByCurrency: Map<string, number>
 }> {
-  const peers = await iterCanonicalPeerIds(meId)
+  const snapshot = sharedSnapshot ?? (await loadBalanceSnapshot())
+  const peers = await iterCanonicalPeerIds(meId, snapshot)
   const toReceiveByCurrency = new Map<string, number>()
   const toPayByCurrency = new Map<string, number>()
 
   for (const oid of peers) {
-    const m = await computePairwiseNetPersonalOnly(meId, oid)
+    const m = await computePairwiseNetPersonalOnly(meId, oid, snapshot)
     for (const [cur, v] of m) {
       if (v > MONEY_EPSILON) {
         toReceiveByCurrency.set(cur, (toReceiveByCurrency.get(cur) ?? 0) + v)
@@ -427,16 +549,20 @@ export async function computePersonalNetRollup(meId: string): Promise<{
  * Aggregate COMBINED (personal + every shared group) pairwise nets across all contacts,
  * netting per person before bucketing so the Home rollup matches the person pages.
  */
-export async function computeCombinedNetRollup(meId: string): Promise<{
+export async function computeCombinedNetRollup(
+  meId: string,
+  sharedSnapshot?: BalanceSnapshot,
+): Promise<{
   toReceiveByCurrency: Map<string, number>
   toPayByCurrency: Map<string, number>
 }> {
-  const peers = await iterCanonicalPeerIds(meId)
+  const snapshot = sharedSnapshot ?? (await loadBalanceSnapshot())
+  const peers = await iterCanonicalPeerIds(meId, snapshot)
   const toReceiveByCurrency = new Map<string, number>()
   const toPayByCurrency = new Map<string, number>()
 
   for (const oid of peers) {
-    const m = await computePairwiseNetAllContexts(meId, oid)
+    const m = await computePairwiseNetAllContexts(meId, oid, snapshot)
     for (const [cur, v] of m) {
       if (v > MONEY_EPSILON) {
         toReceiveByCurrency.set(cur, (toReceiveByCurrency.get(cur) ?? 0) + v)
@@ -453,10 +579,11 @@ export async function computeCombinedNetRollup(meId: string): Promise<{
 export async function getPersonalBalanceContactRows(meId: string): Promise<
   { otherId: string; displayName: string; netByCurrency: Map<string, number> }[]
 > {
-  const peers = await iterCanonicalPeerIds(meId)
+  const snapshot = await loadBalanceSnapshot()
+  const peers = await iterCanonicalPeerIds(meId, snapshot)
   const rows: { otherId: string; displayName: string; netByCurrency: Map<string, number> }[] = []
   for (const oid of peers) {
-    const m = await computePairwiseNetPersonalOnly(meId, oid)
+    const m = await computePairwiseNetPersonalOnly(meId, oid, snapshot)
     const has = [...m.values()].some((v) => Math.abs(v) > MONEY_EPSILON)
     if (!has) continue
     const disp = await resolveProfileDisplay(oid, meId)
@@ -492,10 +619,14 @@ export function formatPairwiseSummary(byCurrency: Map<string, number>): {
 }
 
 /** Profile ids you share expenses with (groups, bills, settlements). */
-export async function collectRelatedProfileIds(meId: string): Promise<Set<string>> {
+export async function collectRelatedProfileIds(
+  meId: string,
+  snapshot?: BalanceSnapshot,
+): Promise<Set<string>> {
+  const snap = snapshot ?? (await loadBalanceSnapshot())
   const ids = new Set<string>()
   // DISPLAY/DEDUP: meIds here filters out the viewer's own ids from the contact list, not used for money math.
-  const meIds = await expandProfileIdsForSplitMatching(meId, meId)
+  const meIds = await expandCached(snap, meId, meId)
 
   const memberships = await db.group_members.where('user_id').equals(meId).toArray()
   const myGroupIds = new Set(
@@ -514,33 +645,32 @@ export async function collectRelatedProfileIds(meId: string): Promise<Set<string
     }
   }
 
-  const bills = await db.bills.filter((b) => !b.is_deleted).toArray()
-  for (const bill of bills) {
+  for (const bill of snap.allBills) {
     if (bill.group_id && !myGroupIds.has(bill.group_id)) continue
     if (!bill.group_id && !meIds.has(bill.created_by)) continue
 
-    const items = await db.bill_items.where('bill_id').equals(bill.id).toArray()
+    // The participant set already covers the payer plus everyone on an active split, which is
+    // exactly what both the participation test and the id collection below need.
+    const union = snap.participantsByBill.get(bill.id) ?? new Set<string>()
     let iParticipate = meIds.has(bill.paid_by)
-    for (const item of items) {
-      if (item.is_deleted) continue
-      const splits = await db.item_splits.where('item_id').equals(item.id).toArray()
-      for (const s of splits) {
-        if (s.is_deleted) continue
-        if (meIds.has(s.user_id)) iParticipate = true
+    if (!iParticipate) {
+      for (const uid of union) {
+        if (meIds.has(uid)) {
+          iParticipate = true
+          break
+        }
       }
     }
     if (!iParticipate) continue
 
     // Include payer (created_by) even when not on any line — otherwise the other party's
     // personal balances omit the person who paid.
-    const union = await participantUnionForBill(bill.id)
     for (const uid of union) {
       if (!meIds.has(uid)) ids.add(uid)
     }
   }
 
-  const settlements = await db.settlements.filter((s) => !s.is_deleted && s.is_settled).toArray()
-  for (const s of settlements) {
+  for (const s of snap.allSettlements) {
     const involvesMe = meIds.has(s.from_user_id) || meIds.has(s.to_user_id)
     if (!involvesMe) continue
     if (!meIds.has(s.from_user_id)) ids.add(s.from_user_id)

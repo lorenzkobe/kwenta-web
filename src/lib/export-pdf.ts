@@ -2,6 +2,7 @@ import { db } from '@/db/db'
 import { CATEGORY_LABELS } from '@/lib/bill-categories'
 import type { BillCategory } from '@/lib/bill-categories'
 import { isPersonalBillFullySettled } from '@/lib/personal-bill-status'
+import { loadBalanceSnapshot } from '@/lib/people'
 import {
   computePairwiseNetForBill,
   listBillsInvolvingPair,
@@ -260,6 +261,10 @@ export async function generateBillsPDF(userId: string): Promise<void> {
   ]
 
   const rows: (string | number | null | undefined)[][] = []
+  // One bulk load + one tab per counterparty for the whole export. Without these, each bill
+  // re-loaded the entire working set once per participant.
+  const snapshot = await loadBalanceSnapshot()
+  const settledTabCache = new Map<string, Map<string, number>>()
   for (const bill of bills) {
     const items = (await db.bill_items.where('bill_id').equals(bill.id).toArray()).filter((i) => !i.is_deleted)
     let myShare = 0
@@ -267,7 +272,7 @@ export async function generateBillsPDF(userId: string): Promise<void> {
       const splits = (await db.item_splits.where('item_id').equals(item.id).toArray()).filter((s) => !s.is_deleted)
       for (const s of splits) if (s.user_id === userId) myShare += s.computed_amount
     }
-    const settled = await isPersonalBillFullySettled(bill.id, userId)
+    const settled = await isPersonalBillFullySettled(bill.id, userId, settledTabCache, snapshot)
     rows.push([
       shortDate(bill.created_at),
       `${bill.title}${settled ? ' ✓' : ''}`,

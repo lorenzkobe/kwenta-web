@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
+import { toast } from 'sonner'
 import { ChevronRight, Layers3, Plus, Users, X } from 'lucide-react'
 import { useCurrentUser } from '@/hooks/useCurrentUser'
 import { addExistingGroupMember, createGroup } from '@/db/operations'
@@ -146,6 +147,12 @@ export function GroupsPage() {
       setName('')
       setSelectedMemberIds([])
       setShowCreate(false)
+    } catch (error) {
+      // Creating a group is now cloud-first: on rejection nothing is written anywhere, so
+      // without this the dialog just sits there and the user cannot tell it failed.
+      toast.error(
+        error instanceof Error ? error.message : 'Could not create this group right now.',
+      )
     } finally {
       setCreating(false)
     }

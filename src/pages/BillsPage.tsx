@@ -10,7 +10,7 @@ import {
   dedupeParticipantIds,
   expandProfileIdsForSplitMatching,
   fetchRemoteProfileIntoDexie,
-  participantUnionForBill,
+  loadBalanceSnapshot,
   resolveProfileDisplay,
 } from '@/lib/people'
 import { useCurrentUser } from '@/hooks/useCurrentUser'
@@ -49,6 +49,8 @@ type EnrichedBill = {
   payorName?: string
   itemCount: number
   settled: boolean
+  /** Written offline and not yet confirmed by the server. */
+  pending: boolean
   category: string | null
   participantPills: { id: string; label: string }[]
 }
@@ -59,6 +61,7 @@ export function BillsPage() {
   const [sort, setSort] = useState<BillSort>('date_desc')
   const [filterCategory, setFilterCategory] = useState<string | null>(null)
   const [tab, setTab] = useState<'mine' | 'shared'>('mine')
+  const [sharedActivated, setSharedActivated] = useState(false)
   const [deleteTarget, setDeleteTarget] = useState<{ id: string; title: string } | null>(null)
   const [exportOpen, setExportOpen] = useState(false)
   const [myBillsShown, setMyBillsShown] = useState(10)
@@ -72,52 +75,69 @@ export function BillsPage() {
     resolvedMyBillsShown = 10
   }
 
-  const billBuckets = useLiveQuery(async () => {
-    if (!userId) return { myBills: [] as EnrichedBill[], sharedBills: [] as EnrichedBill[] }
-    const currentUserId = userId
+  /** Raw personal-bill buckets: which bills are mine vs shared with me. A handful of indexed
+   *  queries, so tab badges and the header count render without waiting for enrichment. */
+  async function loadBuckets(currentUserId: string) {
     const myRaw = (await db.bills.where('created_by').equals(currentUserId).toArray()).filter(
       (b) => !b.is_deleted && b.group_id === null,
     )
-
     const mySplits = (await db.item_splits.where('user_id').equals(currentUserId).toArray()).filter(
       (split) => !split.is_deleted,
     )
     const itemIds = [...new Set(mySplits.map((split) => split.item_id))]
     const splitItems =
       itemIds.length > 0 ? await db.bill_items.where('id').anyOf(itemIds).toArray() : []
-    const billIds = [...new Set(splitItems.filter((item) => !item.is_deleted).map((item) => item.bill_id))]
+    const billIds = [
+      ...new Set(splitItems.filter((item) => !item.is_deleted).map((item) => item.bill_id)),
+    ]
     const splitBills = billIds.length > 0 ? await db.bills.where('id').anyOf(billIds).toArray() : []
     const sharedRaw = splitBills.filter(
       (bill) => !bill.is_deleted && bill.group_id === null && bill.created_by !== currentUserId,
     )
+    return { myRaw, sharedRaw }
+  }
 
-    async function enrichBill(bill: Bill): Promise<EnrichedBill> {
+  /** Enrich one bucket. Everything reused across bills — the viewer's own id cluster, each
+   *  participant's display name, each counterparty's tab — is computed once, not per bill. */
+  async function enrichBucket(bills: Bill[], currentUserId: string): Promise<EnrichedBill[]> {
+    const snapshot = await loadBalanceSnapshot()
+    const settledTabCache = new Map<string, Map<string, number>>()
+    const displayCache = new Map<string, string>()
+    const myIds = await expandProfileIdsForSplitMatching(currentUserId, currentUserId)
+
+    const out: EnrichedBill[] = []
+    for (const bill of bills) {
       const items = await db.bill_items.where('bill_id').equals(bill.id).toArray()
       const activeItems = items.filter((i) => !i.is_deleted)
-      const union = await participantUnionForBill(bill.id)
+      const union = snapshot.participantsByBill.get(bill.id) ?? new Set<string>()
       const reps = await dedupeParticipantIds(union, currentUserId)
+
       const participantPills: { id: string; label: string }[] = []
-      const myIds = await expandProfileIdsForSplitMatching(currentUserId, currentUserId)
       for (const uid of reps) {
         if (myIds.has(uid)) {
           participantPills.push({ id: uid, label: 'You' })
           continue
         }
-        const disp = await resolveProfileDisplay(uid, currentUserId)
-        participantPills.push({ id: uid, label: disp.displayName })
+        let label = displayCache.get(uid)
+        if (label === undefined) {
+          label = (await resolveProfileDisplay(uid, currentUserId)).displayName
+          displayCache.set(uid, label)
+        }
+        participantPills.push({ id: uid, label })
       }
       participantPills.sort((a, b) => {
         if (a.label === 'You') return -1
         if (b.label === 'You') return 1
         return a.label.localeCompare(b.label)
       })
+
       let payor = await db.profiles.get(bill.paid_by)
       if (!payor) {
         await fetchRemoteProfileIntoDexie(bill.paid_by)
         payor = await db.profiles.get(bill.paid_by)
       }
-      const settled = await isPersonalBillFullySettled(bill.id, currentUserId, settledTabCache)
-      return {
+
+      out.push({
         id: bill.id,
         title: bill.title,
         currency: bill.currency,
@@ -126,21 +146,45 @@ export function BillsPage() {
         created_by: bill.created_by,
         payorName: payor?.display_name ?? 'Someone',
         itemCount: activeItems.length,
-        settled,
+        settled: await isPersonalBillFullySettled(
+          bill.id,
+          currentUserId,
+          settledTabCache,
+          snapshot,
+        ),
+        pending: bill.synced_at === null,
         category: bill.category ?? null,
         participantPills,
-      }
+      })
     }
+    return out
+  }
 
-    // Shared across bills so each distinct counterparty's tab is computed once, not per bill.
-    const settledTabCache = new Map<string, Map<string, number>>()
-    const [myBills, sharedBills] = await Promise.all([
-      Promise.all(myRaw.map((bill) => enrichBill(bill))),
-      Promise.all(sharedRaw.map((bill) => enrichBill(bill))),
-    ])
-
-    return { myBills, sharedBills }
+  const counts = useLiveQuery(async () => {
+    if (!userId) return { my: 0, shared: 0, myCategories: [] as (string | null)[] }
+    const { myRaw, sharedRaw } = await loadBuckets(userId)
+    return {
+      my: myRaw.length,
+      shared: sharedRaw.length,
+      myCategories: myRaw.map((b) => b.category ?? null),
+    }
   }, [userId])
+
+  const myBills = useLiveQuery(async () => {
+    if (!userId) return [] as EnrichedBill[]
+    const { myRaw } = await loadBuckets(userId)
+    return enrichBucket(myRaw, userId)
+  }, [userId])
+
+  // The Shared tab is only enriched once it has actually been opened, and stays live after —
+  // so first paint does not pay for a list the user may never look at.
+  const sharedEnriched = useLiveQuery(async () => {
+    if (!userId || !sharedActivated) return undefined
+    const { sharedRaw } = await loadBuckets(userId)
+    return enrichBucket(sharedRaw, userId)
+  }, [userId, sharedActivated])
+
+  const billBuckets = myBills === undefined ? undefined : { myBills, sharedBills: sharedEnriched ?? [] }
 
   const bills = useMemo(() => {
     const list = billBuckets?.myBills ?? []
@@ -173,11 +217,11 @@ export function BillsPage() {
   }, [billBuckets?.sharedBills])
 
   const presentCategories = useMemo(() => {
-    const cats = new Set((billBuckets?.myBills ?? []).map((b) => b.category).filter(Boolean) as string[])
+    const cats = new Set((counts?.myCategories ?? []).filter(Boolean) as string[])
     return BILL_CATEGORIES.filter((c) => cats.has(c))
-  }, [billBuckets?.myBills])
+  }, [counts?.myCategories])
 
-  const loadingBills = billBuckets === undefined
+  const loadingBills = tab === 'mine' ? myBills === undefined : sharedEnriched === undefined
 
   async function executeDeleteBill() {
     if (!userId || !deleteTarget) return
@@ -195,7 +239,7 @@ export function BillsPage() {
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Personal bills</h1>
           <p className="mt-1 text-sm text-stone-600">
-            {(billBuckets?.myBills.length ?? 0) + sharedBills.length} bill{((billBuckets?.myBills.length ?? 0) + sharedBills.length) !== 1 ? 's' : ''} · Group bills stay in each group
+            {(counts?.my ?? 0) + (counts?.shared ?? 0)} bill{((counts?.my ?? 0) + (counts?.shared ?? 0)) !== 1 ? 's' : ''} · Group bills stay in each group
           </p>
         </div>
         <div className="flex items-center gap-2 self-start sm:self-auto">
@@ -229,24 +273,24 @@ export function BillsPage() {
           )}
         >
           My bills
-          {(billBuckets?.myBills.length ?? 0) > 0 && (
+          {(counts?.my ?? 0) > 0 && (
             <span className={cn('rounded-full px-1.5 py-0.5 text-xs font-semibold tabular-nums', tab === 'mine' ? 'bg-stone-100 text-stone-600' : 'bg-stone-300/70 text-stone-600')}>
-              {billBuckets!.myBills.length}
+              {counts!.my}
             </span>
           )}
         </button>
         <button
           type="button"
-          onClick={() => { setTab('shared'); setSharedBillsShown(10) }}
+          onClick={() => { setTab('shared'); setSharedActivated(true); setSharedBillsShown(10) }}
           className={cn(
             'flex flex-1 items-center justify-center gap-1.5 rounded-lg py-2 text-sm font-medium transition-all',
             tab === 'shared' ? 'bg-white text-stone-900 shadow-sm' : 'text-stone-500 hover:bg-white/50 hover:text-stone-700',
           )}
         >
           Shared with me
-          {sharedBills.length > 0 && (
+          {(counts?.shared ?? 0) > 0 && (
             <span className={cn('rounded-full px-1.5 py-0.5 text-xs font-semibold tabular-nums', tab === 'shared' ? 'bg-stone-100 text-stone-600' : 'bg-stone-300/70 text-stone-600')}>
-              {sharedBills.length}
+              {counts!.shared}
             </span>
           )}
         </button>
@@ -385,6 +429,14 @@ export function BillsPage() {
                         >
                           {bill.settled ? 'Settled' : 'Open'}
                         </span>
+                        {bill.pending && (
+                          <span
+                            title="Saved on this device. It will upload when you're back online."
+                            className="rounded-full bg-stone-200 px-2 py-0.5 text-[0.65rem] font-semibold uppercase tracking-wide text-stone-600"
+                          >
+                            Not synced
+                          </span>
+                        )}
                         {bill.category && CATEGORY_LABELS[bill.category as BillCategory] && (
                           <span
                             className={cn(
@@ -481,6 +533,14 @@ export function BillsPage() {
                         >
                           {bill.settled ? 'Settled' : 'Open'}
                         </span>
+                        {bill.pending && (
+                          <span
+                            title="Saved on this device. It will upload when you're back online."
+                            className="rounded-full bg-stone-200 px-2 py-0.5 text-[0.65rem] font-semibold uppercase tracking-wide text-stone-600"
+                          >
+                            Not synced
+                          </span>
+                        )}
                       </div>
                       <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-stone-500">
                         <span>{timeAgo(bill.created_at)}</span>

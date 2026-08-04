@@ -1,6 +1,10 @@
 import { useEffect, useMemo, useState } from 'react'
 import { computeAllGroupPairwiseBalances, type GroupPairwiseSummary } from '@/lib/settlement'
-import { computeCombinedNetRollup, computePersonalNetRollup } from '@/lib/people'
+import {
+  computeCombinedNetRollup,
+  computePersonalNetRollup,
+  loadBalanceSnapshot,
+} from '@/lib/people'
 import { groupReceivePayMapsFromSummaries } from '@/lib/balance-rollups'
 
 export function useOverallBalanceRollups(userId: string | undefined) {
@@ -31,10 +35,13 @@ export function useOverallBalanceRollups(userId: string | undefined) {
 
       setLoading(true)
       try {
+        // Both rollups walk the same contacts over the same bills, so they share ONE bulk load
+        // (and one group-summary memo) instead of building it twice.
+        const snapshot = await loadBalanceSnapshot()
         const [data, personal, combined] = await Promise.all([
           computeAllGroupPairwiseBalances(userId),
-          computePersonalNetRollup(userId),
-          computeCombinedNetRollup(userId),
+          computePersonalNetRollup(userId, snapshot),
+          computeCombinedNetRollup(userId, snapshot),
         ])
         if (cancelled) return
         setSummaries(data)

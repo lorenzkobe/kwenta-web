@@ -14,13 +14,13 @@ vi.mock('@/lib/kwenta-notifications', () => ({
   notifyProfileLinked: vi.fn(async () => {}),
   resolveRecipientProfileIdForNotify: vi.fn(async () => null),
 }))
-vi.mock('@/lib/supabase', () => ({
-  supabase: {
-    rpc: async () => ({ data: null, error: null }),
-    auth: { getSession: async () => ({ data: { session: null } }) },
-    from: () => ({ select: () => ({ eq: () => ({ data: [], error: null }) }) }),
-  },
-}))
+// linkProfileToRemote is cloud-first: it submits the link and every id rewrite it implies in
+// one round trip, so the stub has to behave like a server that stores them.
+const cloud = vi.hoisted(() => ({ mode: 'ok' as const, calls: 0 }))
+vi.mock('@/lib/supabase', async () => {
+  const { makeSupabaseCloudMock } = await import('../helpers/cloud-sync-mock')
+  return { supabase: makeSupabaseCloudMock(cloud) }
+})
 
 const ME = 'ME'
 
