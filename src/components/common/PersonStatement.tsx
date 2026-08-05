@@ -1,69 +1,11 @@
 import { useMemo, useState } from 'react'
-import { Banknote, ChevronRight, Pencil, Receipt, Users } from 'lucide-react'
+import { Banknote, ChevronRight, Pencil, Receipt, Split, Users } from 'lucide-react'
 import type { SettlementHistoryItem } from '@/api/balances'
-import type { MoneyFlowResult, MoneyFlowRow } from '@/lib/money-flow'
+import { collapsePaymentLegs, type MoneyFlowResult } from '@/lib/money-flow'
 import { Badge } from '@/components/ui/badge'
 import { cn, formatCurrency } from '@/lib/utils'
 
 const PAGE = 20
-
-interface DisplayRow {
-  key: string
-  kind: 'bill' | 'payment'
-  /** Underlying bill id for bill rows (for opening the detail sheet); null for payments. */
-  billId: string | null
-  title: string
-  contextLabel: string
-  /**
-   * Null for personal. The PILL is gated on this, never on `contextLabel === 'Personal'` — a
-   * group someone actually named "Personal" would otherwise render as a personal payment.
-   */
-  groupId: string | null
-  createdAt: string
-  currency: string
-  /** + they owe me effect / − I owe them. */
-  signedAmount: number
-  runningNet: number
-  settlementIds: string[]
-  bundleId: string | null
-}
-
-/** Merge adjacent payment legs sharing a bundleId into one atomic payment line. */
-function collapse(rows: MoneyFlowRow[]): DisplayRow[] {
-  const out: DisplayRow[] = []
-  for (const r of rows) {
-    const kind: 'bill' | 'payment' = r.type === 'payment' ? 'payment' : 'bill'
-    const last = out[out.length - 1]
-    if (
-      kind === 'payment' &&
-      r.bundleId &&
-      last &&
-      last.kind === 'payment' &&
-      last.bundleId === r.bundleId &&
-      last.currency === r.currency
-    ) {
-      last.signedAmount = Math.round((last.signedAmount + r.signedAmount) * 100) / 100
-      last.runningNet = r.runningNet
-      last.settlementIds.push(r.id)
-      continue
-    }
-    out.push({
-      key: `${r.type}-${r.id}`,
-      kind,
-      billId: kind === 'bill' ? r.id : null,
-      title: r.title,
-      contextLabel: r.contextLabel,
-      groupId: r.groupId,
-      createdAt: r.createdAt,
-      currency: r.currency,
-      signedAmount: r.signedAmount,
-      runningNet: r.runningNet,
-      settlementIds: kind === 'payment' ? [r.id] : [],
-      bundleId: r.bundleId,
-    })
-  }
-  return out
-}
 
 function fmtDate(iso: string): string {
   return new Date(iso).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })
@@ -92,7 +34,7 @@ export function PersonStatement({
   // Newest-first for display; each row keeps its as-of running balance.
   const rowsDesc = useMemo(() => {
     if (!result) return []
-    const collapsed = collapse(result.rows)
+    const collapsed = collapsePaymentLegs(result.rows)
     const filtered = filter === 'payments' ? collapsed.filter((r) => r.kind === 'payment') : collapsed
     return [...filtered].reverse()
   }, [result, filter])
@@ -137,6 +79,11 @@ export function PersonStatement({
               const payment = editableId ? paymentsByLegId?.get(editableId) : undefined
               const method = payment?.method ?? null
               const note = payment?.label.trim() ? payment.label : null
+              // A payment split across contexts is ONE transfer shown as one row, so the row must
+              // name every context it touched — reporting only the first leg's used to render
+              // group money as personal money.
+              const isSplit = row.parts.length > 1
+              const context = row.parts[0]
               const clickable = isBill && row.billId != null && onOpenBill != null
               const rowClass =
                 'flex w-full items-start justify-between gap-3 rounded-xl border border-stone-200 bg-stone-100/60 px-4 py-3'
@@ -160,20 +107,38 @@ export function PersonStatement({
                       )}
                       {/* Group provenance reads as a pill; personal rows carry no context line at
                           all, so "inside a group" stands out by contrast instead of being one
-                          more line of grey text. */}
-                      {(row.groupId !== null || method) && (
+                          more line of grey text. The pill is gated on `groupId`, never on the
+                          label reading "Personal" — a group with that name would otherwise
+                          disguise itself. */}
+                      {(isSplit || context.groupId !== null || method) && (
                         <div className="mt-1 flex flex-wrap items-center gap-1">
-                          {row.groupId !== null && (
+                          {isSplit ? (
                             <Badge variant="secondary" className="gap-1 px-2 py-0.5 text-[0.7rem]">
-                              <Users className="size-3" />
-                              {row.contextLabel}
+                              <Split className="size-3" />
+                              Split
                             </Badge>
+                          ) : (
+                            context.groupId !== null && (
+                              <Badge variant="secondary" className="gap-1 px-2 py-0.5 text-[0.7rem]">
+                                <Users className="size-3" />
+                                {context.label}
+                              </Badge>
+                            )
                           )}
                           {method && (
                             <Badge variant="ghost" className="px-2 py-0.5 text-[0.7rem]">
                               {method}
                             </Badge>
                           )}
+                        </div>
+                      )}
+                      {isSplit && (
+                        <div className="mt-1 space-y-0.5">
+                          {row.parts.map((part) => (
+                            <p key={part.groupId ?? 'personal'} className="text-xs text-stone-500">
+                              • {part.label} {formatCurrency(part.amount, row.currency)}
+                            </p>
+                          ))}
                         </div>
                       )}
                       <p className="mt-0.5 text-[11px] text-stone-400">{fmtDate(row.createdAt)}</p>

@@ -38,6 +38,8 @@ Tests are **mandatory** for this project — we create tests and run testing as 
   - `tests/lib/` pure logic: `splits`, `utils` (incl. `roundMoney`/`isEffectivelyZero`/`MONEY_EPSILON`), `amount-input`, `bill-split-form`, `bill-navigation`, `account-gate-messages`, `export-utils`, `bill-categories`, `auth-session-flags`, `runtime-flags`, `client-metrics`, `payment-method` (blank/whitespace/null all collapse to `null`, so "no method" is one value rather than four)
   - `tests/lib/` DB-backed: `people` (identity expansion, participant union, canonical peers), `clear-kwenta-local`, `export-csv`
   - `tests/lib/settlement.test.ts` is now ONLY `buildMovementChains` — the last pure transform in that module. Everything else it covered moved into SQL with the code (053/061/064).
+  - `tests/lib/payment-allocation.test.ts` (was `group-payments`): BOTH split policies, which differ on whether a payment may exceed what is owed — `allocateLumpSum` caps (a group write refuses the excess), `allocatePersonPayment` does not (overpaying flips the tab; there is no credit). Plus `rebalanceCustomAmounts`, the rule that keeps the hand-typed boxes summing to the typed total: the box being edited wins and the one touched longest ago gives way, so no entry sequence can strand the difference. Before this, the per-context boxes REDEFINED the total — typing 4,000 and then splitting by hand recorded something else.
+  - `tests/lib/money-flow.test.ts`: the running-balance walk, plus `collapsePaymentLegs` — the legs of one bundle merge into one statement row carrying a `parts` entry per context. Pinned hard: a personal-first split no longer reports the whole payment as personal (it kept only the FIRST leg's context, so group money rendered as personal money).
   - `tests/lib/` with mocked deps: `kwenta-notifications` (outbox/senders/flush/dead-letter), `cloud-first-mutations` (pending-mutation + conflict tracking)
   - `tests/db/`: `operations` (createBill/updateBill/deleteBill, createGroup, addGroupMember, removeGroupMember split redistribution, createSettlement, linkProfileToRemote id rewrites, deleteGroup cascade, getBillWithDetails). The write-path guards mock `@/api/balances` and pin how each DEGRADES when the server cannot answer: the payment cap is skipped (overpaying is legal), member removal is refused. Payment tests assert the ROWS written, not a recomputed balance — that arithmetic is SQL's. `updateSettlement`/`updateBundledPaymentDetails` pin the `method` write path: an OMITTED key preserves the stored value (a caller predating the field must not erase one someone recorded), an explicit null or blank clears it, and a bundle update reaches every ACTIVE leg.
   - `tests/lib/` storage: `kwenta-storage-keys` (refresh marker + legacy-cursor migration, incl. failing storage writes)
@@ -419,7 +421,8 @@ NOT served from cache at all — losing access must not read as staleness.
 
 What is left in TypeScript is pure transforms of bounded input, each with its Vitest coverage:
 `computeSplits`, `buildSuggestedPayers` (`settlement-suggestions.ts`), `buildMovementChains`
-(`settlement.ts`), `buildMoneyFlowRows` (`money-flow.ts`), `roundMoney`/`isEffectivelyZero`.
+(`settlement.ts`), `buildMoneyFlowRows` + `collapsePaymentLegs` (`money-flow.ts`),
+`allocatePersonPayment` (`payment-allocation.ts`), `roundMoney`/`isEffectivelyZero`.
 
 ### Reads are always fresh (no pull cursor)
 
@@ -527,7 +530,14 @@ still come from the local mirror: those are records, not derived money.
 **Statement:** the Person page timeline is server events (`062`) walked by `buildMoneyFlowRows`
 (`src/lib/money-flow.ts`). Its last running number must equal the hero — pinned in SQL, not TS.
 
-**Payments:** `recordPersonPayment` (`operations.ts`) writes one atomic payment; multi-context allocations share a `bundle_id` (partition the total, never duplicate). "Settle up" = a `RecordPaymentDialog` prefilled to the full balance. The Person page statement (`buildPersonMoneyFlow` + `PersonStatement.tsx`) is the running-balance timeline (the standalone `/ledger` route is retired).
+**Payments:** `recordPersonPayment` (`operations.ts`) writes one atomic payment; multi-context allocations share a `bundle_id` (partition the total, never duplicate). "Settle up" = a `RecordPaymentDialog` prefilled to the full balance. The Person page statement (`buildMoneyFlowRows` + `collapsePaymentLegs` + `PersonStatement.tsx`) is the running-balance timeline (the standalone `/ledger` route is retired).
+
+**Splitting one payment across contexts** (`RecordPaymentDialog`, three modes over
+`allocatePersonPayment`): the **typed amount is authoritative** in every mode — the boxes never
+redefine it. `Auto` clears each context in turn, `%` and `Custom` are hand-driven, and the excess
+of an overpayment lands on the FIRST context and flips it. Bucket order is Personal, then groups by
+name: `sequential` makes the order decide where money lands and `kwenta_pairwise_breakdown` (053)
+returns groups with no `ORDER BY`, so an unsorted list is not reproducible between two loads.
 
 **Data repair:** decided **on the server** by `kwenta_repair_settlements(p_dry_run)` (migration `048`) — orphans, exact duplicates, and party-id canonicalization, self-scoped by `auth.uid()` over the **identity set** (account + contacts linked to it, so the scope matches what `049` delivers). Classification lives in one place, `kwenta_repair_settlement_plan`, so the dry run and the apply cannot disagree. `src/lib/kwenta-data-repair.ts` (`previewSettlementRepair` / `repairSettlementsViaServer`, surfaced in Settings via `RepairDataPanel` as check → apply) only calls the RPC and mirrors the result back via `fullSync`; it holds **no** delete authority, and it throws when the mirror fails rather than reporting a repair that never reached this device. `maybeAutoRepairData` runs it **once per session after a successful sync** (wired in `sync-manager.ts`; fire-and-forget, never throws, deduped by a module-scoped guard that `clearKwentaLocalData` releases on sign-out). The earlier client-side plan/apply judged existence from a cache that is incomplete by design and deleted real payments — see the "Deletion is server-authoritative" note under Supabase Migrations.
 
@@ -869,7 +879,7 @@ Each of these reflects a real past correction in this repo:
    aggregation over unbounded data** (pairwise nets, rollups, group balances, the per-bill
    settled flag, the statement); **TypeScript owns pure transforms of bounded inputs** and
    keeps its Vitest coverage (`computeSplits`, `settlement-suggestions.ts`,
-   `group-payments.ts`, `roundMoney`/`isEffectivelyZero`). Exactly one implementation of any
+   `payment-allocation.ts`, `roundMoney`/`isEffectivelyZero`). Exactly one implementation of any
    rule, never both. Accepted trade-off: **balances no longer move offline**, so a queued
    write shows an explicit "includes N unsent changes" state rather than a silently stale
    number. Do SQL money arithmetic in **integer cents** — JS `Math.round` is

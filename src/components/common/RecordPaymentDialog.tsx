@@ -1,8 +1,16 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { ArrowRight, SlidersHorizontal, X } from 'lucide-react'
+import { ArrowRight, Lock, X } from 'lucide-react'
 import { toast } from 'sonner'
 import { recordPersonPayment } from '@/db/operations'
 import { normalizeAmountInput, stripLeadingZerosAmount } from '@/lib/amount-input'
+import {
+  allocatePersonPayment,
+  clampPercentageEntry,
+  rebalanceCustomAmounts,
+  redistributePercentages,
+  type PaymentBucket,
+  type PersonSplitMode,
+} from '@/lib/payment-allocation'
 import { normalizePaymentMethod } from '@/lib/payment-method'
 import { formatCurrency, isEffectivelyZero, MONEY_EPSILON, roundMoney } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
@@ -19,25 +27,33 @@ export interface PaymentContext {
   net: number
 }
 
+const MODES: { id: PersonSplitMode; label: string }[] = [
+  { id: 'sequential', label: 'Auto' },
+  { id: 'percentage', label: '%' },
+  { id: 'custom', label: 'Custom' },
+]
+
 function parseAmount(s: string): number {
   const n = parseFloat(s.replace(',', '.'))
   return Number.isFinite(n) ? n : NaN
 }
 
-/** Fill eligible contexts oldest/first up to what's owed; overflow flips the first one. */
-function autoSpread(amount: number, eligible: { key: string; owed: number }[]): Record<string, number> {
-  const out: Record<string, number> = {}
-  let remaining = roundMoney(amount)
-  for (const c of eligible) {
-    const take = Math.min(remaining, c.owed)
-    if (take > MONEY_EPSILON) out[c.key] = roundMoney(take)
-    remaining = roundMoney(remaining - Math.max(take, 0))
-  }
-  if (remaining > MONEY_EPSILON && eligible.length > 0) {
-    const k = eligible[0].key
-    out[k] = roundMoney((out[k] ?? 0) + remaining)
-  }
-  return out
+const numeric = (s: string | undefined): number => {
+  const n = parseAmount(s ?? '')
+  return Number.isFinite(n) ? n : 0
+}
+
+/**
+ * Keep at most `keys.length - 1` percentage fields pinned, dropping the oldest, so one field is
+ * always free to absorb the remainder. Without this the user can pin every field and strand the
+ * difference between their entries and the amount they typed, which is the state this dialog must
+ * never reach — the typed amount is authoritative. The peso boxes get the same guarantee from
+ * `rebalanceCustomAmounts`, which owns their pin order.
+ */
+function pinNewestPercentage(order: string[], key: string, keys: string[]): string[] {
+  const next = order.filter((k) => keys.includes(k) && k !== key)
+  next.push(key)
+  return next.length === keys.length && keys.length > 1 ? next.slice(1) : next
 }
 
 export function RecordPaymentDialog({
@@ -79,8 +95,11 @@ export function RecordPaymentDialog({
   const [amountStr, setAmountStr] = useState('')
   const [method, setMethod] = useState('')
   const [note, setNote] = useState('')
-  const [customOn, setCustomOn] = useState(false)
+  const [mode, setMode] = useState<PersonSplitMode>('sequential')
   const [customAmounts, setCustomAmounts] = useState<Record<string, string>>({})
+  const [customPins, setCustomPins] = useState<string[]>([])
+  const [percentages, setPercentages] = useState<Record<string, string>>({})
+  const [pctPins, setPctPins] = useState<string[]>([])
   const [saving, setSaving] = useState(false)
   // True once the user manually taps a direction, so a late-loading `contexts` doesn't override it.
   const userPickedDirection = useRef(false)
@@ -89,13 +108,34 @@ export function RecordPaymentDialog({
   const directionSeeded = useRef(false)
 
   // Contexts owed in the chosen direction (they_paid_me → they owe me → net > 0).
+  //
+  // Ordered Personal first, then groups by name. In `sequential` mode the ORDER decides which
+  // context clears first and where an overpayment lands, and the server's group list carries no
+  // ORDER BY (`kwenta_pairwise_breakdown`, migration 053), so an unsorted list would move a user's
+  // money to a different context between two loads of the same screen.
   const eligible = useMemo(() => {
-    return contexts
+    const owedInDirection = contexts
       .filter((c) => (direction === 'they_paid_me' ? c.net > MONEY_EPSILON : c.net < -MONEY_EPSILON))
       .map((c) => ({ key: c.key, label: c.label, owed: roundMoney(Math.abs(c.net)) }))
+    return owedInDirection.sort((a, b) => {
+      if (a.key === 'personal') return -1
+      if (b.key === 'personal') return 1
+      return a.label.localeCompare(b.label)
+    })
   }, [contexts, direction])
 
+  const buckets = useMemo<PaymentBucket[]>(
+    () => eligible.map((c) => ({ key: c.key, owed: c.owed })),
+    [eligible],
+  )
+  const bucketKeys = useMemo(() => buckets.map((b) => b.key), [buckets])
+  // Stable identity for effects that must re-seed only when the SET of contexts changes.
+  const bucketSignature = bucketKeys.join('|')
+
   const owedTotal = useMemo(() => roundMoney(eligible.reduce((s, c) => s + c.owed, 0)), [eligible])
+
+  const typedAmount = parseAmount(amountStr)
+  const totalAmount = Number.isFinite(typedAmount) && typedAmount > 0 ? roundMoney(typedAmount) : 0
 
   // Reset the form whenever the dialog (re)opens or the counterparty changes.
   useEffect(() => {
@@ -106,8 +146,11 @@ export function RecordPaymentDialog({
     setAmountStr(defaultAmount && defaultAmount > MONEY_EPSILON ? String(roundMoney(defaultAmount)) : '')
     setMethod('')
     setNote('')
-    setCustomOn(false)
+    setMode('sequential')
     setCustomAmounts({})
+    setCustomPins([])
+    setPercentages({})
+    setPctPins([])
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, otherId, defaultAmount, defaultDirection])
 
@@ -122,52 +165,120 @@ export function RecordPaymentDialog({
     setDirection(overallNet >= 0 ? 'they_paid_me' : 'i_paid_them')
   }, [open, overallNet, defaultDirection])
 
+  // Seed the custom boxes from the auto spread on entering custom mode, and RE-seed whenever the
+  // total changes. Editing the amount after hand-splitting therefore starts the split over from a
+  // sensible default rather than leaving stale entries that no longer add up.
+  useEffect(() => {
+    if (!open || mode !== 'custom') return
+    const seeded = allocatePersonPayment({ mode: 'sequential', total: totalAmount, buckets })
+    const byKey = Object.fromEntries(seeded.allocations.map((a) => [a.key, a.amount]))
+    setCustomAmounts(Object.fromEntries(bucketKeys.map((k) => [k, String(byKey[k] ?? 0)])))
+    setCustomPins([])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, mode, totalAmount, bucketSignature])
+
+  // Default the percentage fields to an equal split when entering percentage mode.
+  useEffect(() => {
+    if (!open || mode !== 'percentage' || bucketKeys.length === 0) return
+    const next = redistributePercentages(bucketKeys, {})
+    setPercentages(Object.fromEntries(bucketKeys.map((k) => [k, String(next[k])])))
+    setPctPins([])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, mode, bucketSignature])
+
+  const customNumbers = useMemo(
+    () => Object.fromEntries(bucketKeys.map((k) => [k, numeric(customAmounts[k])])),
+    [bucketKeys, customAmounts],
+  )
+  const pctNumbers = useMemo(
+    () => Object.fromEntries(bucketKeys.map((k) => [k, numeric(percentages[k])])),
+    [bucketKeys, percentages],
+  )
+
+  const result = useMemo(
+    () =>
+      allocatePersonPayment({
+        mode,
+        total: totalAmount,
+        buckets,
+        percentages: pctNumbers,
+        customAmounts: customNumbers,
+      }),
+    [mode, totalAmount, buckets, pctNumbers, customNumbers],
+  )
+
+  const allocatedByKey = useMemo(
+    () => Object.fromEntries(result.allocations.map((a) => [a.key, a.amount])),
+    [result],
+  )
+
   if (!open) return null
 
-  const amount = parseAmount(amountStr)
-  const autoAlloc = Number.isFinite(amount) && amount > 0 ? autoSpread(amount, eligible) : {}
+  // With nothing owed in this direction there is no split to get wrong: the payment is still legal
+  // (it puts the other person ahead) and `recordPersonPayment` files it as a single personal leg.
+  const invalid =
+    isEffectivelyZero(totalAmount) || (eligible.length > 0 && result.unassigned > MONEY_EPSILON)
 
-  const effectiveAlloc: Record<string, number> = customOn
-    ? Object.fromEntries(
-        eligible.map((c) => {
-          const v = parseAmount(customAmounts[c.key] ?? '')
-          return [c.key, Number.isFinite(v) && v > 0 ? roundMoney(v) : 0]
-        }),
-      )
-    : autoAlloc
+  function handleCustomChange(key: string, raw: string) {
+    const normalized = normalizeAmountInput(raw)
+    const { amounts, pinnedOrder } = rebalanceCustomAmounts({
+      total: totalAmount,
+      buckets,
+      pinnedOrder: customPins,
+      current: customNumbers,
+      editedKey: key,
+      editedValue: numeric(normalized),
+    })
+    setCustomPins(pinnedOrder)
+    setCustomAmounts((prev) => {
+      const next = { ...prev }
+      for (const k of bucketKeys) {
+        // Keep the edited field's raw text so a half-typed "10." isn't rewritten mid-keystroke —
+        // unless it was clamped, where showing the untouched entry would contradict the boxes.
+        next[k] =
+          k === key && Math.abs(amounts[k] - numeric(normalized)) <= MONEY_EPSILON
+            ? normalized
+            : String(amounts[k] ?? 0)
+      }
+      return next
+    })
+  }
 
-  const totalApplied = roundMoney(
-    Object.values(effectiveAlloc).reduce((s, v) => s + (v || 0), 0),
-  )
-  const totalAmount = customOn ? totalApplied : (Number.isFinite(amount) ? roundMoney(amount) : 0)
-  const invalid = isEffectivelyZero(totalAmount)
+  function handlePercentageChange(key: string, raw: string) {
+    const nextPins = pinNewestPercentage(pctPins, key, bucketKeys)
+    const otherPinnedSum = nextPins
+      .filter((k) => k !== key)
+      .reduce((s, k) => s + numeric(percentages[k]), 0)
+    const clamped = clampPercentageEntry(parseAmount(raw) || 0, otherPinnedSum)
+    const lockedValues: Record<string, number> = {}
+    for (const k of nextPins) lockedValues[k] = k === key ? clamped : numeric(percentages[k])
+    const next = redistributePercentages(bucketKeys, lockedValues)
+    setPctPins(nextPins)
+    setPercentages(Object.fromEntries(bucketKeys.map((k) => [k, String(next[k])])))
+  }
 
-  function toggleCustom() {
-    if (!customOn) {
-      // Seed custom inputs from the current auto spread so editing starts where auto left off.
-      setCustomAmounts(
-        Object.fromEntries(eligible.map((c) => [c.key, String(autoAlloc[c.key] ?? 0)])),
-      )
-    }
-    setCustomOn((v) => !v)
+  function handleUnlockPercentage(key: string) {
+    const nextPins = pctPins.filter((k) => k !== key)
+    const lockedValues: Record<string, number> = {}
+    for (const k of nextPins) lockedValues[k] = numeric(percentages[k])
+    const next = redistributePercentages(bucketKeys, lockedValues)
+    setPctPins(nextPins)
+    setPercentages(Object.fromEntries(bucketKeys.map((k) => [k, String(next[k])])))
   }
 
   async function handleSubmit() {
     if (invalid) return
     setSaving(true)
     try {
-      const allocations = eligible
-        .map((c) => ({
-          context: c.key === 'personal' ? ('personal' as const) : { groupId: c.key },
-          amount: effectiveAlloc[c.key] ?? 0,
-        }))
-        .filter((a) => a.amount > MONEY_EPSILON)
       await recordPersonPayment({
         meId,
         otherId,
         direction,
         totalAmount,
-        allocations,
+        allocations: result.allocations.map((a) => ({
+          context: a.key === 'personal' ? ('personal' as const) : { groupId: a.key },
+          amount: a.amount,
+        })),
         currency,
         markedBy,
         method: normalizePaymentMethod(method),
@@ -243,7 +354,7 @@ export function RecordPaymentDialog({
             <span className="truncate font-medium text-stone-700">{toName}</span>
           </div>
 
-          {/* Amount */}
+          {/* Amount — authoritative in every mode; the split below always adds up to it. */}
           <div className="rounded-xl border border-stone-200 bg-stone-50 px-4 py-3">
             <label htmlFor="pay-amt" className="text-xs font-medium text-stone-500">
               Amount
@@ -254,8 +365,7 @@ export function RecordPaymentDialog({
               inputMode="decimal"
               autoFocus
               placeholder="0.00"
-              value={customOn ? String(totalApplied) : amountStr}
-              disabled={customOn}
+              value={amountStr}
               onChange={(e) => setAmountStr(normalizeAmountInput(e.target.value))}
               onBlur={() =>
                 setAmountStr((s) => {
@@ -265,7 +375,7 @@ export function RecordPaymentDialog({
               }
               className="mt-1 rounded-lg text-lg font-semibold"
             />
-            {owedTotal > MONEY_EPSILON && !customOn && (
+            {owedTotal > MONEY_EPSILON && (
               <button
                 type="button"
                 className="mt-2 text-xs font-medium text-teal-800 hover:underline"
@@ -280,18 +390,24 @@ export function RecordPaymentDialog({
           {/* Apply to */}
           {eligible.length > 0 ? (
             <div className="rounded-xl border border-stone-200 bg-white px-4 py-3">
-              <div className="flex items-center justify-between">
+              <div className="flex items-center justify-between gap-2">
                 <p className="text-xs font-medium uppercase tracking-wide text-stone-500">Apply to</p>
                 {eligible.length > 1 && (
-                  <button
-                    type="button"
-                    className={`flex items-center gap-1 text-xs font-medium ${customOn ? 'text-teal-800' : 'text-stone-500 hover:text-stone-800'}`}
-                    onClick={toggleCustom}
-                    disabled={saving}
-                  >
-                    <SlidersHorizontal className="size-3.5" />
-                    {customOn ? 'Auto' : 'Choose split'}
-                  </button>
+                  <div className="flex gap-0.5 rounded-lg bg-stone-100 p-0.5">
+                    {MODES.map((m) => (
+                      <button
+                        key={m.id}
+                        type="button"
+                        className={`rounded-md px-2 py-1 text-xs font-medium transition-colors ${
+                          mode === m.id ? 'bg-white text-stone-900 shadow-sm' : 'text-stone-500 hover:text-stone-800'
+                        }`}
+                        onClick={() => setMode(m.id)}
+                        disabled={saving}
+                      >
+                        {m.label}
+                      </button>
+                    ))}
+                  </div>
                 )}
               </div>
               <ul className="mt-2 space-y-2">
@@ -301,28 +417,58 @@ export function RecordPaymentDialog({
                       <p className="truncate text-sm font-medium text-stone-800">{c.label}</p>
                       <p className="text-[11px] text-stone-400">owed {formatCurrency(c.owed, currency)}</p>
                     </div>
-                    {customOn ? (
+                    {mode === 'custom' && eligible.length > 1 ? (
                       <Input
                         type="text"
                         inputMode="decimal"
                         value={customAmounts[c.key] ?? ''}
-                        onChange={(e) =>
-                          setCustomAmounts((m) => ({ ...m, [c.key]: normalizeAmountInput(e.target.value) }))
-                        }
+                        onChange={(e) => handleCustomChange(c.key, e.target.value)}
+                        disabled={saving}
                         className="h-8 w-24 rounded-lg text-right text-sm"
                       />
+                    ) : mode === 'percentage' && eligible.length > 1 ? (
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-xs tabular-nums text-stone-500">
+                          {formatCurrency(allocatedByKey[c.key] ?? 0, currency)}
+                        </span>
+                        {pctPins.includes(c.key) && (
+                          <button
+                            type="button"
+                            onClick={() => handleUnlockPercentage(c.key)}
+                            disabled={saving}
+                            className="text-stone-400 transition-colors hover:text-stone-600"
+                            title="Locked — tap to let this adjust automatically"
+                          >
+                            <Lock className="size-3.5" />
+                          </button>
+                        )}
+                        <Input
+                          type="text"
+                          inputMode="decimal"
+                          placeholder="%"
+                          value={percentages[c.key] ?? ''}
+                          onChange={(e) => handlePercentageChange(c.key, e.target.value)}
+                          disabled={saving}
+                          className="h-8 w-16 rounded-lg text-right text-sm"
+                        />
+                      </div>
                     ) : (
                       <span className="text-sm font-semibold text-stone-700">
-                        {formatCurrency(effectiveAlloc[c.key] ?? 0, currency)}
+                        {formatCurrency(allocatedByKey[c.key] ?? 0, currency)}
                       </span>
                     )}
                   </li>
                 ))}
               </ul>
-              {!customOn && amount > owedTotal + MONEY_EPSILON && (
+              {result.overBy > MONEY_EPSILON && (
                 <p className="mt-2 text-[11px] text-amber-700">
-                  {formatCurrency(roundMoney(amount - owedTotal), currency)} more than owed — the extra flips
-                  the balance the other way.
+                  {formatCurrency(result.overBy, currency)} more than owed — the extra flips the balance
+                  the other way.
+                </p>
+              )}
+              {result.unassigned > MONEY_EPSILON && (
+                <p className="mt-2 text-[11px] text-amber-700">
+                  {formatCurrency(result.unassigned, currency)} not assigned yet.
                 </p>
               )}
             </div>

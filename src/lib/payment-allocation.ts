@@ -1,3 +1,20 @@
+/**
+ * Splitting one payment across the several places it settles.
+ *
+ * TWO policies live here, and they differ on one question — may a payment exceed what is owed?
+ *
+ *  - `allocateLumpSum` (a member paying into a GROUP): no. Every share is capped at what that
+ *    person is owed and the rest is reported as `unallocated`, because
+ *    `createBundledGroupSettlement({ enforceCap: true })` would refuse it anyway.
+ *  - `allocatePersonPayment` (one person paying another across personal + shared groups): yes.
+ *    Overpaying is legal and simply flips the tab — there is no credit concept — so the excess is
+ *    allocated and merely reported through `overBy` for the UI to warn about.
+ *
+ * They are deliberately two named functions rather than one with a flag: which policy applies is
+ * a property of the caller, not a runtime choice, and a flag would make the dangerous direction
+ * (uncapped) reachable from the group path by a one-character mistake.
+ */
+
 export interface OwedParty {
   userId: string
   name: string
@@ -37,6 +54,7 @@ export function owedPartiesFromBreakdown(breakdown: PayerBreakdown | null): Owed
 }
 
 const round2 = (n: number) => Math.round(n * 100) / 100
+const safeNumber = (n: number) => (Number.isFinite(n) ? n : 0)
 const capAt = (amount: number, owed: number) => Math.max(0, Math.min(round2(amount), round2(owed)))
 
 /** Sub-cent threshold used to decide when an amount is "fully applied" / "exhausted". */
@@ -191,7 +209,7 @@ export function allocateLumpSum(params: {
  * Round raw (fractional) per-party amounts to whole cents using the largest-remainder method,
  * so the rounded total equals the distributed total exactly — no phantom cent from rounding two
  * half-cents up independently. The leftover cents go to the largest fractional parts that still
- * have headroom under what's owed.
+ * have headroom under their cap. An absent cap means uncapped (the person-payment policy).
  */
 function roundRawToCents(rawById: Map<string, number>, owedById: Map<string, number>): Map<string, number> {
   const target = Math.round([...rawById.values()].reduce((s, v) => s + v, 0) * 100)
@@ -200,7 +218,13 @@ function roundRawToCents(rawById: Map<string, number>, owedById: Map<string, num
     .map(([userId, raw]) => {
       const cents = raw * 100
       const floorCents = Math.floor(cents)
-      return { userId, floorCents, frac: cents - floorCents, capCents: Math.round((owedById.get(userId) ?? 0) * 100) }
+      const cap = owedById.get(userId)
+      return {
+        userId,
+        floorCents,
+        frac: cents - floorCents,
+        capCents: cap === undefined ? Number.POSITIVE_INFINITY : Math.round(cap * 100),
+      }
     })
 
   const result = new Map<string, number>(entries.map((e) => [e.userId, Math.min(e.floorCents, e.capCents)]))
@@ -224,4 +248,167 @@ function roundRawToCents(rawById: Map<string, number>, owedById: Map<string, num
   }
 
   return result
+}
+
+// ---------------------------------------------------------------------------
+// Person payments: one transfer split across personal + shared-group contexts.
+// See the header for why this cannot share a policy with `allocateLumpSum`.
+// ---------------------------------------------------------------------------
+
+export type PersonSplitMode = 'sequential' | 'percentage' | 'custom'
+
+/** One place a payment can settle: `'personal'` or a groupId, and what is owed there. */
+export interface PaymentBucket {
+  key: string
+  owed: number
+}
+
+export interface PersonAllocation {
+  key: string
+  amount: number
+}
+
+export interface PersonPaymentResult {
+  /** Per-context amounts (zero amounts dropped, so no empty settlement leg is ever written). */
+  allocations: PersonAllocation[]
+  /** How much of the total exceeds everything owed — the amount that will flip the tab. */
+  overBy: number
+  /**
+   * Total minus what was actually allocated. Always 0 for `sequential`; non-zero only when the
+   * caller's percentages or custom amounts do not reach the total, which the UI must block rather
+   * than quietly record a smaller payment than the one that was typed.
+   */
+  unassigned: number
+}
+
+/**
+ * Fill buckets in order, each up to what it is owed, and park any leftover on the FIRST bucket.
+ * Returns whole-peso-accurate amounts keyed by bucket; buckets receiving nothing are omitted.
+ */
+function fillSequentially(amount: number, buckets: PaymentBucket[]): Map<string, number> {
+  const out = new Map<string, number>()
+  if (buckets.length === 0) return out
+
+  let remaining = round2(amount)
+  for (const b of buckets) {
+    const take = Math.min(remaining, Math.max(0, round2(b.owed)))
+    if (take > EPSILON) {
+      out.set(b.key, round2(take))
+      remaining = round2(remaining - take)
+    }
+  }
+  if (remaining > EPSILON) {
+    const first = buckets[0].key
+    out.set(first, round2((out.get(first) ?? 0) + remaining))
+  }
+  return out
+}
+
+/**
+ * Split `total` across the contexts a person owes in. Unlike the group policy, the result may
+ * exceed what is owed; `overBy` reports by how much so the caller can warn that the balance flips.
+ */
+export function allocatePersonPayment(params: {
+  mode: PersonSplitMode
+  total: number
+  buckets: PaymentBucket[]
+  percentages?: Record<string, number>
+  customAmounts?: Record<string, number>
+}): PersonPaymentResult {
+  const { mode, buckets, percentages = {}, customAmounts = {} } = params
+  const total = round2(Math.max(0, safeNumber(params.total)))
+  const totalOwed = round2(buckets.reduce((s, b) => s + Math.max(0, safeNumber(b.owed)), 0))
+  const overBy = round2(Math.max(0, total - totalOwed))
+
+  if (total <= EPSILON || buckets.length === 0) {
+    return { allocations: [], overBy, unassigned: total }
+  }
+
+  let byKey: Map<string, number>
+  if (mode === 'sequential') {
+    byKey = fillSequentially(total, buckets)
+  } else if (mode === 'percentage') {
+    // A percentage is explicit intent, so it is NOT capped at what the bucket is owed. Largest-
+    // remainder rounding keeps the parts summing to the requested share of the total exactly.
+    const raw = new Map(
+      buckets.map((b) => [b.key, (total * Math.max(0, safeNumber(percentages[b.key] ?? 0))) / 100]),
+    )
+    byKey = new Map([...roundRawToCents(raw, new Map())].map(([k, cents]) => [k, cents / 100]))
+  } else {
+    byKey = new Map(
+      buckets.map((b) => [b.key, round2(Math.max(0, safeNumber(customAmounts[b.key] ?? 0)))]),
+    )
+  }
+
+  const allocations: PersonAllocation[] = []
+  let allocated = 0
+  for (const b of buckets) {
+    const amount = round2(byKey.get(b.key) ?? 0)
+    if (amount > EPSILON) {
+      allocations.push({ key: b.key, amount })
+      allocated = round2(allocated + amount)
+    }
+  }
+
+  return { allocations, overBy, unassigned: round2(Math.max(0, total - allocated)) }
+}
+
+/**
+ * Re-spread the per-context boxes after the user edits one, so they always sum to `total`.
+ *
+ * The rule: **the box being edited wins, and the box touched longest ago gives way.** Editing the
+ * last free box releases the oldest pin, so there is always something able to absorb the slack and
+ * the user can never reach a state where the boxes disagree with the amount they typed. That is
+ * what makes the typed amount authoritative — the bug this replaced let the boxes redefine it.
+ *
+ * `pinnedOrder` is the keys the user has typed into, oldest first; pass the value returned here
+ * straight back on the next edit.
+ */
+export function rebalanceCustomAmounts(params: {
+  total: number
+  buckets: PaymentBucket[]
+  pinnedOrder: string[]
+  /** The amounts currently displayed, so untouched pins keep their value. */
+  current: Record<string, number>
+  editedKey: string
+  editedValue: number
+}): { amounts: Record<string, number>; pinnedOrder: string[] } {
+  const { buckets, current, editedKey } = params
+  const total = round2(Math.max(0, safeNumber(params.total)))
+  const keys = buckets.map((b) => b.key)
+
+  const unchanged = () => ({
+    amounts: Object.fromEntries(keys.map((k) => [k, round2(Math.max(0, safeNumber(current[k] ?? 0)))])),
+    pinnedOrder: params.pinnedOrder.filter((k) => keys.includes(k)),
+  })
+  if (!keys.includes(editedKey)) return unchanged()
+
+  const editedValue = Math.min(total, Math.max(0, round2(safeNumber(params.editedValue))))
+
+  // Most recently edited last. Re-adding moves an existing pin to the front of the queue.
+  let pinned = params.pinnedOrder.filter((k) => keys.includes(k) && k !== editedKey)
+  pinned.push(editedKey)
+  // Keep at least one box free to absorb the slack (impossible with a single bucket, handled below).
+  if (pinned.length === keys.length && keys.length > 1) pinned = pinned.slice(1)
+
+  // Honour the newest pins first, squeezing older ones when there is no room left for them.
+  const amounts: Record<string, number> = {}
+  let budget = total
+  for (const key of [...pinned].reverse()) {
+    const wanted = key === editedKey ? editedValue : round2(Math.max(0, safeNumber(current[key] ?? 0)))
+    const given = Math.min(wanted, budget)
+    amounts[key] = round2(given)
+    budget = round2(budget - given)
+  }
+
+  const free = buckets.filter((b) => !pinned.includes(b.key))
+  if (free.length === 0) {
+    // Single bucket: it must carry the whole amount, since there is nowhere else for it to go.
+    amounts[editedKey] = total
+  } else {
+    const spread = fillSequentially(budget, free)
+    for (const b of free) amounts[b.key] = round2(spread.get(b.key) ?? 0)
+  }
+
+  return { amounts, pinnedOrder: pinned }
 }

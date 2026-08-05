@@ -18,7 +18,7 @@ import {
   redistributePercentages,
   type LumpSumMode,
   type OwedParty,
-} from '@/lib/group-payments'
+} from '@/lib/payment-allocation'
 import { createBundledGroupSettlement } from '@/db/operations'
 import { loadGroupMemberBreakdownFresh } from '@/api/balances'
 import { describeError, formatCurrency } from '@/lib/utils'

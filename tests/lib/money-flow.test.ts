@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { buildMoneyFlowRows, type MoneyFlowEvent } from '@/lib/money-flow'
+import { buildMoneyFlowRows, collapsePaymentLegs, type MoneyFlowEvent } from '@/lib/money-flow'
 
 /**
  * The running-balance half of the statement.
@@ -170,5 +170,117 @@ describe('buildMoneyFlowRows — passthrough', () => {
     const events = [ev({ id: 'b2', delta: 1, createdAt: T.t2 }), ev({ id: 'b1', delta: 1 })]
     buildMoneyFlowRows(events)
     expect(events.map((e) => e.id)).toEqual(['b2', 'b1'])
+  })
+})
+
+describe('collapsePaymentLegs', () => {
+  /** The legs one split payment writes: personal first, then the group leg. */
+  const splitLegs = () =>
+    buildMoneyFlowRows([
+      ev({
+        id: 'leg-personal',
+        delta: -1000,
+        createdAt: T.t1,
+        type: 'payment',
+        bundleId: 'bundle-1',
+        title: 'Cha paid you',
+      }),
+      ev({
+        id: 'leg-group',
+        delta: -3000,
+        createdAt: T.t2,
+        type: 'payment',
+        bundleId: 'bundle-1',
+        groupId: 'g1',
+        contextLabel: 'Beach Trip',
+        title: 'Cha paid you',
+      }),
+    ]).rows
+
+  it('merges the legs of one bundle into a single row', () => {
+    const rows = collapsePaymentLegs(splitLegs())
+    expect(rows).toHaveLength(1)
+    expect(rows[0].signedAmount).toBe(-4000)
+    expect(rows[0].settlementIds).toEqual(['leg-personal', 'leg-group'])
+    // The running balance must be the one AFTER the last leg, not a mid-payment figure.
+    expect(rows[0].runningNet).toBe(-4000)
+  })
+
+  it('reports every context the payment touched', () => {
+    const [row] = collapsePaymentLegs(splitLegs())
+    expect(row.parts).toEqual([
+      { groupId: null, label: 'Personal', amount: 1000 },
+      { groupId: 'g1', label: 'Beach Trip', amount: 3000 },
+    ])
+  })
+
+  it('does not let a personal-first bundle hide the group half', () => {
+    // Regression: the merged row used to keep only the FIRST leg's context, so a payment whose
+    // personal leg was written first reported groupId null for the whole amount and rendered
+    // ₱3,000 of group money as personal money.
+    const [row] = collapsePaymentLegs(splitLegs())
+    expect(row.parts.some((p) => p.groupId === 'g1')).toBe(true)
+    expect(row.parts).toHaveLength(2)
+  })
+
+  it('gives a single-context payment exactly one part', () => {
+    const rows = collapsePaymentLegs(
+      buildMoneyFlowRows([
+        ev({ id: 'p1', delta: -500, type: 'payment', title: 'Cha paid you' }),
+      ]).rows,
+    )
+    expect(rows[0].parts).toEqual([{ groupId: null, label: 'Personal', amount: 500 }])
+  })
+
+  it('merges two legs in the SAME group into one slice', () => {
+    const rows = collapsePaymentLegs(
+      buildMoneyFlowRows([
+        ev({ id: 'a', delta: -100, createdAt: T.t1, type: 'payment', bundleId: 'b', groupId: 'g1', contextLabel: 'Beach Trip' }),
+        ev({ id: 'b', delta: -200, createdAt: T.t2, type: 'payment', bundleId: 'b', groupId: 'g1', contextLabel: 'Beach Trip' }),
+      ]).rows,
+    )
+    expect(rows[0].parts).toEqual([{ groupId: 'g1', label: 'Beach Trip', amount: 300 }])
+  })
+
+  it('never merges across currencies', () => {
+    const rows = collapsePaymentLegs(
+      buildMoneyFlowRows([
+        ev({ id: 'a', delta: -100, createdAt: T.t1, type: 'payment', bundleId: 'b' }),
+        ev({ id: 'b', delta: -200, createdAt: T.t2, type: 'payment', bundleId: 'b', currency: 'USD' }),
+      ]).rows,
+    )
+    expect(rows).toHaveLength(2)
+  })
+
+  it('never merges bills, even when they sit next to each other', () => {
+    const rows = collapsePaymentLegs(
+      buildMoneyFlowRows([
+        ev({ id: 'b1', delta: 100, createdAt: T.t1 }),
+        ev({ id: 'b2', delta: 200, createdAt: T.t2 }),
+      ]).rows,
+    )
+    expect(rows).toHaveLength(2)
+    expect(rows.every((r) => r.settlementIds.length === 0)).toBe(true)
+  })
+
+  it('does not merge legs of the same bundle separated by another event', () => {
+    const rows = collapsePaymentLegs(
+      buildMoneyFlowRows([
+        ev({ id: 'a', delta: -100, createdAt: T.t1, type: 'payment', bundleId: 'b' }),
+        ev({ id: 'mid', delta: 50, createdAt: T.t2 }),
+        ev({ id: 'c', delta: -200, createdAt: T.t3, type: 'payment', bundleId: 'b' }),
+      ]).rows,
+    )
+    expect(rows).toHaveLength(3)
+  })
+
+  it('leaves an unbundled payment alone', () => {
+    const rows = collapsePaymentLegs(
+      buildMoneyFlowRows([
+        ev({ id: 'a', delta: -100, createdAt: T.t1, type: 'payment' }),
+        ev({ id: 'b', delta: -200, createdAt: T.t2, type: 'payment' }),
+      ]).rows,
+    )
+    expect(rows).toHaveLength(2)
   })
 })

@@ -128,3 +128,91 @@ function describeNote(type: MoneyFlowRowType, signedAmount: number): MoneyFlowNo
   }
   return signedAmount >= 0 ? 'they_owe_you' : 'you_owe_them'
 }
+
+/** One context a statement row touched: personal (`groupId === null`) or a specific group. */
+export interface StatementPart {
+  groupId: string | null
+  /** 'Personal' or the group's name. */
+  label: string
+  /** Magnitude of this slice (all legs of one payment share a direction). */
+  amount: number
+}
+
+/** A statement row as displayed: payment legs of one bundle merged into a single line. */
+export interface StatementDisplayRow {
+  key: string
+  kind: 'bill' | 'payment'
+  /** Underlying bill id for bill rows (for opening the detail sheet); null for payments. */
+  billId: string | null
+  title: string
+  createdAt: string
+  currency: string
+  /** + they owe me effect / − I owe them. */
+  signedAmount: number
+  runningNet: number
+  settlementIds: string[]
+  bundleId: string | null
+  /**
+   * Where this row's money sat, one entry per context. A bill and a single-context payment have
+   * exactly one; more than one means the payment was SPLIT across contexts.
+   *
+   * This exists because keeping only the first leg's context was wrong: a payment split across
+   * personal and a group is written personal-leg-first, so the merged row inherited
+   * `groupId: null` and displayed group money as personal money.
+   */
+  parts: StatementPart[]
+}
+
+/**
+ * Merge adjacent payment legs sharing a bundleId into one atomic payment line.
+ *
+ * The legs of a multi-context payment are one real transfer, so the statement shows one row —
+ * but it must still say where each slice went, which is what `parts` carries. Bill rows are never
+ * merged. Adjacency is enough because `buildMoneyFlowRows` orders by `createdAt` then `id`, and a
+ * bundle's legs are written in one transaction.
+ */
+export function collapsePaymentLegs(rows: MoneyFlowRow[]): StatementDisplayRow[] {
+  const out: StatementDisplayRow[] = []
+  for (const r of rows) {
+    const kind: 'bill' | 'payment' = r.type === 'payment' ? 'payment' : 'bill'
+    const last = out[out.length - 1]
+    if (
+      kind === 'payment' &&
+      r.bundleId &&
+      last &&
+      last.kind === 'payment' &&
+      last.bundleId === r.bundleId &&
+      last.currency === r.currency
+    ) {
+      last.signedAmount = roundMoney(last.signedAmount + r.signedAmount)
+      last.runningNet = r.runningNet
+      last.settlementIds.push(r.id)
+      addPart(last.parts, r)
+      continue
+    }
+    out.push({
+      key: `${r.type}-${r.id}`,
+      kind,
+      billId: kind === 'bill' ? r.id : null,
+      title: r.title,
+      createdAt: r.createdAt,
+      currency: r.currency,
+      signedAmount: r.signedAmount,
+      runningNet: r.runningNet,
+      settlementIds: kind === 'payment' ? [r.id] : [],
+      bundleId: r.bundleId,
+      parts: [{ groupId: r.groupId, label: r.contextLabel, amount: Math.abs(r.signedAmount) }],
+    })
+  }
+  return out
+}
+
+/** Two legs in the SAME context are one slice, not two lines. */
+function addPart(parts: StatementPart[], r: MoneyFlowRow): void {
+  const existing = parts.find((p) => p.groupId === r.groupId)
+  if (existing) {
+    existing.amount = roundMoney(existing.amount + Math.abs(r.signedAmount))
+    return
+  }
+  parts.push({ groupId: r.groupId, label: r.contextLabel, amount: Math.abs(r.signedAmount) })
+}
