@@ -60,6 +60,72 @@ describe('expandProfileIdsForSplitMatching', () => {
     const ids = await expandProfileIdsForSplitMatching('ghost')
     expect([...ids]).toEqual(['ghost'])
   })
+
+  /**
+   * The duplicate-People bug: the cluster is only reachable by MIXING a peer link with a profile
+   * link, and the walk used to follow profile links from the anchor alone. Expansion has to be an
+   * equivalence relation — `iterCanonicalPeerIds` keys a person by the minimum of this set, so two
+   * ids that disagree become two rows. SQL twin: `067_close_identity_cluster.test.sql`.
+   */
+  describe('closes over profile links and peer links together', () => {
+    const VIEWER = 'me'
+    beforeEach(async () => {
+      await db.profiles.bulkAdd([
+        makeProfile({ id: 'contact', is_local: true, owner_id: VIEWER }),
+        makeProfile({ id: 'account' }),
+        makeProfile({ id: 'theirs', is_local: true, owner_id: 'other', linked_profile_id: 'account' }),
+      ])
+      await db.profile_peer_links.add({
+        ...syncFieldsForTest('link1'),
+        owner_user_id: VIEWER,
+        anchor_profile_id: 'contact',
+        peer_profile_id: 'account',
+      })
+    })
+
+    it('reaches the account and its other linked contacts from the merged contact', async () => {
+      const ids = await expandProfileIdsForSplitMatching('contact', VIEWER)
+      expect([...ids].sort()).toEqual(['account', 'contact', 'theirs'])
+    })
+
+    it('gives every member of the cluster the same set', async () => {
+      const from = async (id: string) =>
+        [...(await expandProfileIdsForSplitMatching(id, VIEWER))].sort()
+      const expected = ['account', 'contact', 'theirs']
+      expect(await from('contact')).toEqual(expected)
+      expect(await from('account')).toEqual(expected)
+      expect(await from('theirs')).toEqual(expected)
+    })
+
+    it('keeps the merge private to the viewer who made it', async () => {
+      expect([...(await expandProfileIdsForSplitMatching('contact', 'someone-else'))]).toEqual([
+        'contact',
+      ])
+      expect([...(await expandProfileIdsForSplitMatching('contact'))]).toEqual(['contact'])
+    })
+
+    it('does not resurrect a soft-deleted contact from either end', async () => {
+      await db.profiles.add(
+        makeProfile({
+          id: 'dead',
+          is_local: true,
+          owner_id: VIEWER,
+          linked_profile_id: 'account',
+          is_deleted: true,
+        }),
+      )
+      expect((await expandProfileIdsForSplitMatching('account', VIEWER)).has('dead')).toBe(false)
+      expect([...(await expandProfileIdsForSplitMatching('dead', VIEWER))]).toEqual(['dead'])
+    })
+
+    // Deleting the row does not un-say "these are the same person". The old body returned early on
+    // a deleted anchor, which is the asymmetry itself: the contacts still reached the account.
+    it('still clusters live contacts when the account row is soft-deleted', async () => {
+      await db.profiles.update('account', { is_deleted: true })
+      const ids = await expandProfileIdsForSplitMatching('account', VIEWER)
+      expect([...ids].sort()).toEqual(['account', 'contact', 'theirs'])
+    })
+  })
 })
 
 describe('participantUnionForBill', () => {
@@ -159,6 +225,38 @@ describe('listCanonicalRelatedProfileIds — one row per real person', () => {
 
     // The viewer's own contact wins, so they keep the name they filed him under.
     expect(await listCanonicalRelatedProfileIds('ME')).toEqual(['C_BOB'])
+  })
+
+  /**
+   * The production shape behind the duplicate: the viewer's contact is joined to the account by a
+   * MANUAL merge, while a third user's contact hangs off that same account by a profile link. The
+   * cluster spans both edge kinds, so a walk that closed over only one produced two keys — and the
+   * People page showed one human twice, permanently.
+   *
+   * `A_THEIRS` sorts FIRST on purpose. The key is the minimum of the cluster, so the two keys only
+   * diverge when the id that one walk misses is the smallest — which is exactly how it presented
+   * in production. Name it so it sorts last and this test passes against the broken code.
+   */
+  it('collapses a merged contact and its account when a third party also links to it', async () => {
+    await db.profiles.bulkAdd([
+      makeProfile({ id: 'ME' }),
+      makeProfile({ id: 'JELLO' }),
+      makeProfile({ id: 'C_JELLO', is_local: true, owner_id: 'ME' }),
+      makeProfile({ id: 'A_THEIRS', is_local: true, owner_id: 'OTHER', linked_profile_id: 'JELLO' }),
+    ])
+    await db.groups.add(makeGroup({ id: 'G', created_by: 'ME' }))
+    await db.group_members.bulkAdd([
+      makeMember({ id: 'M1', group_id: 'G', user_id: 'ME' }),
+      makeMember({ id: 'M2', group_id: 'G', user_id: 'JELLO' }),
+    ])
+    await db.profile_peer_links.add({
+      ...syncFieldsForTest('PL'),
+      owner_user_id: 'ME',
+      anchor_profile_id: 'C_JELLO',
+      peer_profile_id: 'JELLO',
+    })
+
+    expect(await listCanonicalRelatedProfileIds('ME')).toEqual(['C_JELLO'])
   })
 
   it('keeps genuinely different people separate', async () => {

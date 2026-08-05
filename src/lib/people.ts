@@ -452,19 +452,13 @@ async function collectRelatedProfileIds(
   return ids
 }
 
-/**
- * IDs that refer to the same real person for matching `item_splits.user_id` / settlement parties.
- * The local contact row stays in Dexie; linking adds `linked_profile_id` and sync may rewrite split
- * rows to the remote id—queries need to accept either id without merging rows.
- * When `viewerUserId` is set, also unions manual peer links (`profile_peer_links`) owned by that user.
- */
-async function unionPeerLinkClusterForViewer(ids: Set<string>, viewerUserId: string): Promise<void> {
+/** Undirected adjacency of one viewer's manual "same person" merges. */
+async function loadPeerLinkAdjacency(viewerUserId: string): Promise<Map<string, Set<string>>> {
   const links = await db.profile_peer_links
     .where('owner_user_id')
     .equals(viewerUserId)
     .filter((l) => !l.is_deleted)
     .toArray()
-  if (links.length === 0) return
   const adj = new Map<string, Set<string>>()
   for (const l of links) {
     if (!adj.has(l.anchor_profile_id)) adj.set(l.anchor_profile_id, new Set())
@@ -472,46 +466,48 @@ async function unionPeerLinkClusterForViewer(ids: Set<string>, viewerUserId: str
     adj.get(l.anchor_profile_id)!.add(l.peer_profile_id)
     adj.get(l.peer_profile_id)!.add(l.anchor_profile_id)
   }
-  const queue = [...ids]
-  let i = 0
-  while (i < queue.length) {
-    const cur = queue[i++]!
-    const neighbors = adj.get(cur)
-    if (!neighbors) continue
-    for (const n of neighbors) {
-      if (!ids.has(n)) {
-        ids.add(n)
-        queue.push(n)
-      }
-    }
-  }
+  return adj
 }
+
+/**
+ * IDs that refer to the same real person for matching `item_splits.user_id` / settlement parties.
+ * The local contact row stays in Dexie; linking adds `linked_profile_id` and sync may rewrite split
+ * rows to the remote id—queries need to accept either id without merging rows.
+ * When `viewerUserId` is set, manual peer links (`profile_peer_links`) owned by that user are edges
+ * too.
+ *
+ * Both edge kinds are closed over TOGETHER, so this is the connected component of `profileId` and
+ * is identical from every member. Walking profile links from the anchor only and peer links from
+ * everywhere made the answer depend on where you started: a contact merged to an account reached
+ * the account but never the account's OTHER linked contacts, while the account reached all of
+ * them. `iterCanonicalPeerIds` keys a person by the minimum of this set, so two ids for one human
+ * yielded two keys and the People page listed them as two rows.
+ * SQL twin: `kwenta_expand_identity` (052, closed in `067`) — the two must agree.
+ */
 export async function expandProfileIdsForSplitMatching(
   profileId: string,
   viewerUserId?: string,
 ): Promise<Set<string>> {
+  const peerAdj = viewerUserId ? await loadPeerLinkAdjacency(viewerUserId) : null
   const ids = new Set<string>([profileId])
-  const p = await db.profiles.get(profileId)
-  if (!p || p.is_deleted) {
-    if (viewerUserId) await unionPeerLinkClusterForViewer(ids, viewerUserId)
-    return ids
+  const queue = [profileId]
+  const add = (next: string | null | undefined) => {
+    if (!next || ids.has(next)) return
+    ids.add(next)
+    queue.push(next)
   }
-  if (p.linked_profile_id) {
-    ids.add(p.linked_profile_id)
-    const sameRemote = await db.profiles
-      .where('linked_profile_id')
-      .equals(p.linked_profile_id)
-      .toArray()
-    for (const x of sameRemote) {
-      if (!x.is_deleted) ids.add(x.id)
+  for (let i = 0; i < queue.length; i++) {
+    const cur = queue[i]!
+    // An edge is gated on the row HOLDING `linked_profile_id` being live, so a soft-deleted
+    // contact drops out from both ends instead of only from the reverse arm. Siblings need no
+    // arm of their own: two contacts on one account are two reverse edges from that account.
+    const p = await db.profiles.get(cur)
+    if (p && !p.is_deleted) add(p.linked_profile_id)
+    const linkToThis = await db.profiles.where('linked_profile_id').equals(cur).toArray()
+    for (const x of linkToThis) {
+      if (!x.is_deleted) add(x.id)
     }
-  }
-  const linkToThis = await db.profiles.where('linked_profile_id').equals(profileId).toArray()
-  for (const x of linkToThis) {
-    if (!x.is_deleted) ids.add(x.id)
-  }
-  if (viewerUserId) {
-    await unionPeerLinkClusterForViewer(ids, viewerUserId)
+    for (const n of peerAdj?.get(cur) ?? []) add(n)
   }
   return ids
 }
