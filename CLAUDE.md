@@ -560,7 +560,9 @@ already uses (`069`).
 On the Person statement a group payment renders a `Users` pill; personal rows carry **no** context
 line at all, so group provenance stands out by contrast. The pill is gated on `groupId !== null`,
 never on the context label reading `"Personal"` — a group with that name would otherwise disguise
-itself.
+itself. A payment row also shows its **note and method**, which a `062` statement event does not
+carry: both are read from the `SettlementHistoryItem` the leg belongs to, via the
+`paymentsByLegId` map the page already builds for editability.
 
 ---
 

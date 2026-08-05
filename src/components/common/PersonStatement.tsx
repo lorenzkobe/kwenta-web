@@ -132,7 +132,11 @@ export function PersonStatement({
               const isBill = row.kind === 'bill'
               const positive = row.signedAmount >= 0
               const editableId = row.settlementIds.find((id) => paymentsByLegId?.has(id))
-              const method = editableId ? paymentsByLegId?.get(editableId)?.method : null
+              // The payment's own note and method. A statement event (062) carries neither, so
+              // both come from the history item the leg belongs to.
+              const payment = editableId ? paymentsByLegId?.get(editableId) : undefined
+              const method = payment?.method ?? null
+              const note = payment?.label.trim() ? payment.label : null
               const clickable = isBill && row.billId != null && onOpenBill != null
               const rowClass =
                 'flex w-full items-start justify-between gap-3 rounded-xl border border-stone-200 bg-stone-100/60 px-4 py-3'
@@ -149,6 +153,11 @@ export function PersonStatement({
                     </div>
                     <div className="min-w-0 text-left">
                       <p className="text-sm font-medium text-stone-800">{row.title}</p>
+                      {/* The user's own note sits next to the title, above the metadata badges —
+                          it is content, not provenance. Same treatment as SettlementHistoryList. */}
+                      {note && (
+                        <p className="mt-0.5 truncate text-xs font-medium text-stone-600">{note}</p>
+                      )}
                       {/* Group provenance reads as a pill; personal rows carry no context line at
                           all, so "inside a group" stands out by contrast instead of being one
                           more line of grey text. */}
