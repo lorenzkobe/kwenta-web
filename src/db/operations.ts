@@ -13,6 +13,7 @@ import type {
   SplitType,
 } from '@/types'
 import { generateId, getDeviceId, now } from '@/lib/utils'
+import { normalizePaymentMethod } from '@/lib/payment-method'
 import { enqueuePendingMutation } from '@/sync/cloud-first-mutations'
 import { commitCloudFirstWrite, type CloudWritePayload } from '@/sync/cloud-write'
 import {
@@ -1651,7 +1652,7 @@ export async function createSettlement(
     amount,
     currency,
     label: labelTrim,
-    method: options?.method ?? null,
+    method: normalizePaymentMethod(options?.method),
     is_settled: true,
   }
 
@@ -2174,6 +2175,8 @@ export async function updateSettlement(
     amount: number
     currency: string
     label: string
+    /** Omit to leave the stored method alone; pass null to clear it. */
+    method?: string | null
   },
   editorUserId: string,
 ): Promise<void> {
@@ -2194,6 +2197,9 @@ export async function updateSettlement(
     amount: patch.amount,
     currency: patch.currency,
     label: labelTrim,
+    // An absent key preserves what is stored — a caller that does not know about the method must
+    // not erase one someone recorded.
+    method: patch.method === undefined ? s.method : normalizePaymentMethod(patch.method),
     updated_at: timestamp,
     synced_at: null,
   }
@@ -2225,9 +2231,14 @@ export async function updateSettlement(
   })
 }
 
-export async function updateBundledPaymentLabel(
+/**
+ * The editable parts of a bundled payment. Amounts are fixed (they are one logical payment split
+ * across recipients), so only the descriptive fields change — and they change on EVERY leg,
+ * because the bundle renders as one row and a per-leg disagreement would be invisible.
+ */
+export async function updateBundledPaymentDetails(
   bundleId: string,
-  patch: { label: string },
+  patch: { label: string; method?: string | null },
   editorUserId: string,
 ): Promise<void> {
   const rows = await db.settlements.where('bundle_id').equals(bundleId).toArray()
@@ -2241,6 +2252,7 @@ export async function updateBundledPaymentLabel(
   const relabelled: Settlement[] = activeRows.map((row) => ({
     ...row,
     label: labelTrim,
+    method: patch.method === undefined ? row.method : normalizePaymentMethod(patch.method),
     updated_at: timestamp,
     synced_at: null,
   }))
@@ -2257,10 +2269,10 @@ export async function updateBundledPaymentLabel(
       action: 'updated',
       entity_type: 'settlement',
       entity_id: bundleId,
-      description: `Updated bundled payment label for ${fromProfile?.display_name ?? 'Someone'}`,
+      description: `Updated bundled payment details for ${fromProfile?.display_name ?? 'Someone'}`,
     },
     pending: {
-      operation: 'update_settlement_bundle_label',
+      operation: 'update_settlement_bundle_details',
       entityId: bundleId,
       payload: { bundleId, label: labelTrim },
       routeHint: first.group_id ? `/app/groups/${first.group_id}` : '/app/settings',

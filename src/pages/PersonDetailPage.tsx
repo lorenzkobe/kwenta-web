@@ -614,7 +614,6 @@ export function PersonDetailPage() {
     for (const item of settlements ?? []) for (const id of item.settlementIds) map.set(id, item)
     return map
   }, [settlements])
-  const editableSettlementIds = useMemo(() => new Set(settlementByLegId.keys()), [settlementByLegId])
 
   useEffect(() => {
     if (personId && userId && personId === userId) {
@@ -1014,7 +1013,7 @@ export function PersonDetailPage() {
         )}
         <PersonStatement
           result={statement}
-          editableSettlementIds={editableSettlementIds}
+          paymentsByLegId={settlementByLegId}
           onEditPayment={(id) => {
             const item = settlementByLegId.get(id)
             if (item) setEditing(item)

@@ -19,6 +19,8 @@ import {
   removeGroupMember,
   resolveGroupMemberUserId,
   updateBill,
+  updateBundledPaymentDetails,
+  updateSettlement,
 } from '@/db/operations'
 import {
   makeBill,
@@ -1413,5 +1415,94 @@ describe('settlement deletes against an incomplete mirror', () => {
 
     const rows = await db.settlements.where('bundle_id').equals('BU1').toArray()
     expect(rows.every((r) => r.is_deleted)).toBe(true)
+  })
+})
+
+describe('updateSettlement / updateBundledPaymentDetails — the method field', () => {
+  // `settlements.method` existed from migration 046 but no read path ever returned it, so it was
+  // write-only until 069 and the edit dialog could not show it. These pin the write half.
+  beforeEach(async () => {
+    await resetDb()
+    await db.profiles.bulkAdd([
+      makeProfile({ id: 'ME', display_name: 'Me' }),
+      makeProfile({ id: 'THEM', display_name: 'Them' }),
+    ])
+  })
+
+  it('writes the method on a single payment', async () => {
+    await db.settlements.add(
+      makeSettlement({ id: 'S1', from_user_id: 'THEM', to_user_id: 'ME', amount: 50 }),
+    )
+
+    await updateSettlement(
+      'S1',
+      { fromUserId: 'THEM', toUserId: 'ME', amount: 50, currency: 'PHP', label: 'x', method: 'GCash' },
+      'ME',
+    )
+
+    expect((await db.settlements.get('S1'))!.method).toBe('GCash')
+  })
+
+  it('PRESERVES a stored method when the patch omits the key', async () => {
+    // A caller that predates the field must not silently erase one someone recorded.
+    await db.settlements.add(
+      makeSettlement({ id: 'S1', from_user_id: 'THEM', to_user_id: 'ME', amount: 50, method: 'BDO' }),
+    )
+
+    await updateSettlement(
+      'S1',
+      { fromUserId: 'THEM', toUserId: 'ME', amount: 75, currency: 'PHP', label: 'x' },
+      'ME',
+    )
+
+    const row = (await db.settlements.get('S1'))!
+    expect(row.method).toBe('BDO')
+    expect(row.amount).toBe(75)
+  })
+
+  it('clears the method on an explicit null, and treats blank as cleared', async () => {
+    for (const value of [null, '', '   '] as const) {
+      await db.settlements.put(
+        makeSettlement({ id: 'S1', from_user_id: 'THEM', to_user_id: 'ME', amount: 50, method: 'BDO' }),
+      )
+      await updateSettlement(
+        'S1',
+        { fromUserId: 'THEM', toUserId: 'ME', amount: 50, currency: 'PHP', label: '', method: value },
+        'ME',
+      )
+      expect((await db.settlements.get('S1'))!.method).toBeNull()
+    }
+  })
+
+  it('applies label and method to EVERY leg of a bundle', async () => {
+    // The bundle renders as one row, so a per-leg disagreement would be invisible on screen and
+    // would make the server's first-non-blank rule decide which one the user sees.
+    await db.settlements.bulkAdd([
+      makeSettlement({ id: 'A', bundle_id: 'BU', from_user_id: 'ME', to_user_id: 'THEM', amount: 30 }),
+      makeSettlement({ id: 'B', bundle_id: 'BU', from_user_id: 'ME', to_user_id: 'THEM', amount: 70 }),
+    ])
+
+    await updateBundledPaymentDetails('BU', { label: 'Trip', method: 'GoTyme' }, 'ME')
+
+    const rows = await db.settlements.where('bundle_id').equals('BU').toArray()
+    expect(rows).toHaveLength(2)
+    expect(rows.every((r) => r.label === 'Trip' && r.method === 'GoTyme')).toBe(true)
+    // Amounts are fixed: a bundle is one payment split across recipients.
+    expect(rows.map((r) => r.amount).sort((a, b) => a - b)).toEqual([30, 70])
+  })
+
+  it('leaves a soft-deleted leg out of a bundle update', async () => {
+    await db.settlements.bulkAdd([
+      makeSettlement({ id: 'A', bundle_id: 'BU', from_user_id: 'ME', to_user_id: 'THEM', amount: 30 }),
+      makeSettlement({
+        id: 'B', bundle_id: 'BU', from_user_id: 'ME', to_user_id: 'THEM', amount: 70,
+        is_deleted: true, method: 'Cash',
+      }),
+    ])
+
+    await updateBundledPaymentDetails('BU', { label: 'Trip', method: 'GoTyme' }, 'ME')
+
+    expect((await db.settlements.get('A'))!.method).toBe('GoTyme')
+    expect((await db.settlements.get('B'))!.method).toBe('Cash')
   })
 })

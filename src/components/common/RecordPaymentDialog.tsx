@@ -3,9 +3,11 @@ import { ArrowRight, SlidersHorizontal, X } from 'lucide-react'
 import { toast } from 'sonner'
 import { recordPersonPayment } from '@/db/operations'
 import { normalizeAmountInput, stripLeadingZerosAmount } from '@/lib/amount-input'
+import { normalizePaymentMethod } from '@/lib/payment-method'
 import { formatCurrency, isEffectivelyZero, MONEY_EPSILON, roundMoney } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { PaymentMethodField } from '@/components/common/PaymentMethodField'
 
 export type PaymentDirection = 'they_paid_me' | 'i_paid_them'
 
@@ -168,7 +170,7 @@ export function RecordPaymentDialog({
         allocations,
         currency,
         markedBy,
-        method: method.trim() || null,
+        method: normalizePaymentMethod(method),
         note: note.trim() || undefined,
       })
       onRecorded()
@@ -330,23 +332,10 @@ export function RecordPaymentDialog({
             </p>
           )}
 
-          {/* Method + note */}
-          <div className="grid grid-cols-2 gap-2">
-            <div>
-              <label htmlFor="pay-method" className="text-xs font-medium text-stone-500">
-                Method
-              </label>
-              <Input
-                id="pay-method"
-                type="text"
-                placeholder="Cash, GCash…"
-                value={method}
-                onChange={(e) => setMethod(e.target.value)}
-                maxLength={40}
-                className="mt-1 rounded-lg"
-              />
-            </div>
-            <div>
+          {/* Method + note. Stacked rather than side-by-side now that the method carries chips. */}
+          <div className="flex flex-col gap-3">
+            <PaymentMethodField id="pay-method" value={method} onChange={setMethod} />
+            <div className="flex flex-col gap-1">
               <label htmlFor="pay-note" className="text-xs font-medium text-stone-500">
                 Note
               </label>
@@ -357,7 +346,7 @@ export function RecordPaymentDialog({
                 value={note}
                 onChange={(e) => setNote(e.target.value)}
                 maxLength={120}
-                className="mt-1 rounded-lg"
+                className="rounded-lg"
               />
             </div>
           </div>

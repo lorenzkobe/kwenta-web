@@ -6,7 +6,7 @@ import { db } from '@/db/db'
 import {
   deleteBundledPayment,
   deleteSettlement,
-  updateBundledPaymentLabel,
+  updateBundledPaymentDetails,
   updateSettlement,
 } from '@/db/operations'
 import type { SettlementHistoryItem } from '@/api/balances'
@@ -14,6 +14,7 @@ import { useCurrentUser } from '@/hooks/useCurrentUser'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { ConfirmDialog } from '@/components/common/ConfirmDialog'
+import { PaymentMethodField } from '@/components/common/PaymentMethodField'
 import { normalizeAmountInput, stripLeadingZerosAmount } from '@/lib/amount-input'
 import { formatCurrency } from '@/lib/utils'
 
@@ -29,6 +30,7 @@ export function EditSettlementDialog({
   const { userId } = useCurrentUser()
   const [amountStr, setAmountStr] = useState(() => String(item.amount))
   const [label, setLabel] = useState(item.label ?? '')
+  const [method, setMethod] = useState(item.method ?? '')
   const [saving, setSaving] = useState(false)
   const [deleting, setDeleting] = useState(false)
   const [removeConfirmOpen, setRemoveConfirmOpen] = useState(false)
@@ -36,6 +38,7 @@ export function EditSettlementDialog({
   useEffect(() => {
     setAmountStr(String(item.amount))
     setLabel(item.label ?? '')
+    setMethod(item.method ?? '')
   }, [item])
 
   const members = useLiveQuery(async () => {
@@ -54,7 +57,7 @@ export function EditSettlementDialog({
     setSaving(true)
     try {
       if (item.isBundled && item.bundleId) {
-        await updateBundledPaymentLabel(item.bundleId, { label: label.trim() }, userId)
+        await updateBundledPaymentDetails(item.bundleId, { label: label.trim(), method }, userId)
       } else {
         const amount = parseFloat(amountStr.replace(',', '.'))
         if (!Number.isFinite(amount) || amount <= 0) return
@@ -66,6 +69,7 @@ export function EditSettlementDialog({
             amount,
             currency: item.currency,
             label: label.trim(),
+            method,
           },
           userId,
         )
@@ -133,7 +137,8 @@ export function EditSettlementDialog({
                 {formatCurrency(item.amount, item.currency)}
               </p>
               <p className="mt-1 text-xs text-stone-500">
-                Bundled payments keep amounts fixed. You can edit the label or remove the full payment.
+                Bundled payments keep amounts fixed. You can edit the label and method, or remove
+                the full payment.
               </p>
             </div>
           ) : (
@@ -165,13 +170,15 @@ export function EditSettlementDialog({
             <Input
               id="edit-settlement-label"
               type="text"
-              placeholder="e.g. Cash, dinner"
+              placeholder="e.g. dinner, October rent"
               value={label}
               onChange={(e) => setLabel(e.target.value)}
               maxLength={120}
               className="rounded-lg"
             />
           </div>
+
+          <PaymentMethodField id="edit-settlement-method" value={method} onChange={setMethod} />
 
           <div className="flex flex-col gap-2 sm:flex-row sm:justify-between">
             <Button

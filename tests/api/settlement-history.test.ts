@@ -37,6 +37,7 @@ function serverItem(overrides: Record<string, unknown> = {}) {
     amount: '100.50',
     currency: 'PHP',
     label: 'Settle up',
+    method: 'GCash',
     createdAt: '2026-08-01T00:00:00.000Z',
     recipients: [
       { toUserId: 'u-cha', toName: 'Cha', amount: '70.5' },
@@ -88,6 +89,24 @@ describe('settlement history API', () => {
     expect(item.legs).toHaveLength(2)
     expect(item.legs.map((l) => l.fromName).sort()).toEqual(['Bob', 'Me'])
     expect(item.legs.some((l) => l.fromUserId !== item.fromUserId)).toBe(true)
+  })
+
+  it('carries the payment method through (069)', async () => {
+    rpc.mockResolvedValue({ data: [serverItem()], error: null })
+    const { data } = await fetchGroupSettlementHistory('u1', 'g1')
+
+    expect(data![0].method).toBe('GCash')
+  })
+
+  it('reports a missing or blank method as null, never undefined or ""', async () => {
+    // A pre-069 server omits the key entirely. `undefined` would defeat `method ?? ''` seeding in
+    // the edit dialog, and `''` would paint an empty tag on every payment ever recorded.
+    for (const row of [serverItem({ method: undefined }), serverItem({ method: null }),
+                       serverItem({ method: '' })]) {
+      rpc.mockResolvedValue({ data: [row], error: null })
+      const { data } = await fetchGroupSettlementHistory('u1', 'g1')
+      expect(data![0].method).toBeNull()
+    }
   })
 
   it('turns a null groupName into an ABSENT key, never the string "null"', async () => {

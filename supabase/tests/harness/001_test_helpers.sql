@@ -305,7 +305,8 @@ CREATE OR REPLACE FUNCTION test.new_settlement(
   p_bill uuid DEFAULT NULL,
   p_currency text DEFAULT 'PHP',
   p_label text DEFAULT '',
-  p_created_at timestamptz DEFAULT NULL
+  p_created_at timestamptz DEFAULT NULL,
+  p_method text DEFAULT NULL
 )
 RETURNS uuid
 LANGUAGE plpgsql
@@ -314,13 +315,14 @@ DECLARE
   v_id uuid := gen_random_uuid();
   v_at timestamptz := COALESCE(p_created_at, now());
 BEGIN
-  -- There is no `settled_at`; `label` is NOT NULL with no default.
+  -- There is no `settled_at`; `label` is NOT NULL with no default. `method` (046) is nullable and
+  -- is appended LAST so every existing positional call keeps working.
   INSERT INTO public.settlements (
     id, group_id, bill_id, from_user_id, to_user_id, amount, currency,
-    is_settled, label, created_at, updated_at, synced_at, is_deleted, device_id
+    is_settled, label, method, created_at, updated_at, synced_at, is_deleted, device_id
   )
   VALUES (v_id, p_group, p_bill, p_from, p_to, p_amount, p_currency,
-          true, p_label, v_at, v_at, v_at, false, 'test');
+          true, p_label, p_method, v_at, v_at, v_at, false, 'test');
   RETURN v_id;
 END;
 $$;
@@ -335,7 +337,8 @@ CREATE OR REPLACE FUNCTION test.new_bundle(
   p_amounts numeric[],
   p_group uuid DEFAULT NULL,
   p_label text DEFAULT '',
-  p_currency text DEFAULT 'PHP'
+  p_currency text DEFAULT 'PHP',
+  p_method text DEFAULT NULL
 )
 RETURNS uuid
 LANGUAGE plpgsql
@@ -346,12 +349,14 @@ DECLARE
   v_i int;
 BEGIN
   FOR v_i IN 1 .. array_length(p_recipients, 1) LOOP
+    -- recordPersonPayment stamps every leg of a bundle with the SAME method, so the fixture takes
+    -- one value rather than an array.
     INSERT INTO public.settlements (
       id, group_id, bill_id, bundle_id, from_user_id, to_user_id, amount, currency,
-      is_settled, label, created_at, updated_at, synced_at, is_deleted, device_id
+      is_settled, label, method, created_at, updated_at, synced_at, is_deleted, device_id
     )
     VALUES (gen_random_uuid(), p_group, NULL, v_bundle, p_from, p_recipients[v_i],
-            p_amounts[v_i], p_currency, true, p_label, v_at, v_at, v_at, false, 'test');
+            p_amounts[v_i], p_currency, true, p_label, p_method, v_at, v_at, v_at, false, 'test');
   END LOOP;
   RETURN v_bundle;
 END;

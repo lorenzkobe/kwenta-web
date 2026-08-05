@@ -1,6 +1,8 @@
 import { useMemo, useState } from 'react'
-import { Banknote, ChevronRight, Pencil, Receipt } from 'lucide-react'
+import { Banknote, ChevronRight, Pencil, Receipt, Users } from 'lucide-react'
+import type { SettlementHistoryItem } from '@/api/balances'
 import type { MoneyFlowResult, MoneyFlowRow } from '@/lib/money-flow'
+import { Badge } from '@/components/ui/badge'
 import { cn, formatCurrency } from '@/lib/utils'
 
 const PAGE = 20
@@ -12,6 +14,11 @@ interface DisplayRow {
   billId: string | null
   title: string
   contextLabel: string
+  /**
+   * Null for personal. The PILL is gated on this, never on `contextLabel === 'Personal'` — a
+   * group someone actually named "Personal" would otherwise render as a personal payment.
+   */
+  groupId: string | null
   createdAt: string
   currency: string
   /** + they owe me effect / − I owe them. */
@@ -46,6 +53,7 @@ function collapse(rows: MoneyFlowRow[]): DisplayRow[] {
       billId: kind === 'bill' ? r.id : null,
       title: r.title,
       contextLabel: r.contextLabel,
+      groupId: r.groupId,
       createdAt: r.createdAt,
       currency: r.currency,
       signedAmount: r.signedAmount,
@@ -64,13 +72,17 @@ function fmtDate(iso: string): string {
 export function PersonStatement({
   result,
   onEditPayment,
-  editableSettlementIds,
+  paymentsByLegId,
   onOpenBill,
 }: {
   result: MoneyFlowResult | undefined
   /** Given a settlement id in a payment row, open its editor. */
   onEditPayment?: (settlementId: string) => void
-  editableSettlementIds?: Set<string>
+  /**
+   * Every settlement leg id → the (possibly bundled) payment it belongs to. Membership is what
+   * makes a row editable; the item also carries the method rendered on the row.
+   */
+  paymentsByLegId?: Map<string, SettlementHistoryItem>
   /** Given a bill id in a bill row, open its detail sheet. */
   onOpenBill?: (billId: string) => void
 }) {
@@ -119,7 +131,8 @@ export function PersonStatement({
             {shown.map((row) => {
               const isBill = row.kind === 'bill'
               const positive = row.signedAmount >= 0
-              const editableId = row.settlementIds.find((id) => editableSettlementIds?.has(id))
+              const editableId = row.settlementIds.find((id) => paymentsByLegId?.has(id))
+              const method = editableId ? paymentsByLegId?.get(editableId)?.method : null
               const clickable = isBill && row.billId != null && onOpenBill != null
               const rowClass =
                 'flex w-full items-start justify-between gap-3 rounded-xl border border-stone-200 bg-stone-100/60 px-4 py-3'
@@ -136,7 +149,24 @@ export function PersonStatement({
                     </div>
                     <div className="min-w-0 text-left">
                       <p className="text-sm font-medium text-stone-800">{row.title}</p>
-                      <p className="mt-0.5 text-xs text-stone-500">{row.contextLabel}</p>
+                      {/* Group provenance reads as a pill; personal rows carry no context line at
+                          all, so "inside a group" stands out by contrast instead of being one
+                          more line of grey text. */}
+                      {(row.groupId !== null || method) && (
+                        <div className="mt-1 flex flex-wrap items-center gap-1">
+                          {row.groupId !== null && (
+                            <Badge variant="secondary" className="gap-1 px-2 py-0.5 text-[0.7rem]">
+                              <Users className="size-3" />
+                              {row.contextLabel}
+                            </Badge>
+                          )}
+                          {method && (
+                            <Badge variant="ghost" className="px-2 py-0.5 text-[0.7rem]">
+                              {method}
+                            </Badge>
+                          )}
+                        </div>
+                      )}
                       <p className="mt-0.5 text-[11px] text-stone-400">{fmtDate(row.createdAt)}</p>
                     </div>
                   </div>

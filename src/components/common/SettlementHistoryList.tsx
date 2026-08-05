@@ -4,6 +4,7 @@ import { buildMovementChains } from '@/lib/settlement'
 import type { SettlementHistoryItem } from '@/api/balances'
 import { cn, formatCurrency } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
+import { Badge } from '@/components/ui/badge'
 
 function describePayment(h: SettlementHistoryItem, currentUserId: string | null | undefined) {
   if (h.isBundled) {
@@ -29,14 +30,11 @@ function describePayment(h: SettlementHistoryItem, currentUserId: string | null 
 export function SettlementHistoryList({
   items,
   currentUserId,
-  showGroupName,
   className,
   onEdit,
 }: {
   items: SettlementHistoryItem[]
   currentUserId?: string | null
-  /** When true, show group name above each row (cross-group lists). */
-  showGroupName?: boolean
   className?: string
   onEdit?: (item: SettlementHistoryItem) => void
 }) {
@@ -45,13 +43,7 @@ export function SettlementHistoryList({
   return (
     <ul className={cn('space-y-2', className)}>
       {items.map((h) => (
-        <HistoryRow
-          key={h.id}
-          h={h}
-          currentUserId={currentUserId}
-          showGroupName={showGroupName}
-          onEdit={onEdit}
-        />
+        <HistoryRow key={h.id} h={h} currentUserId={currentUserId} onEdit={onEdit} />
       ))}
     </ul>
   )
@@ -60,12 +52,10 @@ export function SettlementHistoryList({
 function HistoryRow({
   h,
   currentUserId,
-  showGroupName,
   onEdit,
 }: {
   h: SettlementHistoryItem
   currentUserId?: string | null
-  showGroupName?: boolean
   onEdit?: (item: SettlementHistoryItem) => void
 }) {
   const [showMovement, setShowMovement] = useState(false)
@@ -84,11 +74,6 @@ function HistoryRow({
           <Banknote className="size-4" aria-hidden />
         </div>
         <div>
-          {showGroupName && h.groupName && (
-            <p className="text-[0.65rem] font-medium uppercase tracking-wide text-stone-400">
-              {h.groupName}
-            </p>
-          )}
           <p className="text-sm font-medium text-stone-800">{primary}</p>
           {h.billTitle && <p className="mt-0.5 text-xs text-teal-800/90">Bill: {h.billTitle}</p>}
           {!h.billTitle && h.groupId === null && (
@@ -96,6 +81,11 @@ function HistoryRow({
           )}
           {h.label.trim() !== '' && (
             <p className="mt-0.5 text-xs font-medium text-stone-600">{h.label}</p>
+          )}
+          {h.method && (
+            <Badge variant="ghost" className="mt-1 px-2 py-0.5 text-[0.7rem]">
+              {h.method}
+            </Badge>
           )}
           {h.isBundled && h.recipients.length > 1 && (
             <div className="mt-1 space-y-0.5">

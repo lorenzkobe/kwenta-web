@@ -669,6 +669,8 @@ export type SettlementHistoryItem = {
   amount: number
   currency: string
   label: string
+  /** How the money moved (cash / GCash / …). Null when never recorded. */
+  method: string | null
   createdAt: string
   recipients: SettlementRecipient[]
   legs: SettlementMovementLeg[]
@@ -700,6 +702,9 @@ function toHistoryItem(row: Record<string, unknown>): SettlementHistoryItem {
     amount: Number(row.amount ?? 0),
     currency: String(row.currency ?? ''),
     label: typeof row.label === 'string' ? row.label : '',
+    // A pre-069 server omits the key entirely; nullableString turns that (and a blank string)
+    // into null, so the field degrades to "no method" rather than painting an empty tag.
+    method: nullableString(row.method),
     createdAt: String(row.createdAt ?? ''),
     recipients: arr(row.recipients).map((r) => ({
       toUserId: String(r.toUserId ?? ''),
