@@ -1,10 +1,11 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Check, ChevronDown, ChevronRight, LayoutList, Plus, Save, SplitSquareHorizontal, Tag, Trash2, UserPlus, Users, X } from 'lucide-react'
 import { BILL_CATEGORIES, CATEGORY_ICONS, CATEGORY_LABELS } from '@/lib/bill-categories'
 import { toast } from 'sonner'
 import {
   createBill,
   getBillWithDetails,
+  resolveGroupMemberUserId,
   updateBill,
   type CreateBillInput,
 } from '@/db/operations'
@@ -16,7 +17,10 @@ import {
   equalCustomMap,
   equalPercentMap,
   lineSplitsValid,
+  mergeUnlistedParticipants,
   redistributeWithPinned,
+  remapLineSplits,
+  resolveBillEditIds,
   type PinnedSplits,
 } from '@/lib/bill-split-form'
 import { normalizeAmountInput, stripLeadingZerosAmount } from '@/lib/amount-input'
@@ -25,7 +29,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@/components/ui/select'
-import { SplitPersonSelector } from '@/components/common/SplitPersonSelector'
+import { SplitPersonSelector, type SplitMemberOption } from '@/components/common/SplitPersonSelector'
 import { ConfirmDialog } from '@/components/common/ConfirmDialog'
 
 type BillMode = 'simple' | 'itemized'
@@ -114,6 +118,20 @@ export function AddBillDialog({
   const [items, setItems] = useState<ItemDraft[]>([newItem()])
   const [collapsedItemKeys, setCollapsedItemKeys] = useState<string[]>([])
   const [removeItemKey, setRemoveItemKey] = useState<string | null>(null)
+  // Participants on the bill being edited that are no longer on the roster — merged into
+  // `members` below via `mergeUnlistedParticipants` so their chip still renders and can be
+  // removed, rather than being invisibly saved forever.
+  const [billParticipants, setBillParticipants] = useState<{ userId: string; displayName: string }[]>(
+    [],
+  )
+  const members: SplitMemberOption[] = useMemo(
+    () => mergeUnlistedParticipants(groupMembers, billParticipants),
+    [groupMembers, billParticipants],
+  )
+  const payorLabel = (m: SplitMemberOption) => {
+    const name = m.isCurrentUser ? 'You' : m.displayName
+    return m.unlisted ? `${name} · not in group` : name
+  }
 
   const simpleAmountNum = parseFloat(simpleAmount) || 0
   const pendingRemoveLine = removeItemKey ? items.find((i) => i.key === removeItemKey) : undefined
@@ -172,10 +190,14 @@ export function AddBillDialog({
   }, [])
 
   useEffect(() => {
-    if (!editBillId) return
+    if (!editBillId) {
+      // A stale edit's unlisted participants must not leak into a fresh "Add bill" form.
+      setBillParticipants([])
+      return
+    }
     let cancelled = false
     setLoadingEdit(true)
-    getBillWithDetails(editBillId).then((d) => {
+    getBillWithDetails(editBillId).then(async (d) => {
       if (cancelled) return
       if (!d) {
         setLoadingEdit(false)
@@ -189,19 +211,29 @@ export function AddBillDialog({
       setTitle(d.title)
       setNote(d.note)
       setCategory(d.category ?? null)
-      setPaidBy(d.paid_by)
+
+      // Stored ids (`paid_by`, `item_splits.user_id`) are canonical roster ids already for a
+      // current member, but a legacy row or a removed member needs resolving through the
+      // roster — done ONCE per distinct id here, never per render, never per member change.
+      const { pickerIdFor, billParticipants } = await resolveBillEditIds(
+        d,
+        (id) => resolveGroupMemberUserId(groupId, id),
+        currentUserId,
+      )
+      if (cancelled) return
+
+      setPaidBy(pickerIdFor(d.paid_by))
+      setBillParticipants(billParticipants)
+
       if (d.items.length === 1) {
         setMode('simple')
         const line = d.items[0]
         setSimpleAmount(String(line.amount))
-        const splits = line.splits
-        if (splits.length) {
-          setSimpleSplitType(splits[0].split_type)
-          setSimpleSelectedUserIds(splits.map((s) => s.user_id))
-          setSimpleSplitMeta({
-            values: Object.fromEntries(splits.map((s) => [s.user_id, String(s.split_value)])),
-            pinned: {},
-          })
+        if (line.splits.length) {
+          setSimpleSplitType(line.splits[0].split_type)
+          const hydrated = remapLineSplits(line.splits, pickerIdFor)
+          setSimpleSelectedUserIds(hydrated.selectedUserIds)
+          setSimpleSplitMeta({ values: hydrated.splitValues, pinned: {} })
         } else {
           setSimpleSplitType('equal')
           setSimpleSelectedUserIds([])
@@ -210,17 +242,18 @@ export function AddBillDialog({
       } else {
         setMode('itemized')
         setItems(
-          d.items.map((item) => ({
-            key: item.id,
-            name: item.name,
-            amount: String(item.amount),
-            splitType: item.splits[0]?.split_type ?? 'equal',
-            selectedUserIds: item.splits.map((s) => s.user_id),
-            splitValues: Object.fromEntries(
-              item.splits.map((s) => [s.user_id, String(s.split_value)]),
-            ),
-            pinnedSplit: {},
-          })),
+          d.items.map((item) => {
+            const hydrated = remapLineSplits(item.splits, pickerIdFor)
+            return {
+              key: item.id,
+              name: item.name,
+              amount: String(item.amount),
+              splitType: item.splits[0]?.split_type ?? 'equal',
+              selectedUserIds: hydrated.selectedUserIds,
+              splitValues: hydrated.splitValues,
+              pinnedSplit: {},
+            }
+          }),
         )
       }
       setLoadingEdit(false)
@@ -228,7 +261,7 @@ export function AddBillDialog({
     return () => {
       cancelled = true
     }
-  }, [editBillId, currentUserId])
+  }, [editBillId, currentUserId, groupId])
 
   function setSimpleSplitTypeAndValues(t: SplitType) {
     setSimpleSplitType(t)
@@ -349,7 +382,12 @@ export function AddBillDialog({
   }
 
   function selectAllSimpleUsers() {
-    const allIds = groupMembers.map((m) => m.userId)
+    // Keep any already-selected unlisted person (a removed member the bill still names) —
+    // "Select all" adds every roster member, it must not silently drop them from the bill.
+    const keptUnlisted = selectedIdsRef.current.filter((id) =>
+      members.some((m) => m.userId === id && m.unlisted),
+    )
+    const allIds = [...groupMembers.map((m) => m.userId), ...keptUnlisted]
     setSimpleSelectedUserIds(allIds)
     const st = simpleSplitTypeRef.current
     const amt = parseFloat(simpleAmountStrRef.current) || 0
@@ -370,10 +408,16 @@ export function AddBillDialog({
   }
 
   function selectAllForItem(itemKey: string) {
-    const allIds = groupMembers.map((m) => m.userId)
+    const rosterIds = groupMembers.map((m) => m.userId)
     setItems((prev) =>
       prev.map((item) => {
         if (item.key !== itemKey) return item
+        // Keep any already-selected unlisted person on this line — "Select all" adds every
+        // roster member, it must not silently drop them from the line.
+        const keptUnlisted = item.selectedUserIds.filter((id) =>
+          members.some((m) => m.userId === id && m.unlisted),
+        )
+        const allIds = [...rosterIds, ...keptUnlisted]
         if (item.splitType === 'equal') {
           return { ...item, selectedUserIds: allIds, splitValues: {}, pinnedSplit: {} }
         }
@@ -609,16 +653,17 @@ export function AddBillDialog({
   }
 
   const filteredPayorOptions = payorSearch.trim()
-    ? groupMembers.filter((m) =>
+    ? members.filter((m) =>
         (m.isCurrentUser ? 'You' : m.displayName)
           .toLowerCase()
           .includes(payorSearch.toLowerCase()),
       )
-    : groupMembers
-  const selectedPayor = groupMembers.find((m) => m.userId === paidBy)
-  // When editing a bill whose payer was since removed from the group, paidBy points at a
-  // user not in groupMembers. Don't mislabel them as "You" — the bill keeps its real
-  // payer attribution; surface it honestly so the header matches what's saved.
+    : members
+  const selectedPayor = members.find((m) => m.userId === paidBy)
+  // When editing a bill whose payer was since removed from the group, paidBy resolves to a
+  // roster id that isn't a current member; `members` still carries their name via
+  // `billParticipants` (unlisted), so this only falls back to "Former member" if that lookup
+  // itself somehow comes up empty.
   const payorDisplayName = selectedPayor
     ? selectedPayor.isCurrentUser
       ? 'You'
@@ -714,9 +759,14 @@ export function AddBillDialog({
                       onClick={() => { setPayorOpen((o) => !o); setPayorSearch('') }}
                       className="flex w-full items-center justify-between rounded-lg border border-stone-200 bg-white px-3 py-2 text-sm text-stone-800 transition-colors hover:bg-stone-50"
                     >
-                      <span className="flex items-center gap-1.5">
+                      <span
+                        className={cn(
+                          'flex items-center gap-1.5',
+                          selectedPayor?.unlisted && 'text-stone-500',
+                        )}
+                      >
                         <Users className="size-3.5 text-stone-400" />
-                        {payorDisplayName}
+                        {selectedPayor ? payorLabel(selectedPayor) : payorDisplayName}
                       </span>
                       <ChevronDown className="size-4 text-stone-400" />
                     </button>
@@ -739,7 +789,10 @@ export function AddBillDialog({
                                 key={m.userId}
                                 type="button"
                                 onClick={() => { setPaidBy(m.userId); setPayorOpen(false); setPayorSearch('') }}
-                                className="flex w-full items-center gap-2 px-3 py-2 text-sm text-stone-800 transition-colors hover:bg-stone-50"
+                                className={cn(
+                                  'flex w-full items-center gap-2 px-3 py-2 text-sm transition-colors hover:bg-stone-50',
+                                  m.unlisted ? 'text-stone-500' : 'text-stone-800',
+                                )}
                               >
                                 <Check
                                   className={cn(
@@ -747,7 +800,7 @@ export function AddBillDialog({
                                     paidBy === m.userId ? 'text-teal-800' : 'text-transparent',
                                   )}
                                 />
-                                {m.isCurrentUser ? 'You' : m.displayName}
+                                {payorLabel(m)}
                               </button>
                             ))}
                             {filteredPayorOptions.length === 0 && (
@@ -860,7 +913,7 @@ export function AddBillDialog({
 
                       <div className="flex flex-col gap-2">
                         <SplitPersonSelector
-                          members={groupMembers}
+                          members={members}
                           selectedUserIds={simpleSelectedUserIds}
                           onToggle={toggleSimpleUser}
                           splitType={simpleSplitType}
@@ -871,6 +924,7 @@ export function AddBillDialog({
                           onValueChange={onSimpleSplitInputChange}
                           onSelectAll={selectAllSimpleUsers}
                           onDeselectAll={deselectAllSimpleUsers}
+                          unlistedHint="not in group"
                         />
 
                         {simpleSelectedUserIds.length > 0 && simpleAmountNum > 0 && (
@@ -1087,7 +1141,7 @@ export function AddBillDialog({
                             <SplitPersonSelector
                               size="compact"
                               showHeader={false}
-                              members={groupMembers}
+                              members={members}
                               selectedUserIds={item.selectedUserIds}
                               onToggle={(uid) => toggleUserForItem(item.key, uid)}
                               splitType={item.splitType}
@@ -1096,6 +1150,7 @@ export function AddBillDialog({
                               pinnedUserIds={item.pinnedSplit}
                               lineAmount={parseFloat(item.amount) || 0}
                               onValueChange={(uid, raw) => onItemSplitValueChange(item.key, uid, raw)}
+                              unlistedHint="not in group"
                             />
                           </div>
 

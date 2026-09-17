@@ -26,6 +26,7 @@ import {
   createBill,
   createLocalProfile,
   getBillWithDetails,
+  resolveGroupMemberUserId,
   updateBill,
   type CreateBillInput,
 } from '@/db/operations'
@@ -38,12 +39,15 @@ import {
   equalCustomMap,
   equalPercentMap,
   lineSplitsValid,
+  mergeUnlistedParticipants,
   parseSplitNumber,
   redistributeWithPinned,
+  remapLineSplits,
+  resolveBillEditIds,
   type PinnedSplits,
 } from '@/lib/bill-split-form'
 import { BILL_BACK_QUERY, parseSafeAppPath, withBillBackQuery } from '@/lib/bill-navigation'
-import { listCanonicalRelatedProfileIds } from '@/lib/people'
+import { listCanonicalRelatedProfileIds, personalPickerIdFor } from '@/lib/people'
 import { fetchPersonSummary } from '@/api/balances'
 import { normalizeAmountInput, stripLeadingZerosAmount } from '@/lib/amount-input'
 import { cn, formatCurrency } from '@/lib/utils'
@@ -51,7 +55,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@/components/ui/select'
-import { SplitPersonSelector } from '@/components/common/SplitPersonSelector'
+import { SplitPersonSelector, type SplitMemberOption } from '@/components/common/SplitPersonSelector'
 import { ConfirmDialog } from '@/components/common/ConfirmDialog'
 
 type BillMode = 'simple' | 'itemized'
@@ -146,6 +150,12 @@ export function AddBillPage() {
   const [addPersonBusy, setAddPersonBusy] = useState(false)
   const [addPersonTarget, setAddPersonTarget] = useState<'simple' | string>('simple')
   const [removeItemKey, setRemoveItemKey] = useState<string | null>(null)
+  // Participants on the bill being edited that the picker cannot list itself (a deleted contact,
+  // a member who since left the group) — merged into `members` below via `mergeUnlistedParticipants`
+  // so their chip still renders and can be removed, rather than being invisibly saved forever.
+  const [billParticipants, setBillParticipants] = useState<{ userId: string; displayName: string }[]>(
+    [],
+  )
 
   const groupMembers = useLiveQuery(async () => {
     if (!groupId) return []
@@ -206,7 +216,19 @@ export function AddBillPage() {
   const groupMembersLoading = groupMembers === undefined
   const personalMembersLoading = personalSplitMembers === undefined
   const membersLoading = groupId ? groupMembersLoading : personalMembersLoading
-  const members = groupId ? (groupMembers ?? []) : (personalSplitMembers ?? [])
+  const members: SplitMemberOption[] = useMemo(
+    () =>
+      mergeUnlistedParticipants(
+        groupId ? (groupMembers ?? []) : (personalSplitMembers ?? []),
+        billParticipants,
+      ),
+    [groupId, groupMembers, personalSplitMembers, billParticipants],
+  )
+  const unlistedHint = groupId ? 'not in group' : 'not in contacts'
+  const payorLabel = (m: SplitMemberOption) => {
+    const name = m.isCurrentUser ? 'You' : m.displayName
+    return m.unlisted ? `${name} · ${unlistedHint}` : name
+  }
   const isEdit = Boolean(editBillId)
 
   const lockUserInSplits = !groupId && !!userId && paidBy !== userId
@@ -308,10 +330,15 @@ export function AddBillPage() {
   simpleAmountStrRef.current = simpleAmount
 
   useEffect(() => {
-    if (!editBillId || !userId) return
+    if (!editBillId || !userId) {
+      // A query-only navigation keeps this page mounted, so a stale edit's unlisted
+      // participants must not leak into a fresh "Add bill" form.
+      setBillParticipants([])
+      return
+    }
     let cancelled = false
     setLoadingEdit(true)
-    getBillWithDetails(editBillId).then((d) => {
+    getBillWithDetails(editBillId).then(async (d) => {
       if (cancelled) return
       if (!d) {
         setLoadingEdit(false)
@@ -332,19 +359,29 @@ export function AddBillPage() {
       setCurrency(d.currency)
       setCategory(d.category ?? null)
       setGroupId(d.group_id)
-      setPaidBy(d.paid_by)
+
+      // Stored ids (`paid_by`, `item_splits.user_id`) are canonical ACCOUNT/roster ids; the
+      // picker lists a personal contact under its owned LOCAL id, so every distinct id on the
+      // bill is resolved to its picker id ONCE here — never per render, never per member change.
+      const { pickerIdFor, billParticipants } = await resolveBillEditIds(
+        d,
+        (id) => (d.group_id ? resolveGroupMemberUserId(d.group_id, id) : personalPickerIdFor(userId, id)),
+        userId,
+      )
+      if (cancelled) return
+
+      setPaidBy(pickerIdFor(d.paid_by))
+      setBillParticipants(billParticipants)
+
       if (d.items.length === 1) {
         setMode('simple')
         const line = d.items[0]
         setSimpleAmount(String(line.amount))
-        const splits = line.splits
-        if (splits.length) {
-          setSimpleSplitType(splits[0].split_type)
-          setSimpleSelectedUserIds(splits.map((s) => s.user_id))
-          setSimpleSplitMeta({
-            values: Object.fromEntries(splits.map((s) => [s.user_id, String(s.split_value)])),
-            pinned: {},
-          })
+        if (line.splits.length) {
+          setSimpleSplitType(line.splits[0].split_type)
+          const hydrated = remapLineSplits(line.splits, pickerIdFor)
+          setSimpleSelectedUserIds(hydrated.selectedUserIds)
+          setSimpleSplitMeta({ values: hydrated.splitValues, pinned: {} })
         } else {
           setSimpleSplitType('equal')
           setSimpleSelectedUserIds([])
@@ -353,17 +390,18 @@ export function AddBillPage() {
       } else {
         setMode('itemized')
         setItems(
-          d.items.map((item) => ({
-            key: item.id,
-            name: item.name,
-            amount: String(item.amount),
-            splitType: item.splits[0]?.split_type ?? 'equal',
-            selectedUserIds: item.splits.map((s) => s.user_id),
-            splitValues: Object.fromEntries(
-              item.splits.map((s) => [s.user_id, String(s.split_value)]),
-            ),
-            pinnedSplit: {},
-          })),
+          d.items.map((item) => {
+            const hydrated = remapLineSplits(item.splits, pickerIdFor)
+            return {
+              key: item.id,
+              name: item.name,
+              amount: String(item.amount),
+              splitType: item.splits[0]?.split_type ?? 'equal',
+              selectedUserIds: hydrated.selectedUserIds,
+              splitValues: hydrated.splitValues,
+              pinnedSplit: {},
+            }
+          }),
         )
       }
       setLoadingEdit(false)
@@ -880,9 +918,14 @@ export function AddBillPage() {
                       onClick={() => { setPayorOpen((o) => !o); setPayorSearch('') }}
                       className="flex w-full items-center justify-between rounded-lg border border-stone-200 bg-white px-3 py-2 text-sm text-stone-800 transition-colors hover:bg-stone-50"
                     >
-                      <span className="flex items-center gap-1.5">
+                      <span
+                        className={cn(
+                          'flex items-center gap-1.5',
+                          selectedPayor?.unlisted && 'text-stone-500',
+                        )}
+                      >
                         <Users className="size-3.5 text-stone-400" />
-                        {payorDisplayName}
+                        {selectedPayor ? payorLabel(selectedPayor) : payorDisplayName}
                       </span>
                       <ChevronDown className="size-4 text-stone-400" />
                     </button>
@@ -912,7 +955,10 @@ export function AddBillPage() {
                                   setPayorOpen(false)
                                   setPayorSearch('')
                                 }}
-                                className="flex w-full items-center gap-2 px-3 py-2 text-sm text-stone-800 transition-colors hover:bg-stone-50"
+                                className={cn(
+                                  'flex w-full items-center gap-2 px-3 py-2 text-sm transition-colors hover:bg-stone-50',
+                                  member.unlisted ? 'text-stone-500' : 'text-stone-800',
+                                )}
                               >
                                 <Check
                                   className={cn(
@@ -920,7 +966,7 @@ export function AddBillPage() {
                                     paidBy === member.userId ? 'text-teal-800' : 'text-transparent',
                                   )}
                                 />
-                                {member.isCurrentUser ? 'You' : member.displayName}
+                                {payorLabel(member)}
                               </button>
                             ))}
                             {filteredPayorOptions.length === 0 && (
@@ -1078,6 +1124,7 @@ export function AddBillPage() {
                         pinnedUserIds={simpleSplitMeta.pinned}
                         lineAmount={simpleAmountNum}
                         onValueChange={onSimpleSplitInputChange}
+                        unlistedHint={unlistedHint}
                       />
 
                       {lockUserInSplits && (
@@ -1389,6 +1436,7 @@ export function AddBillPage() {
                             pinnedUserIds={item.pinnedSplit}
                             lineAmount={parseFloat(item.amount) || 0}
                             onValueChange={(uid, raw) => onItemSplitValueChange(item.key, uid, raw)}
+                            unlistedHint={unlistedHint}
                           />
                         </div>
 

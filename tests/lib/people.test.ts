@@ -1,9 +1,10 @@
-import { beforeEach, describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { db } from '@/db/db'
 import {
   expandProfileIdsForSplitMatching,
   listCanonicalRelatedProfileIds,
   participantUnionForBill,
+  personalPickerIdFor,
 } from '@/lib/people'
 
 /**
@@ -266,5 +267,217 @@ describe('listCanonicalRelatedProfileIds — one row per real person', () => {
       makeProfile({ id: 'B1', is_local: true, owner_id: 'ME' }),
     ])
     expect((await listCanonicalRelatedProfileIds('ME')).sort()).toEqual(['A1', 'B1'])
+  })
+})
+
+/**
+ * The id the PERSONAL-bill picker uses for whoever a stored id refers to.
+ *
+ * A split or `paid_by` on a personal bill is stored under the canonical ACCOUNT id (the push
+ * rewrites a linked contact to its account and the server row is mirrored back), but the picker
+ * lists that person under the owned LOCAL contact id — `listCanonicalRelatedProfileIds` prefers
+ * it, so the user keeps the name they filed them under. Hydrating an edit form with the stored id
+ * therefore selected an id no chip renders. The contract: for every id in a person's cluster this
+ * returns exactly the id `listCanonicalRelatedProfileIds(meId)` lists for them, and the viewer's
+ * own cluster collapses to `meId`.
+ */
+describe('personalPickerIdFor', () => {
+  const ME = 'ME'
+
+  async function seedLinkedContact() {
+    await db.profiles.bulkAdd([
+      makeProfile({ id: ME }),
+      makeProfile({ id: 'REMOTE', display_name: 'Bob (account)' }),
+      makeProfile({
+        id: 'LOCAL',
+        display_name: 'Bob',
+        is_local: true,
+        owner_id: ME,
+        linked_profile_id: 'REMOTE',
+      }),
+    ])
+  }
+
+  it('C4: an account id resolves to the owned local contact linked to it', async () => {
+    await seedLinkedContact()
+    expect(await personalPickerIdFor(ME, 'REMOTE')).toBe('LOCAL')
+  })
+
+  it('C4: an owned local contact id resolves to itself', async () => {
+    await seedLinkedContact()
+    expect(await personalPickerIdFor(ME, 'LOCAL')).toBe('LOCAL')
+  })
+
+  it('C4: agrees with listCanonicalRelatedProfileIds for every id in the cluster', async () => {
+    await seedLinkedContact()
+    // Owned locals are always related, so the contact is listed under its own id.
+    expect(await listCanonicalRelatedProfileIds(ME)).toEqual(['LOCAL'])
+    for (const id of ['LOCAL', 'REMOTE']) {
+      expect(await personalPickerIdFor(ME, id)).toBe('LOCAL')
+    }
+  })
+
+  it("C4: the viewer's own account id resolves to meId", async () => {
+    await db.profiles.add(makeProfile({ id: ME }))
+    expect(await personalPickerIdFor(ME, ME)).toBe(ME)
+  })
+
+  it('C4: a contact linked to the viewer (their own account) resolves to meId', async () => {
+    // Someone else's contact for ME reaches this device only because it is linked to ME (049).
+    await db.profiles.bulkAdd([
+      makeProfile({ id: ME }),
+      makeProfile({ id: 'THEIR_C_FOR_ME', is_local: true, owner_id: 'OTHER', linked_profile_id: ME }),
+    ])
+    expect(await personalPickerIdFor(ME, 'THEIR_C_FOR_ME')).toBe(ME)
+  })
+
+  it('C4: a contact manually merged with the viewer resolves to meId, not to the contact', async () => {
+    await db.profiles.bulkAdd([
+      makeProfile({ id: ME }),
+      makeProfile({ id: 'A_ME_AGAIN', is_local: true, owner_id: ME }),
+    ])
+    await db.profile_peer_links.add({
+      ...syncFieldsForTest('PL'),
+      owner_user_id: ME,
+      anchor_profile_id: 'A_ME_AGAIN',
+      peer_profile_id: ME,
+    })
+    // The contact is in the viewer's own cluster, so the picker never lists it as a peer...
+    expect(await listCanonicalRelatedProfileIds(ME)).toEqual([])
+    // ...and a split filed under it is the viewer's own share.
+    expect(await personalPickerIdFor(ME, 'A_ME_AGAIN')).toBe(ME)
+  })
+
+  it('C4: a manual merge of two owned contacts resolves either id to the canonical peer', async () => {
+    await db.profiles.bulkAdd([
+      makeProfile({ id: ME }),
+      makeProfile({ id: 'A1', is_local: true, owner_id: ME }),
+      makeProfile({ id: 'A2', is_local: true, owner_id: ME }),
+    ])
+    await db.profile_peer_links.add({
+      ...syncFieldsForTest('PL'),
+      owner_user_id: ME,
+      anchor_profile_id: 'A1',
+      peer_profile_id: 'A2',
+    })
+    expect(await listCanonicalRelatedProfileIds(ME)).toEqual(['A1'])
+    expect(await personalPickerIdFor(ME, 'A2')).toBe('A1')
+    expect(await personalPickerIdFor(ME, 'A1')).toBe('A1')
+  })
+
+  it('C4: a merge spanning a contact, an account and a third party resolves every id to the contact', async () => {
+    // The 067 production shape: the viewer's contact is merged to the account by a peer link while
+    // another user's contact hangs off the same account by a profile link.
+    await db.profiles.bulkAdd([
+      makeProfile({ id: ME }),
+      makeProfile({ id: 'JELLO' }),
+      makeProfile({ id: 'C_JELLO', is_local: true, owner_id: ME }),
+      makeProfile({ id: 'A_THEIRS', is_local: true, owner_id: 'OTHER', linked_profile_id: 'JELLO' }),
+    ])
+    await db.groups.add(makeGroup({ id: 'G', created_by: ME }))
+    await db.group_members.bulkAdd([
+      makeMember({ id: 'M1', group_id: 'G', user_id: ME }),
+      makeMember({ id: 'M2', group_id: 'G', user_id: 'JELLO' }),
+    ])
+    await db.profile_peer_links.add({
+      ...syncFieldsForTest('PL'),
+      owner_user_id: ME,
+      anchor_profile_id: 'C_JELLO',
+      peer_profile_id: 'JELLO',
+    })
+    expect(await listCanonicalRelatedProfileIds(ME)).toEqual(['C_JELLO'])
+    for (const id of ['JELLO', 'C_JELLO', 'A_THEIRS']) {
+      expect(await personalPickerIdFor(ME, id)).toBe('C_JELLO')
+    }
+  })
+
+  it('C4: a soft-deleted owned contact is never chosen; the account id stands for the person', async () => {
+    await db.profiles.bulkAdd([
+      makeProfile({ id: ME }),
+      makeProfile({ id: 'ACC' }),
+      makeProfile({ id: 'DEAD', is_local: true, owner_id: ME, linked_profile_id: 'ACC', is_deleted: true }),
+    ])
+    await db.groups.add(makeGroup({ id: 'G', created_by: ME }))
+    await db.group_members.bulkAdd([
+      makeMember({ id: 'M1', group_id: 'G', user_id: ME }),
+      makeMember({ id: 'M2', group_id: 'G', user_id: 'ACC' }),
+    ])
+    // What the picker lists for that person once the contact is gone.
+    expect(await listCanonicalRelatedProfileIds(ME)).toEqual(['ACC'])
+    expect(await personalPickerIdFor(ME, 'ACC')).toBe('ACC')
+  })
+
+  it('C4: with two merged contacts where the lower id is soft-deleted, the live one wins', async () => {
+    // pickCanonicalPeer walks ids in sorted order and skips a deleted contact — the same rule
+    // listCanonicalRelatedProfileIds applies, so the two cannot disagree on which id is shown.
+    await db.profiles.bulkAdd([
+      makeProfile({ id: ME }),
+      makeProfile({ id: 'A1', is_local: true, owner_id: ME, is_deleted: true }),
+      makeProfile({ id: 'A2', is_local: true, owner_id: ME }),
+    ])
+    await db.profile_peer_links.add({
+      ...syncFieldsForTest('PL'),
+      owner_user_id: ME,
+      anchor_profile_id: 'A1',
+      peer_profile_id: 'A2',
+    })
+    expect(await listCanonicalRelatedProfileIds(ME)).toEqual(['A2'])
+    expect(await personalPickerIdFor(ME, 'A1')).toBe('A2')
+    expect(await personalPickerIdFor(ME, 'A2')).toBe('A2')
+  })
+
+  it('C4: a soft-deleted contact with no live cluster resolves to itself (lowest id of a one-id cluster)', async () => {
+    await db.profiles.bulkAdd([
+      makeProfile({ id: ME }),
+      makeProfile({ id: 'DEAD', is_local: true, owner_id: ME, is_deleted: true }),
+    ])
+    expect(await personalPickerIdFor(ME, 'DEAD')).toBe('DEAD')
+  })
+
+  it("C4: a stranger's id with no relation resolves to itself", async () => {
+    await db.profiles.bulkAdd([makeProfile({ id: ME }), makeProfile({ id: 'STRANGER' })])
+    expect(await personalPickerIdFor(ME, 'STRANGER')).toBe('STRANGER')
+  })
+
+  it('C4: an id with no profile row at all resolves to itself', async () => {
+    await db.profiles.add(makeProfile({ id: ME }))
+    expect(await personalPickerIdFor(ME, 'ghost')).toBe('ghost')
+  })
+
+  it("C4: another viewer's peer-link merge is not honoured for this viewer", async () => {
+    await db.profiles.bulkAdd([
+      makeProfile({ id: ME }),
+      makeProfile({ id: 'A1', is_local: true, owner_id: ME }),
+      makeProfile({ id: 'A2', is_local: true, owner_id: ME }),
+    ])
+    await db.profile_peer_links.add({
+      ...syncFieldsForTest('PL'),
+      owner_user_id: 'SOMEONE_ELSE',
+      anchor_profile_id: 'A1',
+      peer_profile_id: 'A2',
+    })
+    expect(await personalPickerIdFor(ME, 'A2')).toBe('A2')
+  })
+
+  /**
+   * C9 (the part a unit test can pin): resolving one participant must not scan the whole ledger.
+   * `listCanonicalRelatedProfileIds` loads EVERY bill and settlement to discover contacts; calling
+   * it per participant would make the edit-form load cost O(participants x bills). The resolver
+   * has to walk the cluster (`expandProfileIdsForSplitMatching`), which is a handful of profile
+   * reads regardless of how many bills exist.
+   */
+  it('C9: does not scan the bills or settlements tables to resolve one id', async () => {
+    await seedLinkedContact()
+    await seedSimpleBill({ groupId: null, paidBy: ME, shares: { [ME]: 40, REMOTE: 60 } })
+    const billScan = vi.spyOn(db.bills, 'toArray')
+    const settlementScan = vi.spyOn(db.settlements, 'toArray')
+    try {
+      expect(await personalPickerIdFor(ME, 'REMOTE')).toBe('LOCAL')
+      expect(billScan).not.toHaveBeenCalled()
+      expect(settlementScan).not.toHaveBeenCalled()
+    } finally {
+      billScan.mockRestore()
+      settlementScan.mockRestore()
+    }
   })
 })

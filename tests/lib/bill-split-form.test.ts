@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import {
   applyClearedSplitField,
   applySplitInputChange,
@@ -8,6 +8,9 @@ import {
   lineSplitsValid,
   parseSplitNumber,
   redistributeWithPinned,
+  mergeUnlistedParticipants,
+  remapLineSplits,
+  resolveBillEditIds,
   splitTotalEvenly,
 } from '@/lib/bill-split-form'
 
@@ -275,5 +278,239 @@ describe('buildSplitPayload', () => {
       { userId: 'a', splitType: 'custom', splitValue: 60 },
       { userId: 'b', splitType: 'custom', splitValue: 40 },
     ])
+  })
+})
+
+/**
+ * Edit-form hydration. `item_splits.user_id` holds the canonical ACCOUNT id (the push rewrites a
+ * linked contact to its account, and the server row is what gets mirrored), while the personal
+ * picker lists the same person under the owned LOCAL contact id. Copying stored ids verbatim into
+ * the selection made the person invisible in the chips while still being counted, validated and
+ * saved — so re-adding them split the line twice.
+ *
+ * `remapLineSplits` is the pure half: it takes the id mapper the page resolved from Dexie and
+ * turns stored rows into a picker selection. The mapper is passed in so the transform itself
+ * never touches the database.
+ */
+describe('remapLineSplits', () => {
+  // The mapper the page would build for one linked contact: account id -> owned contact id.
+  const picker = (id: string) => (id === 'REMOTE' ? 'LOCAL' : id)
+
+  it('C2: maps an account id to the picker id, passes unknown ids through, preserves order', () => {
+    const out = remapLineSplits(
+      [
+        { user_id: 'ME', split_type: 'custom', split_value: 40 },
+        { user_id: 'REMOTE', split_type: 'custom', split_value: 35 },
+        { user_id: 'STRANGER', split_type: 'custom', split_value: 25 },
+      ],
+      picker,
+    )
+    expect(out.selectedUserIds).toEqual(['ME', 'LOCAL', 'STRANGER'])
+    expect(out.splitValues).toEqual({ ME: '40', LOCAL: '35', STRANGER: '25' })
+  })
+
+  it('C2: keys the value map by the PICKER id, never by the stored id', () => {
+    const out = remapLineSplits([{ user_id: 'REMOTE', split_type: 'percentage', split_value: 100 }], picker)
+    expect(out.splitValues).toEqual({ LOCAL: '100' })
+    expect(out.splitValues).not.toHaveProperty('REMOTE')
+  })
+
+  it('C2: stringifies split_value the way the form stores it', () => {
+    const out = remapLineSplits([{ user_id: 'A', split_type: 'custom', split_value: 12.5 }], (id) => id)
+    expect(out.splitValues.A).toBe('12.5')
+    expect(typeof out.splitValues.A).toBe('string')
+  })
+
+  it('C2: an identity mapper leaves everything untouched', () => {
+    const out = remapLineSplits(
+      [
+        { user_id: 'B', split_type: 'equal', split_value: 1 },
+        { user_id: 'A', split_type: 'equal', split_value: 1 },
+      ],
+      (id) => id,
+    )
+    expect(out.selectedUserIds).toEqual(['B', 'A'])
+    expect(out.splitValues).toEqual({ B: '1', A: '1' })
+  })
+
+  it('C2: empty input yields an empty selection and an empty value map', () => {
+    expect(remapLineSplits([], picker)).toEqual({ selectedUserIds: [], splitValues: {} })
+  })
+
+  it('C3: two stored rows that resolve to one person become ONE selection; the first row wins', () => {
+    // A legacy row under the contact id next to a canonical row under the account id.
+    const out = remapLineSplits(
+      [
+        { user_id: 'ME', split_type: 'custom', split_value: 50 },
+        { user_id: 'LOCAL', split_type: 'custom', split_value: 30 },
+        { user_id: 'REMOTE', split_type: 'custom', split_value: 20 },
+      ],
+      picker,
+    )
+    expect(out.selectedUserIds).toEqual(['ME', 'LOCAL'])
+    expect(out.splitValues).toEqual({ ME: '50', LOCAL: '30' })
+  })
+
+  it('C3: dedupes when the duplicate is the FIRST row too (account id first, contact id second)', () => {
+    const out = remapLineSplits(
+      [
+        { user_id: 'REMOTE', split_type: 'custom', split_value: 20 },
+        { user_id: 'LOCAL', split_type: 'custom', split_value: 30 },
+      ],
+      picker,
+    )
+    expect(out.selectedUserIds).toEqual(['LOCAL'])
+    expect(out.splitValues).toEqual({ LOCAL: '20' })
+  })
+
+  it('C3: does not mutate the input rows', () => {
+    const rows = [{ user_id: 'REMOTE', split_type: 'equal' as const, split_value: 1 }]
+    const snapshot = JSON.stringify(rows)
+    remapLineSplits(rows, picker)
+    expect(JSON.stringify(rows)).toBe(snapshot)
+  })
+})
+
+/**
+ * The other half of the same screen: a participant the picker cannot list at all — a contact
+ * deleted from the phonebook, a member removed from the group — must still be visible and
+ * removable, or the edit keeps silently saving a split the user cannot see.
+ */
+describe('mergeUnlistedParticipants', () => {
+  const listed = [
+    { userId: 'ME', displayName: 'You', isCurrentUser: true },
+    { userId: 'LOCAL', displayName: 'Bob', isCurrentUser: false },
+  ]
+
+  it('C5: a participant already in the picker list is returned as-is, without an unlisted flag', () => {
+    const out = mergeUnlistedParticipants(listed, [{ userId: 'LOCAL', displayName: 'Bob' }])
+    expect(out).toEqual(listed)
+    expect(out[0]).toBe(listed[0])
+    expect(out[1]).toBe(listed[1])
+    for (const m of out) expect(m).not.toHaveProperty('unlisted')
+  })
+
+  it('C5: an unmatched participant is appended once, flagged unlisted and never the current user', () => {
+    const out = mergeUnlistedParticipants(listed, [{ userId: 'GONE', displayName: 'Gone Person' }])
+    expect(out).toHaveLength(3)
+    expect(out.slice(0, 2)).toEqual(listed)
+    expect(out[2]).toEqual({
+      userId: 'GONE',
+      displayName: 'Gone Person',
+      isCurrentUser: false,
+      unlisted: true,
+    })
+  })
+
+  it('C5: the same unmatched participant given twice is appended once', () => {
+    const out = mergeUnlistedParticipants(listed, [
+      { userId: 'GONE', displayName: 'Gone Person' },
+      { userId: 'GONE', displayName: 'Gone Person (dup)' },
+    ])
+    expect(out.map((m) => m.userId)).toEqual(['ME', 'LOCAL', 'GONE'])
+    expect(out[2].displayName).toBe('Gone Person')
+  })
+
+  it('C5: listed entries are never duplicated, even when every participant is also listed', () => {
+    const out = mergeUnlistedParticipants(listed, [
+      { userId: 'ME', displayName: 'Me' },
+      { userId: 'LOCAL', displayName: 'Bob' },
+      { userId: 'ME', displayName: 'Me again' },
+    ])
+    expect(out).toEqual(listed)
+  })
+
+  it('C5: keeps listed order first, then unlisted in participant order', () => {
+    const out = mergeUnlistedParticipants(listed, [
+      { userId: 'Z_GONE', displayName: 'Zed' },
+      { userId: 'LOCAL', displayName: 'Bob' },
+      { userId: 'A_GONE', displayName: 'Abe' },
+    ])
+    expect(out.map((m) => m.userId)).toEqual(['ME', 'LOCAL', 'Z_GONE', 'A_GONE'])
+  })
+
+  it('C5: no participants returns the listed array unchanged; no listed returns only unlisted entries', () => {
+    expect(mergeUnlistedParticipants(listed, [])).toEqual(listed)
+    expect(mergeUnlistedParticipants([], [{ userId: 'GONE', displayName: 'Gone' }])).toEqual([
+      { userId: 'GONE', displayName: 'Gone', isCurrentUser: false, unlisted: true },
+    ])
+  })
+
+  it('C5: does not mutate the listed array', () => {
+    const copy = [...listed]
+    mergeUnlistedParticipants(listed, [{ userId: 'GONE', displayName: 'Gone' }])
+    expect(listed).toEqual(copy)
+  })
+})
+
+/**
+ * The shared half of the two edit-load effects (AddBillPage/AddBillDialog): resolve every
+ * distinct stored id once through the injected resolver, then derive `billParticipants`. Kept
+ * Dexie-free on purpose so both `personalPickerIdFor` and `resolveGroupMemberUserId` callers can
+ * share one implementation instead of two hand-copies that could drift.
+ */
+describe('resolveBillEditIds', () => {
+  const identity = async (id: string) => id
+
+  it('resolves each distinct stored id exactly once, however many splits repeat it', async () => {
+    const resolve = vi.fn(async (id: string) => (id === 'REMOTE' ? 'LOCAL' : id))
+    const detail = {
+      paid_by: 'ME',
+      payorName: 'Me',
+      items: [
+        { splits: [{ user_id: 'ME', displayName: 'Me' }, { user_id: 'REMOTE', displayName: 'Bob' }] },
+        { splits: [{ user_id: 'REMOTE', displayName: 'Bob' }] },
+      ],
+    }
+    const { pickerIdFor } = await resolveBillEditIds(detail, resolve, 'ME')
+    expect(resolve).toHaveBeenCalledTimes(2)
+    expect(resolve.mock.calls.map((c) => c[0]).sort()).toEqual(['ME', 'REMOTE'])
+    expect(pickerIdFor('REMOTE')).toBe('LOCAL')
+  })
+
+  it('the first displayName seen for a picker id wins', async () => {
+    const detail = {
+      paid_by: 'ME',
+      payorName: 'Me',
+      items: [
+        { splits: [{ user_id: 'A', displayName: 'First' }] },
+        { splits: [{ user_id: 'A', displayName: 'Second' }] },
+      ],
+    }
+    const { billParticipants } = await resolveBillEditIds(detail, identity, 'ME')
+    expect(billParticipants).toEqual([{ userId: 'A', displayName: 'First' }])
+  })
+
+  it('a payor with no split of their own on the bill gets payorName as the fallback name', async () => {
+    const detail = {
+      paid_by: 'PAYOR',
+      payorName: 'Payor Name',
+      items: [{ splits: [{ user_id: 'ME', displayName: 'Me' }] }],
+    }
+    const { billParticipants } = await resolveBillEditIds(detail, identity, 'ME')
+    expect(billParticipants).toEqual([{ userId: 'PAYOR', displayName: 'Payor Name' }])
+  })
+
+  it('excludes the viewer from the participant list', async () => {
+    const detail = {
+      paid_by: 'ME',
+      payorName: 'Me',
+      items: [
+        {
+          splits: [
+            { user_id: 'ME', displayName: 'Me' },
+            { user_id: 'OTHER', displayName: 'Other' },
+          ],
+        },
+      ],
+    }
+    const { billParticipants } = await resolveBillEditIds(detail, identity, 'ME')
+    expect(billParticipants).toEqual([{ userId: 'OTHER', displayName: 'Other' }])
+  })
+
+  it('an id the resolver never saw (not on the bill) passes through pickerIdFor unchanged', async () => {
+    const detail = { paid_by: 'ME', payorName: 'Me', items: [] }
+    const { pickerIdFor } = await resolveBillEditIds(detail, identity, 'ME')
+    expect(pickerIdFor('UNSEEN')).toBe('UNSEEN')
   })
 })

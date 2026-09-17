@@ -326,6 +326,20 @@ async function pickCanonicalPeer(meId: string, clusterIds: string[]): Promise<st
 }
 
 /**
+ * The id the PERSONAL-bill picker uses for whoever a stored id refers to.
+ *
+ * A split or `paid_by` on a personal bill is stored under the canonical ACCOUNT id
+ * (`normalizeForPush` + migration 042 rewrite it on push, and the server's echo is what gets
+ * mirrored back), while the picker lists that same person under the owned LOCAL contact id —
+ * reusing `pickCanonicalPeer` here is what keeps the two rules from drifting apart.
+ */
+export async function personalPickerIdFor(meId: string, profileId: string): Promise<string> {
+  const cluster = await expandProfileIdsForSplitMatching(profileId, meId)
+  if (cluster.has(meId)) return meId
+  return (await pickCanonicalPeer(meId, [...cluster])) ?? profileId
+}
+
+/**
  * One logical peer per person (dedupes local contact, linked remote, and manual merges).
  *
  * Grouping is done on the whole identity CLUSTER rather than by resolving each id one hop.

@@ -42,3 +42,4 @@ coverage
 
 # Graphify knowledge graph artifacts (generated, not committed)
 graphify-out/*
+.claude/gate/

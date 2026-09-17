@@ -11,6 +11,8 @@ export interface SplitMemberOption {
   userId: string
   displayName: string
   isCurrentUser: boolean
+  /** On the bill but not in the picker's own list (deleted contact / removed member) — see `mergeUnlistedParticipants`. */
+  unlisted?: boolean
 }
 
 interface SplitPersonSelectorProps {
@@ -28,6 +30,8 @@ interface SplitPersonSelectorProps {
   onDeselectAll?: () => void
   size?: 'default' | 'compact'
   showHeader?: boolean
+  /** Suffix shown after an unlisted member's name, e.g. "not in group" for a group bill. */
+  unlistedHint?: string
 }
 
 export function SplitPersonSelector({
@@ -45,6 +49,7 @@ export function SplitPersonSelector({
   onDeselectAll,
   size = 'default',
   showHeader = true,
+  unlistedHint = 'not in contacts',
 }: SplitPersonSelectorProps) {
   const [open, setOpen] = useState(false)
   const [search, setSearch] = useState('')
@@ -53,13 +58,16 @@ export function SplitPersonSelector({
   const dropdownRef = useRef<HTMLDivElement>(null)
 
   const isEqual = splitType === 'equal'
-  const allSelected = members.length > 0 && members.every((m) => selectedUserIds.includes(m.userId))
+  const listedMembers = members.filter((m) => !m.unlisted)
+  const allSelected =
+    listedMembers.length > 0 && listedMembers.every((m) => selectedUserIds.includes(m.userId))
   const selectedMembers = members.filter((m) => selectedUserIds.includes(m.userId))
+  const offeredMembers = members.filter((m) => !m.unlisted || selectedUserIds.includes(m.userId))
   const filtered = search
-    ? members.filter((m) =>
+    ? offeredMembers.filter((m) =>
         (m.isCurrentUser ? 'You' : m.displayName).toLowerCase().includes(search.toLowerCase()),
       )
-    : members
+    : offeredMembers
 
   const sum = selectedUserIds.reduce((a, uid) => a + parseSplitNumber(values[uid]), 0)
   const pctOk = splitType === 'percentage' && Math.abs(sum - 100) <= 0.06
@@ -165,9 +173,12 @@ export function SplitPersonSelector({
               return (
                 <span
                   key={m.userId}
-                  className="inline-flex items-center gap-0.5 rounded-full bg-teal-800/10 px-2 py-0.5 text-xs font-medium text-teal-800"
+                  className={cn(
+                    'inline-flex items-center gap-0.5 rounded-full px-2 py-0.5 text-xs font-medium',
+                    m.unlisted ? 'bg-stone-200 text-stone-500' : 'bg-teal-800/10 text-teal-800',
+                  )}
                 >
-                  {name}
+                  {m.unlisted ? `${name} · ${unlistedHint}` : name}
                   {!locked && (
                     <button
                       type="button"
@@ -175,7 +186,10 @@ export function SplitPersonSelector({
                         e.stopPropagation()
                         onToggle(m.userId)
                       }}
-                      className="ml-0.5 rounded-full p-0.5 hover:bg-teal-800/20"
+                      className={cn(
+                        'ml-0.5 rounded-full p-0.5',
+                        m.unlisted ? 'hover:bg-stone-300' : 'hover:bg-teal-800/20',
+                      )}
                     >
                       <X className="size-2.5" />
                     </button>

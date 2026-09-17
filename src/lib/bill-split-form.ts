@@ -210,3 +210,95 @@ export function buildSplitPayload(
     splitValue: splitType === 'equal' ? 1 : parseSplitNumber(splitValues[uid]),
   }))
 }
+
+/**
+ * Turns a line's STORED splits into a picker selection, via the id mapper the edit effect
+ * resolved from Dexie (`personalPickerIdFor` / `resolveGroupMemberUserId`). Two stored rows that
+ * resolve to the same picker id are the legacy-plus-canonical case (a bill written before an
+ * on-link rewrite); the first row wins so the value shown matches what a single-selection form
+ * can hold.
+ */
+export function remapLineSplits(
+  splits: { user_id: string; split_type: SplitType; split_value: number }[],
+  pickerIdFor: (storedId: string) => string,
+): { selectedUserIds: string[]; splitValues: Record<string, string> } {
+  const selectedUserIds: string[] = []
+  const splitValues: Record<string, string> = {}
+  const seen = new Set<string>()
+  for (const s of splits) {
+    const pid = pickerIdFor(s.user_id)
+    if (seen.has(pid)) continue
+    seen.add(pid)
+    selectedUserIds.push(pid)
+    splitValues[pid] = String(s.split_value)
+  }
+  return { selectedUserIds, splitValues }
+}
+
+/**
+ * Appends the bill's participants the picker cannot list (a contact deleted from the phonebook,
+ * a member removed from the group) as `unlisted` options, so they still render as a removable
+ * chip instead of being silently dropped from view while still being saved.
+ */
+export function mergeUnlistedParticipants<T extends { userId: string }>(
+  listed: T[],
+  participants: { userId: string; displayName: string }[],
+): (T | { userId: string; displayName: string; isCurrentUser: false; unlisted: true })[] {
+  const listedIds = new Set(listed.map((m) => m.userId))
+  const out: (T | { userId: string; displayName: string; isCurrentUser: false; unlisted: true })[] = [
+    ...listed,
+  ]
+  const seen = new Set<string>()
+  for (const p of participants) {
+    if (listedIds.has(p.userId) || seen.has(p.userId)) continue
+    seen.add(p.userId)
+    out.push({ userId: p.userId, displayName: p.displayName, isCurrentUser: false, unlisted: true })
+  }
+  return out
+}
+
+/**
+ * The shared half of the edit-load effect in AddBillPage/AddBillDialog: resolve every distinct
+ * stored id on the bill to its picker id ONCE, then derive the participant list a picker option
+ * cannot cover on its own. `resolve` is injected (`personalPickerIdFor` for a personal bill,
+ * `resolveGroupMemberUserId` for a group one) so this stays free of a Dexie dependency and the
+ * two callers cannot drift on the resolve-once / dedupe / viewer-exclusion rules.
+ */
+export async function resolveBillEditIds(
+  detail: {
+    paid_by: string
+    payorName: string
+    items: { splits: { user_id: string; displayName: string }[] }[]
+  },
+  resolve: (storedId: string) => Promise<string>,
+  viewerId: string,
+): Promise<{
+  pickerIdFor: (storedId: string) => string
+  billParticipants: { userId: string; displayName: string }[]
+}> {
+  const distinctIds = new Set<string>([detail.paid_by])
+  for (const item of detail.items) {
+    for (const s of item.splits) distinctIds.add(s.user_id)
+  }
+  const idMap = new Map<string, string>()
+  for (const id of distinctIds) {
+    idMap.set(id, await resolve(id))
+  }
+  const pickerIdFor = (storedId: string) => idMap.get(storedId) ?? storedId
+
+  const nameByPickerId = new Map<string, string>()
+  for (const item of detail.items) {
+    for (const s of item.splits) {
+      const pid = pickerIdFor(s.user_id)
+      if (!nameByPickerId.has(pid)) nameByPickerId.set(pid, s.displayName)
+    }
+  }
+  const payorPickerId = pickerIdFor(detail.paid_by)
+  if (!nameByPickerId.has(payorPickerId)) nameByPickerId.set(payorPickerId, detail.payorName)
+
+  const billParticipants = [...nameByPickerId.entries()]
+    .filter(([pid]) => pid !== viewerId)
+    .map(([pid, displayName]) => ({ userId: pid, displayName }))
+
+  return { pickerIdFor, billParticipants }
+}

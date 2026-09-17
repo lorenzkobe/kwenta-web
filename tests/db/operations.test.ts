@@ -22,6 +22,9 @@ import {
   updateBundledPaymentDetails,
   updateSettlement,
 } from '@/db/operations'
+import { listCanonicalRelatedProfileIds, personalPickerIdFor } from '@/lib/people'
+import { buildSplitPayload, mergeUnlistedParticipants, remapLineSplits } from '@/lib/bill-split-form'
+import type { SplitType } from '@/types'
 import {
   makeBill,
   makeGroup,
@@ -1504,5 +1507,457 @@ describe('updateSettlement / updateBundledPaymentDetails — the method field', 
 
     expect((await db.settlements.get('A'))!.method).toBe('GoTyme')
     expect((await db.settlements.get('B'))!.method).toBe('Cash')
+  })
+})
+
+/**
+ * Edit-form hydration, end to end against the real write path.
+ *
+ * The reported bug: a personal bill split with a LINKED contact opened for edit with that person
+ * missing from the split chips (and "You" as the payor when the contact had paid). The stored row
+ * is under the ACCOUNT id — `normalizeForPush` rewrites the contact id before submit and the
+ * server's echo is what gets mirrored — while the personal picker lists the same person under the
+ * owned LOCAL contact id. The selection was still counted, validated and saved, so re-adding the
+ * person split the line twice.
+ *
+ * These tests walk the load the same way the edit effect must: `getBillWithDetails` -> resolve each
+ * stored id to its picker id -> `remapLineSplits`. The expected selection is anchored to what
+ * `listCanonicalRelatedProfileIds` actually lists for that person, never to a literal the
+ * implementation could share.
+ */
+/**
+ * Split rows come back from `getBillWithDetails` in Dexie's index-then-primary-key order, and
+ * primary keys are random UUIDs, so their ORDER is undefined. The form never depends on it (chips
+ * follow the `members` order), so selections are compared as sets — sorted, so a duplicate still
+ * fails on length.
+ */
+function expectSameIds(actual: string[], expected: string[]) {
+  expect([...actual].sort()).toEqual([...expected].sort())
+}
+
+describe('edit-form hydration of a personal bill with a linked contact', () => {
+  const ME = 'ME'
+
+  async function seedLinkedContact() {
+    await db.profiles.bulkAdd([
+      makeProfile({ id: ME, display_name: 'Me' }),
+      makeProfile({ id: 'REMOTE', display_name: 'Bob (account)' }),
+      makeProfile({
+        id: 'LOCAL',
+        display_name: 'Bob',
+        is_local: true,
+        owner_id: ME,
+        linked_profile_id: 'REMOTE',
+      }),
+    ])
+  }
+
+  /** The picker-id mapper the edit effect builds: one resolve per DISTINCT stored id. */
+  async function personalMapper(ids: string[]): Promise<(id: string) => string> {
+    const map = new Map<string, string>()
+    for (const id of new Set(ids)) map.set(id, await personalPickerIdFor(ME, id))
+    return (id) => map.get(id) ?? id
+  }
+
+  async function activeSplitsOf(billId: string) {
+    const items = (await db.bill_items.where('bill_id').equals(billId).toArray()).filter(
+      (i) => !i.is_deleted,
+    )
+    const out: { user_id: string; split_type: SplitType; split_value: number }[] = []
+    for (const item of items) {
+      const rows = (await db.item_splits.where('item_id').equals(item.id).toArray()).filter(
+        (s) => !s.is_deleted,
+      )
+      out.push(...rows)
+    }
+    return out
+  }
+
+  it('C1: a split chosen as the LOCAL contact hydrates back to the contact the picker lists', async () => {
+    await seedLinkedContact()
+    const billId = await createBill({
+      title: 'Lunch',
+      currency: 'PHP',
+      groupId: null,
+      createdBy: ME,
+      note: '',
+      items: [
+        {
+          name: 'Pizza',
+          amount: 100,
+          splits: [
+            { userId: ME, splitType: 'custom', splitValue: 40 },
+            { userId: 'LOCAL', splitType: 'custom', splitValue: 60 },
+          ],
+        },
+      ],
+    })
+
+    // PRECONDITION — the row really is stored under the account id. Without this the test would
+    // pass against the old verbatim copy and prove nothing.
+    const stored = await activeSplitsOf(billId)
+    expect(stored.map((s) => s.user_id).sort()).toEqual(['ME', 'REMOTE'])
+
+    const detail = await getBillWithDetails(billId)
+    expect(detail).not.toBeNull()
+    const line = detail!.items[0]
+    const pickerIdFor = await personalMapper(line.splits.map((s) => s.user_id))
+    const hydrated = remapLineSplits(line.splits, pickerIdFor)
+
+    // The picker lists Bob under the owned contact id; the hydrated selection must use that id.
+    const listed = await listCanonicalRelatedProfileIds(ME)
+    expect(listed).toEqual(['LOCAL'])
+    expectSameIds(hydrated.selectedUserIds, [ME, 'LOCAL'])
+    expect(hydrated.splitValues).toEqual({ ME: '40', LOCAL: '60' })
+    // The stored id must NOT survive into the selection — that is the invisible chip.
+    expect(hydrated.selectedUserIds).not.toContain('REMOTE')
+    // Every selected id is one the picker can render (the current user, or a listed peer).
+    for (const id of hydrated.selectedUserIds) expect([ME, ...listed]).toContain(id)
+  })
+
+  it('C1: a bill the linked contact paid hydrates paid_by to the contact, not to "You"', async () => {
+    await seedLinkedContact()
+    const billId = await createBill({
+      title: 'Dinner',
+      currency: 'PHP',
+      groupId: null,
+      createdBy: ME,
+      paidBy: 'LOCAL',
+      note: '',
+      items: [
+        {
+          name: 'Ramen',
+          amount: 100,
+          splits: [
+            { userId: ME, splitType: 'equal', splitValue: 1 },
+            { userId: 'LOCAL', splitType: 'equal', splitValue: 1 },
+          ],
+        },
+      ],
+    })
+
+    // PRECONDITION: the payer is stored under the account id.
+    expect((await db.bills.get(billId))!.paid_by).toBe('REMOTE')
+
+    const detail = await getBillWithDetails(billId)
+    const payorPickerId = await personalPickerIdFor(ME, detail!.paid_by)
+    expect(payorPickerId).toBe('LOCAL')
+    expect(payorPickerId).not.toBe(ME)
+    // The payor option list is the same picker list; it resolves to Bob's name.
+    const payorOptions = [
+      { userId: ME, displayName: 'You', isCurrentUser: true },
+      ...(await Promise.all(
+        (await listCanonicalRelatedProfileIds(ME)).map(async (id) => ({
+          userId: id,
+          displayName: (await db.profiles.get(id))!.display_name,
+          isCurrentUser: false,
+        })),
+      )),
+    ]
+    expect(payorOptions.find((m) => m.userId === payorPickerId)?.displayName).toBe('Bob')
+  })
+
+  it('C3: an item holding BOTH the contact row and the account row hydrates to ONE selection', async () => {
+    await seedLinkedContact()
+    // A legacy row under the contact id next to a canonical row under the account id — what a
+    // bill written before the on-link rewrite (migration 045) can still hold.
+    const bill = makeBill({ id: 'B', created_by: ME, paid_by: ME, total_amount: 100 })
+    const item = makeItem({ id: 'I', bill_id: 'B', amount: 100 })
+    await db.bills.add(bill)
+    await db.bill_items.add(item)
+    await db.item_splits.bulkAdd([
+      makeSplit({ id: 'S1', item_id: 'I', user_id: ME, split_type: 'custom', split_value: 50, computed_amount: 50 }),
+      makeSplit({ id: 'S2', item_id: 'I', user_id: 'LOCAL', split_type: 'custom', split_value: 30, computed_amount: 30 }),
+      makeSplit({ id: 'S3', item_id: 'I', user_id: 'REMOTE', split_type: 'custom', split_value: 20, computed_amount: 20 }),
+    ])
+
+    const detail = await getBillWithDetails('B')
+    const line = detail!.items[0]
+    expect(line.splits).toHaveLength(3)
+    const pickerIdFor = await personalMapper(line.splits.map((s) => s.user_id))
+    const hydrated = remapLineSplits(line.splits, pickerIdFor)
+
+    expectSameIds(hydrated.selectedUserIds, [ME, 'LOCAL'])
+    // First row for that person wins its value. The rows here carry FIXED ids (S1 < S2 < S3), so
+    // Dexie's primary-key order is deterministic and "first" is the LOCAL row.
+    expect(hydrated.splitValues).toEqual({ ME: '50', LOCAL: '30' })
+  })
+
+  it('C7: saving the hydrated selection unchanged re-submits one split per person under the same stored ids', async () => {
+    await seedLinkedContact()
+    const billId = await createBill({
+      title: 'Lunch',
+      currency: 'PHP',
+      groupId: null,
+      createdBy: ME,
+      note: '',
+      items: [
+        {
+          name: 'Pizza',
+          amount: 100,
+          splits: [
+            { userId: ME, splitType: 'equal', splitValue: 1 },
+            { userId: 'LOCAL', splitType: 'equal', splitValue: 1 },
+          ],
+        },
+      ],
+    })
+    const before = await activeSplitsOf(billId)
+    expect(before.map((s) => s.user_id).sort()).toEqual(['ME', 'REMOTE'])
+
+    // Hydrate exactly as the edit form does, then save without touching anything.
+    const detail = await getBillWithDetails(billId)
+    const line = detail!.items[0]
+    const pickerIdFor = await personalMapper(line.splits.map((s) => s.user_id))
+    const hydrated = remapLineSplits(line.splits, pickerIdFor)
+    await updateBill(billId, ME, {
+      title: detail!.title,
+      note: detail!.note,
+      currency: detail!.currency,
+      paidBy: await personalPickerIdFor(ME, detail!.paid_by),
+      items: [
+        {
+          name: line.name,
+          amount: line.amount,
+          splits: buildSplitPayload(hydrated.selectedUserIds, line.splits[0].split_type, hydrated.splitValues),
+        },
+      ],
+    })
+
+    const after = await activeSplitsOf(billId)
+    // One split per person, and the server-facing id set is exactly what it was.
+    expect(after).toHaveLength(2)
+    expect(after.map((s) => s.user_id).sort()).toEqual(['ME', 'REMOTE'])
+    expect((await db.bills.get(billId))!.paid_by).toBe(ME)
+  })
+
+  it('C7: re-adding the (now visible) person is a no-op toggle, not a second split', async () => {
+    // Before the fix the chip was invisible, so the user "added" the person again and the save
+    // carried two rows for one human. After hydration the id is already selected, so a toggle
+    // removes rather than duplicates — pinned here as: the hydrated selection already contains
+    // the picker id, therefore `includes` is true and no second entry can be appended.
+    await seedLinkedContact()
+    const billId = await createBill({
+      title: 'Lunch',
+      currency: 'PHP',
+      groupId: null,
+      createdBy: ME,
+      note: '',
+      items: [
+        {
+          name: 'Pizza',
+          amount: 100,
+          splits: [
+            { userId: ME, splitType: 'equal', splitValue: 1 },
+            { userId: 'LOCAL', splitType: 'equal', splitValue: 1 },
+          ],
+        },
+      ],
+    })
+    const detail = await getBillWithDetails(billId)
+    const line = detail!.items[0]
+    const pickerIdFor = await personalMapper(line.splits.map((s) => s.user_id))
+    const hydrated = remapLineSplits(line.splits, pickerIdFor)
+    const pickedAgain = 'LOCAL' // what tapping Bob in the picker sends to onToggle
+    expect(hydrated.selectedUserIds.includes(pickedAgain)).toBe(true)
+    expect(new Set(hydrated.selectedUserIds).size).toBe(hydrated.selectedUserIds.length)
+  })
+
+  it('C6: a contact deleted from the phonebook after the bill surfaces as an unlisted option', async () => {
+    await db.profiles.bulkAdd([
+      makeProfile({ id: ME, display_name: 'Me' }),
+      makeProfile({ id: 'DEAD', display_name: 'Dana', is_local: true, owner_id: ME }),
+    ])
+    const billId = await createBill({
+      title: 'Coffee',
+      currency: 'PHP',
+      groupId: null,
+      createdBy: ME,
+      note: '',
+      items: [
+        {
+          name: 'Latte',
+          amount: 100,
+          splits: [
+            { userId: ME, splitType: 'equal', splitValue: 1 },
+            { userId: 'DEAD', splitType: 'equal', splitValue: 1 },
+          ],
+        },
+      ],
+    })
+    await db.profiles.update('DEAD', { is_deleted: true })
+
+    const detail = await getBillWithDetails(billId)
+    const line = detail!.items[0]
+    const pickerIdFor = await personalMapper(line.splits.map((s) => s.user_id))
+    const hydrated = remapLineSplits(line.splits, pickerIdFor)
+    expectSameIds(hydrated.selectedUserIds, [ME, 'DEAD'])
+
+    // The picker's base list is what the page builds: "You" plus every listed peer whose profile
+    // is live. A deleted contact is dropped there, which is exactly why it needs an unlisted entry.
+    const base = [{ userId: ME, displayName: 'You', isCurrentUser: true }]
+    for (const id of await listCanonicalRelatedProfileIds(ME)) {
+      const p = await db.profiles.get(id)
+      if (!p || p.is_deleted) continue
+      base.push({ userId: id, displayName: p.display_name, isCurrentUser: false })
+    }
+    expect(base.map((m) => m.userId)).not.toContain('DEAD')
+
+    const participants = line.splits.map((s) => ({ userId: pickerIdFor(s.user_id), displayName: s.displayName }))
+    const members = mergeUnlistedParticipants(base, participants)
+    expect(members.find((m) => m.userId === 'DEAD')).toEqual({
+      userId: 'DEAD',
+      displayName: 'Dana',
+      isCurrentUser: false,
+      unlisted: true,
+    })
+    expect(members.find((m) => m.userId === ME)).not.toHaveProperty('unlisted')
+  })
+})
+
+describe('edit-form hydration of a group bill', () => {
+  const ME = 'ME'
+
+  async function seedGroupWithLinkedMember() {
+    await db.groups.add(makeGroup({ id: 'G', created_by: ME }))
+    await db.group_members.bulkAdd([
+      makeMember({ group_id: 'G', user_id: ME, display_name: 'Me' }),
+      makeMember({ group_id: 'G', user_id: 'REMOTE', display_name: 'Bob' }),
+      makeMember({ group_id: 'G', user_id: 'CHA', display_name: 'Cha' }),
+    ])
+    await db.profiles.bulkAdd([
+      makeProfile({ id: ME }),
+      makeProfile({ id: 'REMOTE', display_name: 'Bob (account)' }),
+      makeProfile({ id: 'CHA' }),
+      makeProfile({ id: 'LOCAL', is_local: true, owner_id: ME, linked_profile_id: 'REMOTE' }),
+    ])
+  }
+
+  async function rosterMapper(ids: string[]): Promise<(id: string) => string> {
+    const map = new Map<string, string>()
+    for (const id of new Set(ids)) map.set(id, await resolveGroupMemberUserId('G', id))
+    return (id) => map.get(id) ?? id
+  }
+
+  it('C8: every roster member on the bill hydrates selected under its roster id', async () => {
+    await seedGroupWithLinkedMember()
+    const billId = await createBill({
+      title: 'Trip',
+      currency: 'PHP',
+      groupId: 'G',
+      createdBy: ME,
+      paidBy: 'LOCAL',
+      note: '',
+      items: [
+        {
+          name: 'Gas',
+          amount: 90,
+          splits: [
+            { userId: ME, splitType: 'equal', splitValue: 1 },
+            { userId: 'LOCAL', splitType: 'equal', splitValue: 1 },
+            { userId: 'CHA', splitType: 'equal', splitValue: 1 },
+          ],
+        },
+      ],
+    })
+    const roster = (await db.group_members.where('group_id').equals('G').toArray())
+      .filter((m) => !m.is_deleted)
+      .map((m) => m.user_id)
+
+    const detail = await getBillWithDetails(billId)
+    const line = detail!.items[0]
+    const pickerIdFor = await rosterMapper(line.splits.map((s) => s.user_id))
+    const hydrated = remapLineSplits(line.splits, pickerIdFor)
+
+    expectSameIds(hydrated.selectedUserIds, [ME, 'REMOTE', 'CHA'])
+    for (const id of hydrated.selectedUserIds) expect(roster).toContain(id)
+    expect(await resolveGroupMemberUserId('G', detail!.paid_by)).toBe('REMOTE')
+  })
+
+  it('C8: a legacy split filed under a non-roster contact id still resolves to the roster member', async () => {
+    await seedGroupWithLinkedMember()
+    // A row written before the roster canonicalisation, still under the device-private contact id.
+    const bill = makeBill({ id: 'B', group_id: 'G', created_by: ME, paid_by: ME, total_amount: 100 })
+    const item = makeItem({ id: 'I', bill_id: 'B', amount: 100 })
+    await db.bills.add(bill)
+    await db.bill_items.add(item)
+    await db.item_splits.bulkAdd([
+      makeSplit({ id: 'S1', item_id: 'I', user_id: ME, computed_amount: 50 }),
+      makeSplit({ id: 'S2', item_id: 'I', user_id: 'LOCAL', computed_amount: 50 }),
+    ])
+
+    const detail = await getBillWithDetails('B')
+    const line = detail!.items[0]
+    const pickerIdFor = await rosterMapper(line.splits.map((s) => s.user_id))
+    const hydrated = remapLineSplits(line.splits, pickerIdFor)
+
+    expectSameIds(hydrated.selectedUserIds, [ME, 'REMOTE'])
+    expect(hydrated.selectedUserIds).not.toContain('LOCAL')
+  })
+
+  it('C8: a legacy row AND its canonical roster row on one item hydrate to one selection', async () => {
+    await seedGroupWithLinkedMember()
+    const bill = makeBill({ id: 'B', group_id: 'G', created_by: ME, paid_by: ME, total_amount: 100 })
+    const item = makeItem({ id: 'I', bill_id: 'B', amount: 100 })
+    await db.bills.add(bill)
+    await db.bill_items.add(item)
+    await db.item_splits.bulkAdd([
+      makeSplit({ id: 'S1', item_id: 'I', user_id: 'LOCAL', split_type: 'custom', split_value: 60, computed_amount: 60 }),
+      makeSplit({ id: 'S2', item_id: 'I', user_id: 'REMOTE', split_type: 'custom', split_value: 40, computed_amount: 40 }),
+    ])
+
+    const detail = await getBillWithDetails('B')
+    const line = detail!.items[0]
+    const pickerIdFor = await rosterMapper(line.splits.map((s) => s.user_id))
+    const hydrated = remapLineSplits(line.splits, pickerIdFor)
+
+    expectSameIds(hydrated.selectedUserIds, ['REMOTE'])
+    // Fixed row ids (S1 < S2) make "first row" deterministic here: the LOCAL row's value wins.
+    expect(hydrated.splitValues).toEqual({ REMOTE: '60' })
+  })
+
+  it('C6/C8: a removed member on an existing bill surfaces as an unlisted, removable option', async () => {
+    await seedGroupWithLinkedMember()
+    const billId = await createBill({
+      title: 'Trip',
+      currency: 'PHP',
+      groupId: 'G',
+      createdBy: ME,
+      note: '',
+      items: [
+        {
+          name: 'Gas',
+          amount: 90,
+          splits: [
+            { userId: ME, splitType: 'equal', splitValue: 1 },
+            { userId: 'CHA', splitType: 'equal', splitValue: 1 },
+          ],
+        },
+      ],
+    })
+    // Cha leaves the group after the bill exists; their split row stays.
+    const chaRow = await db.group_members.where('[group_id+user_id]').equals(['G', 'CHA']).first()
+    await db.group_members.update(chaRow!.id, { is_deleted: true })
+
+    const detail = await getBillWithDetails(billId)
+    const line = detail!.items[0]
+    const pickerIdFor = await rosterMapper(line.splits.map((s) => s.user_id))
+    const hydrated = remapLineSplits(line.splits, pickerIdFor)
+    expectSameIds(hydrated.selectedUserIds, [ME, 'CHA'])
+
+    // The picker's base list is the ACTIVE roster — Cha is no longer on it.
+    const base = (await db.group_members.where('group_id').equals('G').toArray())
+      .filter((m) => !m.is_deleted)
+      .map((m) => ({ userId: m.user_id, displayName: m.display_name, isCurrentUser: m.user_id === ME }))
+    expect(base.map((m) => m.userId)).not.toContain('CHA')
+
+    const participants = line.splits.map((s) => ({ userId: pickerIdFor(s.user_id), displayName: s.displayName }))
+    const members = mergeUnlistedParticipants(base, participants)
+    const cha = members.find((m) => m.userId === 'CHA')
+    expect(cha).toEqual({ userId: 'CHA', displayName: 'CHA', isCurrentUser: false, unlisted: true })
+    // Listed roster members gained no flag.
+    for (const m of members.filter((m) => m.userId !== 'CHA')) expect(m).not.toHaveProperty('unlisted')
+    // The row is still in the selection, so the chip renders and can be toggled off.
+    expect(hydrated.selectedUserIds).toContain('CHA')
   })
 })

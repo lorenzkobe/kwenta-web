@@ -35,8 +35,8 @@ Tests are **mandatory** for this project — we create tests and run testing as 
   - No count is pinned here on purpose. A hard-coded total goes stale the moment anyone adds a test file, and a stale figure is worse than none: the next contributor sees a different number and cannot tell whether they broke something or fixed it. A green suite is the signal.
   - What the number was really guarding is worth stating directly instead: **never delete a test, weaken an assertion, or skip a case to make a change pass.** If a test is genuinely wrong, say so and why in the change itself. (This is not hypothetical — a batch of repair-rule tests was dropped when those rules moved into SQL, and `npm test` stayed green while the behaviour went uncovered.)
 - Coverage inventory:
-  - `tests/lib/` pure logic: `splits`, `utils` (incl. `roundMoney`/`isEffectivelyZero`/`MONEY_EPSILON`), `amount-input`, `bill-split-form`, `bill-navigation`, `account-gate-messages`, `export-utils`, `bill-categories`, `auth-session-flags`, `runtime-flags`, `client-metrics`, `payment-method` (blank/whitespace/null all collapse to `null`, so "no method" is one value rather than four)
-  - `tests/lib/` DB-backed: `people` (identity expansion, participant union, canonical peers), `clear-kwenta-local`, `export-csv`
+  - `tests/lib/` pure logic: `splits`, `utils` (incl. `roundMoney`/`isEffectivelyZero`/`MONEY_EPSILON`), `amount-input`, `bill-split-form` (incl. `remapLineSplits` — stored ids -> picker ids, dedupe first-row-wins; `mergeUnlistedParticipants` — appends participants the picker cannot list as `unlisted` options; `resolveBillEditIds` — the Dexie-free half of the edit-load effect shared by AddBillPage/AddBillDialog: resolves every distinct stored id once via an injected resolver and derives `billParticipants`), `bill-navigation`, `account-gate-messages`, `export-utils`, `bill-categories`, `auth-session-flags`, `runtime-flags`, `client-metrics`, `payment-method` (blank/whitespace/null all collapse to `null`, so "no method" is one value rather than four)
+  - `tests/lib/` DB-backed: `people` (identity expansion, participant union, canonical peers, `personalPickerIdFor` — the picker id a stored account id hydrates to), `clear-kwenta-local`, `export-csv`
   - `tests/lib/settlement.test.ts` is now ONLY `buildMovementChains` — the last pure transform in that module. Everything else it covered moved into SQL with the code (053/061/064).
   - `tests/lib/payment-allocation.test.ts` (was `group-payments`): BOTH split policies, which differ on whether a payment may exceed what is owed — `allocateLumpSum` caps (a group write refuses the excess), `allocatePersonPayment` does not (overpaying flips the tab; there is no credit). Plus `rebalanceCustomAmounts`, the rule that keeps the hand-typed boxes summing to the typed total: the box being edited wins and the one touched longest ago gives way, so no entry sequence can strand the difference. Before this, the per-context boxes REDEFINED the total — typing 4,000 and then splitting by hand recorded something else.
   - `tests/lib/money-flow.test.ts`: the running-balance walk, plus `collapsePaymentLegs` — the legs of one bundle merge into one statement row carrying a `parts` entry per context. Pinned hard: a personal-first split no longer reports the whole payment as personal (it kept only the FIRST leg's context, so group money rendered as personal money).
@@ -52,6 +52,7 @@ Tests are **mandatory** for this project — we create tests and run testing as 
   - `tests/lib/staged-rows`: rows this device wrote and has not pushed — the only thing that makes an offline write visible now that a list IS the server response. Pins that a staged bill is never reported `settled`, carries no pairwise nets, and reports a NULL share when the viewer is not on it; and that a confirmed row is never served from here (the endpoint stays authoritative).
   - `tests/lib/local-search`: the offline fallback for global search (substring/case, email match, deletions and the viewer excluded, per-kind cap keeping the newest). Authoritative search is `kwenta_search`; this can only ever be NARROWER.
   - `tests/hooks/useServerData.test.tsx`: **the one hook test in the suite**, driven by React's own `act` + `react-dom/client` (no testing-library dependency; `vitest.config.ts` sets `esbuild.jsx: 'automatic'` for it). It pins what a pure function cannot express: a subject change (`/app/people/alice` → `/bob`) clears `data`, `error` and `fromCache` so one person's balance never renders under another's name, while an invalidation TICK keeps the current data so a mutation does not blank the screen.
+  - `tests/components/SplitPersonSelector.test.tsx`: the second React `act` + `react-dom/client` test in the suite. Pins the `unlisted` option contract — a participant the picker cannot list (deleted contact, removed member) still renders as a muted, removable chip with a "not in contacts/group" hint, keeps its value row, drops out of the dropdown once deselected, and is excluded from "Select all".
   - Remaining gaps (network-orchestration heavy, lower ROI): `realtime-events` subscriptions, `export-pdf` (jsPDF rendering).
   - **SQL is covered by `npm run test:sql`, not by Vitest.** Vitest has no Postgres, so anything living in SQL — the `kwenta_repair_settlements` rules, the read/write predicate split in `049`, `relevant_bill_ids_for_user` (a wrong set here is a cross-account leak, not a slow query) — used to be untestable, and a batch of repair-rule tests once vanished without `npm test` noticing. See the SQL Test Harness section below. **Both suites must pass.**
 
@@ -510,6 +511,15 @@ person, deduped across local contact, linked account and manual merges. Delibera
 — a local contact exists only on the device that created it, and picking who to split with has to
 work offline because creating a bill does. Its SQL twin is `kwenta_canonical_peer_ids` (054/055);
 the two must agree, and `tests/lib/people.test.ts` plus `055`'s suite keep them honest.
+
+**`personalPickerIdFor(meId, profileId)`** — the picker id a STORED personal-bill id hydrates to.
+`item_splits.user_id`/`bills.paid_by` hold the canonical ACCOUNT id, while the picker lists that
+same person under the owned LOCAL contact id, so an edit form must translate before it can select
+anything. Group bills translate the same way through `resolveGroupMemberUserId` (roster id)
+instead. Either translation can still miss — a contact deleted from the phonebook, a member
+removed from the group — and that id is surfaced rather than dropped: `mergeUnlistedParticipants`
+(`src/lib/bill-split-form.ts`) appends it as an `unlisted` option so the edit form still shows and
+can remove it, instead of silently keeping (and re-saving) a selection nothing renders.
 
 ### Balance Computation
 
