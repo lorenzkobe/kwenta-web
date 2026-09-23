@@ -5,7 +5,7 @@ import { fetchBalancesOverview, fetchRecentBills, totalsToMap } from '@/api/bala
 import { useServerData } from '@/hooks/useServerData'
 import { useCurrentUser } from '@/hooks/useCurrentUser'
 import { formatCurrency, timeAgo } from '@/lib/utils'
-import { SavedCopyNotice } from '@/components/common/SavedCopyNotice'
+import { RefreshingChip, SavedCopyNotice } from '@/components/common/SavedCopyNotice'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 
@@ -190,7 +190,8 @@ export function HomePage() {
           </div>
         )}
 
-        {overview.fromCache && overview.data && (
+        <RefreshingChip show={overview.revalidating} className="mt-3 bg-white/10 text-white/60" />
+        {overview.fromCache && !overview.revalidating && overview.data && (
           <SavedCopyNotice fetchedAt={overview.fetchedAt} tone="dark" className="mt-3" />
         )}
       </section>

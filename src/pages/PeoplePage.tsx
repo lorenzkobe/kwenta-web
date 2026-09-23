@@ -7,7 +7,7 @@ import { fetchContactsWithBalances, totalsToMap, type ContactBalanceRow } from '
 import { useServerData } from '@/hooks/useServerData'
 import { loadStagedContactRows } from '@/lib/staged-rows'
 import { formatPairwiseSummary } from '@/lib/people'
-import { SavedCopyNotice } from '@/components/common/SavedCopyNotice'
+import { RefreshingChip, SavedCopyNotice } from '@/components/common/SavedCopyNotice'
 import { createLocalProfile } from '@/db/operations'
 import { useCurrentUser } from '@/hooks/useCurrentUser'
 import { cn } from '@/lib/utils'
@@ -184,7 +184,10 @@ export function PeoplePage() {
         </div>
       )}
 
-      {contacts.fromCache && contacts.data && <SavedCopyNotice fetchedAt={contacts.fetchedAt} />}
+      <RefreshingChip show={contacts.revalidating} />
+      {contacts.fromCache && !contacts.revalidating && contacts.data && (
+        <SavedCopyNotice fetchedAt={contacts.fetchedAt} />
+      )}
 
       {contacts.error && !contacts.data ? (
         // `rowsLoading` is `rows === undefined`, which a failed fetch never clears — without this

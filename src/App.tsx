@@ -1,4 +1,4 @@
-import { lazy, Suspense } from 'react'
+import { lazy, Suspense, useEffect } from 'react'
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom'
 import { Loader2 } from 'lucide-react'
 import { Toaster } from 'sonner'
@@ -9,21 +9,72 @@ import { RequireGuest } from '@/components/auth/RequireGuest'
 import { RequireAdmin } from '@/components/auth/RequireAdmin'
 import { AuthProvider } from '@/hooks/AuthProvider'
 
-const LoginPage = lazy(() => import('@/pages/LoginPage').then((m) => ({ default: m.LoginPage })))
-const HomePage = lazy(() => import('@/pages/HomePage').then((m) => ({ default: m.HomePage })))
-const BillsPage = lazy(() => import('@/pages/BillsPage').then((m) => ({ default: m.BillsPage })))
-const BillDetailPage = lazy(() => import('@/pages/BillDetailPage').then((m) => ({ default: m.BillDetailPage })))
-const AddBillPage = lazy(() => import('@/pages/AddBillPage').then((m) => ({ default: m.AddBillPage })))
-const GroupsPage = lazy(() => import('@/pages/GroupsPage').then((m) => ({ default: m.GroupsPage })))
-const GroupDetailPage = lazy(() => import('@/pages/GroupDetailPage').then((m) => ({ default: m.GroupDetailPage })))
-const PeoplePage = lazy(() => import('@/pages/PeoplePage').then((m) => ({ default: m.PeoplePage })))
-const PersonDetailPage = lazy(() =>
-  import('@/pages/PersonDetailPage').then((m) => ({ default: m.PersonDetailPage })),
-)
-const SettingsPage = lazy(() => import('@/pages/SettingsPage').then((m) => ({ default: m.SettingsPage })))
-const AdminUsersPage = lazy(() =>
-  import('@/pages/AdminUsersPage').then((m) => ({ default: m.AdminUsersPage })),
-)
+const importLoginPage = () => import('@/pages/LoginPage').then((m) => ({ default: m.LoginPage }))
+const importHomePage = () => import('@/pages/HomePage').then((m) => ({ default: m.HomePage }))
+const importBillsPage = () => import('@/pages/BillsPage').then((m) => ({ default: m.BillsPage }))
+const importBillDetailPage = () =>
+  import('@/pages/BillDetailPage').then((m) => ({ default: m.BillDetailPage }))
+const importAddBillPage = () => import('@/pages/AddBillPage').then((m) => ({ default: m.AddBillPage }))
+const importGroupsPage = () => import('@/pages/GroupsPage').then((m) => ({ default: m.GroupsPage }))
+const importGroupDetailPage = () =>
+  import('@/pages/GroupDetailPage').then((m) => ({ default: m.GroupDetailPage }))
+const importPeoplePage = () => import('@/pages/PeoplePage').then((m) => ({ default: m.PeoplePage }))
+const importPersonDetailPage = () =>
+  import('@/pages/PersonDetailPage').then((m) => ({ default: m.PersonDetailPage }))
+const importSettingsPage = () => import('@/pages/SettingsPage').then((m) => ({ default: m.SettingsPage }))
+const importAdminUsersPage = () =>
+  import('@/pages/AdminUsersPage').then((m) => ({ default: m.AdminUsersPage }))
+
+const LoginPage = lazy(importLoginPage)
+const HomePage = lazy(importHomePage)
+const BillsPage = lazy(importBillsPage)
+const BillDetailPage = lazy(importBillDetailPage)
+const AddBillPage = lazy(importAddBillPage)
+const GroupsPage = lazy(importGroupsPage)
+const GroupDetailPage = lazy(importGroupDetailPage)
+const PeoplePage = lazy(importPeoplePage)
+const PersonDetailPage = lazy(importPersonDetailPage)
+const SettingsPage = lazy(importSettingsPage)
+const AdminUsersPage = lazy(importAdminUsersPage)
+
+/**
+ * The signed-in pages, warmed once the shell is up so the first tap on a tab does not wait on a
+ * chunk download. Login and admin are left out: a signed-in user is past the first and almost
+ * never an admin.
+ */
+const SHELL_PAGE_IMPORTS = [
+  importHomePage,
+  importBillsPage,
+  importBillDetailPage,
+  importAddBillPage,
+  importGroupsPage,
+  importGroupDetailPage,
+  importPeoplePage,
+  importPersonDetailPage,
+  importSettingsPage,
+]
+
+let shellPagesWarmed = false
+
+function WarmShellPages() {
+  useEffect(() => {
+    if (shellPagesWarmed) return
+    const connection = (navigator as Navigator & { connection?: { saveData?: boolean } }).connection
+    if (connection?.saveData) return
+    const warm = () => {
+      shellPagesWarmed = true
+      // A failed prefetch is not an error: the route's own lazy() retries when it is visited.
+      for (const load of SHELL_PAGE_IMPORTS) void load().catch(() => {})
+    }
+    if (typeof window.requestIdleCallback === 'function') {
+      const id = window.requestIdleCallback(warm)
+      return () => window.cancelIdleCallback(id)
+    }
+    const t = window.setTimeout(warm, 1500)
+    return () => window.clearTimeout(t)
+  }, [])
+  return null
+}
 
 function PageLoader() {
   return (
@@ -52,7 +103,15 @@ function App() {
               <Route path="/login" element={<LoginPage />} />
             </Route>
             <Route element={<RequireAuth />}>
-              <Route path="/app" element={<AppShell />}>
+              <Route
+                path="/app"
+                element={
+                  <>
+                    <AppShell />
+                    <WarmShellPages />
+                  </>
+                }
+              >
                 <Route index element={<HomePage />} />
                 <Route path="bills" element={<BillsPage />} />
                 <Route path="bills/new" element={<AddBillPage />} />

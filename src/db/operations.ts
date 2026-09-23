@@ -16,6 +16,7 @@ import { generateId, getDeviceId, now } from '@/lib/utils'
 import { normalizePaymentMethod } from '@/lib/payment-method'
 import { enqueuePendingMutation } from '@/sync/cloud-first-mutations'
 import { commitCloudFirstWrite, type CloudWritePayload } from '@/sync/cloud-write'
+import { loadBillIntoMirror } from '@/sync/bill-mirror'
 import {
   notifyAddedToGroup,
   notifyBillParticipantsCreated,
@@ -298,7 +299,7 @@ export async function createBill(input: CreateBillInput): Promise<string> {
 
   // COMMIT — cloud first. A rejection throws here and leaves Dexie untouched, so a failed
   // save cannot leave a bill on screen that the user retries into a duplicate.
-  await commitCloudFirstWrite({
+  const { mode } = await commitCloudFirstWrite({
     actorUserId: input.createdBy,
     payload,
     stageOffline: async () => {
@@ -351,6 +352,7 @@ export async function createBill(input: CreateBillInput): Promise<string> {
     billTitle: input.title,
     groupId: input.groupId,
     groupName,
+    cloudConfirmed: mode === 'cloud',
   })
 
   return billId
@@ -402,8 +404,13 @@ export async function updateBill(
 ): Promise<void> {
   const timestamp = now()
   const bill = await db.bills.get(billId)
-  if (!bill || bill.is_deleted) return
-  if (bill.created_by !== editorUserId) return
+  // Every refusal throws: a silent return let the page navigate as if the edit had been saved.
+  // A bill missing here means the edit form never loaded it (the edit screens load it through
+  // `loadBillIntoMirror` first), so there is nothing trustworthy to save — fetching it now and
+  // applying the form would overwrite the real items with whatever the blank form held.
+  if (!bill) throw new Error("This bill isn't loaded on this device yet. Reopen it and try again.")
+  if (bill.is_deleted) throw new Error('This bill has been deleted.')
+  if (bill.created_by !== editorUserId) throw new Error('Only the person who added this bill can edit it.')
 
   // Resolve chosen ids to roster member ids before the transaction (see createBill).
   const groupId = bill.group_id
@@ -524,9 +531,15 @@ export async function deleteBill(
   userId: string,
   options?: { collect?: MutationRowCollector },
 ) {
+  // A cascade (deletePerson, deleteGroup) walks bills this device already holds and must not turn
+  // into one request per bill, or abort the whole cascade over one row it could not load.
+  if (!options?.collect) await loadBillIntoMirror(billId)
   const bill = await db.bills.get(billId)
   if (!bill || bill.is_deleted) return
-  if (bill.created_by !== userId) return
+  if (bill.created_by !== userId) {
+    if (options?.collect) return
+    throw new Error('Only the person who added this bill can delete it.')
+  }
 
   const timestamp = now()
 
@@ -587,10 +600,91 @@ export async function deleteBill(
 
 // ── Groups ───────────────────────────────────────────
 
+/**
+ * Membership rows for adding existing profiles to a group, built without reading the group row so
+ * `createGroup` can use it for a group that does not exist yet. Skips a missing or deleted profile,
+ * anyone whose local id or membership id is in `activeMemberIds`, and a second pick that resolves
+ * to the same membership id (a linked contact and its account are one member).
+ */
+async function buildExistingMemberRows(input: {
+  groupId: string
+  memberUserIds: string[]
+  addedBy: string
+  activeMemberIds: Set<string>
+}): Promise<{ members: GroupMember[]; activity: ActivityLog[]; pickedIds: string[] }> {
+  const { groupId, addedBy, activeMemberIds } = input
+  const members: GroupMember[] = []
+  const activity: ActivityLog[] = []
+  const pickedIds: string[] = []
+  if (input.memberUserIds.length === 0) return { members, activity, pickedIds }
+
+  const profiles = await db.profiles.bulkGet(input.memberUserIds)
+  const taken = new Set(activeMemberIds)
+  for (let i = 0; i < input.memberUserIds.length; i++) {
+    const pickedId = input.memberUserIds[i]
+    const p = profiles[i]
+    if (!p || p.is_deleted) continue
+    const memberRowUserId = membershipUserIdForProfile(p)
+    if (taken.has(pickedId) || taken.has(memberRowUserId)) continue
+    taken.add(memberRowUserId)
+
+    const memberId = generateId()
+    members.push({
+      ...syncFields({ id: memberId }),
+      group_id: groupId,
+      user_id: memberRowUserId,
+      display_name: p.display_name,
+      joined_at: now(),
+    })
+    activity.push({
+      ...syncFields(),
+      group_id: groupId,
+      user_id: addedBy,
+      action: 'created',
+      entity_type: 'group',
+      entity_id: memberId,
+      description: `Added "${p.display_name}" to group`,
+    })
+    pickedIds.push(pickedId)
+  }
+  return { members, activity, pickedIds }
+}
+
+/** One `added_to_group` notification entry for every member a single write brought in. */
+async function notifyMembersAdded(input: {
+  groupId: string
+  groupName: string
+  addedBy: string
+  pickedIds: string[]
+  cloudConfirmed: boolean
+}): Promise<void> {
+  if (input.pickedIds.length === 0) return
+  const [actor, resolved] = await Promise.all([
+    db.profiles.get(input.addedBy),
+    Promise.all(input.pickedIds.map((id) => resolveRecipientProfileIdForNotify(id))),
+  ])
+  const recipientIds = [
+    ...new Set(resolved.filter((r): r is string => Boolean(r) && r !== input.addedBy)),
+  ]
+  void notifyAddedToGroup({
+    actorId: input.addedBy,
+    actorName: actor?.display_name?.trim() || 'Someone',
+    recipientIds,
+    groupId: input.groupId,
+    groupName: input.groupName,
+    cloudConfirmed: input.cloudConfirmed,
+  })
+}
+
+/**
+ * Creates the group, the creator's membership and every picked member in ONE submit, so the group
+ * and its roster land together or not at all.
+ */
 export async function createGroup(
   name: string,
   currency: string,
   createdBy: string,
+  memberUserIds: string[] = [],
 ): Promise<string> {
   const groupId = generateId()
   const inviteCode = generateId().slice(0, 6).toUpperCase()
@@ -611,12 +705,19 @@ export async function createGroup(
     display_name: creatorProfile?.display_name ?? createdBy,
     joined_at: now(),
   }
+  const added = await buildExistingMemberRows({
+    groupId,
+    memberUserIds,
+    addedBy: createdBy,
+    activeMemberIds: new Set([createdBy]),
+  })
+  await Promise.all(added.members.map((m) => fetchRemoteProfileIntoDexie(m.user_id)))
 
-  await commitRows({
+  const { mode } = await commitRows({
     actorUserId: createdBy,
     payload: {
       groups: [group],
-      group_members: [member],
+      group_members: [member, ...added.members],
       activity_log: [
         {
           ...syncFields(),
@@ -627,6 +728,7 @@ export async function createGroup(
           entity_id: groupId,
           description: `Created group "${name}"`,
         },
+        ...added.activity,
       ],
     },
     pending: {
@@ -636,6 +738,14 @@ export async function createGroup(
       payload: { name, currency },
       routeHint: `/app/groups/${groupId}`,
     },
+  })
+
+  await notifyMembersAdded({
+    groupId,
+    groupName: name,
+    addedBy: createdBy,
+    pickedIds: added.pickedIds,
+    cloudConfirmed: mode === 'cloud',
   })
   return groupId
 }
@@ -758,7 +868,7 @@ export async function addGroupMember(
     joined_at: now(),
   }
 
-  await commitRows({
+  const { mode } = await commitRows({
     actorUserId: addedBy,
     payload: {
       ...(newProfiles.length > 0 && { profiles: newProfiles }),
@@ -796,9 +906,10 @@ export async function addGroupMember(
     void notifyAddedToGroup({
       actorId: addedBy,
       actorName: actor?.display_name?.trim() || 'Someone',
-      recipientId: recipient,
+      recipientIds: [recipient],
       groupId,
       groupName: group.name,
+      cloudConfirmed: mode === 'cloud',
     })
   }
 
@@ -854,10 +965,13 @@ export async function createLocalProfile(
   return { outcome: 'created', id: userId }
 }
 
-/** Add someone who already exists in your phonebook or groups (by profile id). */
-export async function addExistingGroupMember(
+/**
+ * Add people who already exist in your phonebook or groups (by profile id) in ONE submit. Anyone
+ * already an active member is skipped; nothing to add means nothing is submitted.
+ */
+export async function addExistingGroupMembers(
   groupId: string,
-  memberUserId: string,
+  memberUserIds: string[],
   addedBy: string,
 ): Promise<void> {
   const targetGroup = await db.groups.get(groupId)
@@ -866,73 +980,39 @@ export async function addExistingGroupMember(
     throw new Error('Only the group creator can add members.')
   }
 
-  const p = await db.profiles.get(memberUserId)
-  if (!p || p.is_deleted) return
+  const roster = await db.group_members.where('group_id').equals(groupId).toArray()
+  const added = await buildExistingMemberRows({
+    groupId,
+    memberUserIds,
+    addedBy,
+    activeMemberIds: new Set(roster.filter((m) => !m.is_deleted).map((m) => m.user_id)),
+  })
+  if (added.members.length === 0) return
 
-  const memberRowUserId = membershipUserIdForProfile(p)
-  const existingLocal = await db.group_members
-    .where('[group_id+user_id]')
-    .equals([groupId, memberUserId])
-    .first()
-  const existingCanon =
-    memberRowUserId !== memberUserId
-      ? await db.group_members.where('[group_id+user_id]').equals([groupId, memberRowUserId]).first()
-      : undefined
-  if (
-    (existingLocal && !existingLocal.is_deleted) ||
-    (existingCanon && !existingCanon.is_deleted)
-  ) {
-    // Already a member — nothing is written, so there is nothing to submit.
-    return
-  }
+  await Promise.all(added.members.map((m) => fetchRemoteProfileIntoDexie(m.user_id)))
 
-  await fetchRemoteProfileIntoDexie(memberRowUserId)
-
-  const memberId = generateId()
-  await commitRows({
+  const { mode } = await commitRows({
     actorUserId: addedBy,
     payload: {
-      group_members: [
-        {
-          ...syncFields({ id: memberId }),
-          group_id: groupId,
-          user_id: memberRowUserId,
-          display_name: p.display_name,
-          joined_at: now(),
-        },
-      ],
-      activity_log: [
-        {
-          ...syncFields(),
-          group_id: groupId,
-          user_id: addedBy,
-          action: 'created',
-          entity_type: 'group',
-          entity_id: memberId,
-          description: `Added "${p.display_name}" to group`,
-        },
-      ],
+      group_members: added.members,
+      activity_log: added.activity,
     },
     pending: {
-      operation: 'add_group_member',
-      entityType: 'group_member',
-      entityId: memberId,
-      payload: { groupId, memberUserId: memberRowUserId },
+      operation: 'add_group_members',
+      entityType: 'group',
+      entityId: groupId,
+      payload: { groupId, memberUserIds: added.members.map((m) => m.user_id) },
       routeHint: `/app/groups/${groupId}`,
     },
   })
-  const group = await db.groups.get(groupId)
-  const actor = await db.profiles.get(addedBy)
-  const recipient = await resolveRecipientProfileIdForNotify(memberUserId)
-  if (recipient && recipient !== addedBy && group && !group.is_deleted) {
-    void notifyAddedToGroup({
-      actorId: addedBy,
-      actorName: actor?.display_name?.trim() || 'Someone',
-      recipientId: recipient,
-      groupId,
-      groupName: group.name,
-    })
-  }
+
+  await notifyMembersAdded({
+    groupId,
+    groupName: targetGroup.name,
+    addedBy,
+    pickedIds: added.pickedIds,
+    cloudConfirmed: mode === 'cloud',
+  })
 }
 
 /** Point a local contact at a synced account (for display & future migration). */
@@ -1076,6 +1156,7 @@ export async function linkProfileToRemote(
     actorName: actor?.display_name?.trim() || 'Someone',
     recipientId: remoteProfileId,
     linkedAsName: local.display_name,
+    cloudConfirmed: mode === 'cloud',
   })
 
   // 'queued' means the link exists on THIS device only. That is the state that shows the person
@@ -1561,8 +1642,8 @@ async function commitSettlementRows(input: {
     payload: unknown
     routeHint: string
   }
-}): Promise<void> {
-  await commitCloudFirstWrite({
+}): Promise<{ mode: 'cloud' | 'queued' }> {
+  return commitCloudFirstWrite({
     actorUserId: input.actorUserId,
     payload: { settlements: input.settlements, activity_log: [input.activity] },
     stageOffline: async () => {
@@ -1676,11 +1757,13 @@ export async function createSettlement(
   // collector: this leg's rows are handed over and NOTHING is written or submitted here, so the
   // caller can land every leg in a single round trip. Collecting rather than staging is what
   // keeps the payment atomic without needing to undo half-written legs on failure.
+  // A collected leg is not submitted here, so its notification cannot claim a confirmed write.
+  let cloudConfirmed = false
   if (options?.collect) {
     options.collect.settlements.push(settlement)
     options.collect.activity_log.push(settlementActivity)
   } else {
-    await commitCloudFirstWrite({
+    const { mode } = await commitCloudFirstWrite({
       actorUserId: markedBy,
       payload: { settlements: [settlement], activity_log: [settlementActivity] },
       stageOffline: async () => {
@@ -1700,6 +1783,7 @@ export async function createSettlement(
         })
       },
     })
+    cloudConfirmed = mode === 'cloud'
   }
 
   const actor = await db.profiles.get(markedBy)
@@ -1732,6 +1816,7 @@ export async function createSettlement(
       groupName,
       currency,
       payments,
+      cloudConfirmed,
     })
   }
 
@@ -1849,7 +1934,7 @@ export async function createBundledGroupSettlement(params: {
 
   // One payment to several people is one submission: a partially-landed bundle would clear
   // some recipients' balances and not others.
-  await commitSettlementRows({
+  const { mode } = await commitSettlementRows({
     actorUserId: params.markedBy,
     settlements: bundleRows,
     activity: {
@@ -1898,6 +1983,7 @@ export async function createBundledGroupSettlement(params: {
     groupName: group.name,
     currency: params.currency,
     payments,
+    cloudConfirmed: mode === 'cloud',
   })
 
   return { bundleId, settlementIds }
@@ -1974,7 +2060,7 @@ export async function recordDecomposedSettlement(params: {
 
   // A decomposed settle-up is one agreed set of transfers. Landing only some legs would leave
   // the group half-settled in a way no member intended.
-  await commitSettlementRows({
+  const { mode } = await commitSettlementRows({
     actorUserId: params.markedBy,
     settlements: legRows,
     activity: {
@@ -2021,6 +2107,7 @@ export async function recordDecomposedSettlement(params: {
     groupName: group.name,
     currency: params.currency,
     payments,
+    cloudConfirmed: mode === 'cloud',
   })
 
   return { bundleId, settlementIds }
@@ -2034,6 +2121,7 @@ async function emitSinglePaymentNotification(params: {
   currency: string
   groupId: string | null
   settlementId: string
+  cloudConfirmed: boolean
 }) {
   const actor = await db.profiles.get(params.markedBy)
   const [fromProfile, toProfile] = await Promise.all([
@@ -2065,6 +2153,7 @@ async function emitSinglePaymentNotification(params: {
     groupName,
     currency: params.currency,
     payments,
+    cloudConfirmed: params.cloudConfirmed,
   })
 }
 
@@ -2122,7 +2211,7 @@ export async function recordPersonPayment(params: {
   // contexts, so a partial landing would misstate the balance in both directions — the group leg
   // cleared but the personal one not, or the reverse. One RPC is one Postgres transaction, so
   // either all legs are stored or none are.
-  await commitCloudFirstWrite({
+  const { mode } = await commitCloudFirstWrite({
     actorUserId: params.markedBy,
     payload: { settlements: collect.settlements, activity_log: collect.activity_log },
     stageOffline: async () => {
@@ -2160,6 +2249,7 @@ export async function recordPersonPayment(params: {
       currency: params.currency,
       groupId: notifyGroupId,
       settlementId: notifyEntityId,
+      cloudConfirmed: mode === 'cloud',
     })
   }
 

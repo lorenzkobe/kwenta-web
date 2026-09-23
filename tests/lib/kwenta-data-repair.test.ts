@@ -41,6 +41,8 @@ const CLEAN = { orphans: 0, duplicates: 0, canonicalized: 0, total: 0, dryRun: f
 
 beforeEach(async () => {
   await resetDb()
+  localStorage.clear()
+  vi.useRealTimers()
   __resetAutoRepairGuardForTests()
   mocks.rpc.mockReset()
   mocks.fullSync.mockReset()
@@ -138,15 +140,85 @@ describe('previewSettlementRepair', () => {
 })
 
 describe('maybeAutoRepairData', () => {
-  it('runs the server repair once per session', async () => {
+  // Changed on purpose (user decision, perf pass): this used to assert that a fresh session
+  // (page reload) repairs AGAIN. The repair is a heavy server query that ran on nearly every app
+  // open, so it is now throttled to once per 24h per user per device.
+  it('runs the server repair once per session, and a reload within 24h does not repeat it', async () => {
     await maybeAutoRepairData('me')
     await maybeAutoRepairData('me')
     expect(mocks.rpc).toHaveBeenCalledTimes(1)
 
-    // A fresh session (page reload, or sign-out) checks again.
     __resetAutoRepairGuardForTests()
     await maybeAutoRepairData('me')
+    expect(mocks.rpc).toHaveBeenCalledTimes(1)
+  })
+
+  it('repairs again once the last successful run is 24h or more old', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-09-23T08:00:00.000Z'))
+    await maybeAutoRepairData('me')
+    expect(mocks.rpc).toHaveBeenCalledTimes(1)
+
+    __resetAutoRepairGuardForTests()
+    vi.setSystemTime(new Date('2026-09-24T07:59:59.000Z'))
+    await maybeAutoRepairData('me')
+    expect(mocks.rpc).toHaveBeenCalledTimes(1)
+
+    __resetAutoRepairGuardForTests()
+    vi.setSystemTime(new Date('2026-09-24T08:00:00.000Z'))
+    await maybeAutoRepairData('me')
     expect(mocks.rpc).toHaveBeenCalledTimes(2)
+  })
+
+  it('treats a stamp in the future (a clock that ran fast) as expired', async () => {
+    localStorage.setItem('kwenta_auto_repair_at:me', '2099-01-01T00:00:00.000Z')
+    await maybeAutoRepairData('me')
+    expect(mocks.rpc).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not stamp a failed run, so the next session retries', async () => {
+    mocks.rpc.mockRejectedValue(new Error('network down'))
+    await maybeAutoRepairData('me')
+    expect(localStorage.getItem('kwenta_auto_repair_at:me')).toBeNull()
+
+    __resetAutoRepairGuardForTests()
+    mocks.rpc.mockResolvedValue({ data: CLEAN, error: null })
+    await maybeAutoRepairData('me')
+    expect(mocks.rpc).toHaveBeenCalledTimes(2)
+  })
+
+  it('keeps the stamp per user, so another account on this device still repairs', async () => {
+    await maybeAutoRepairData('me')
+    __resetAutoRepairGuardForTests()
+    await maybeAutoRepairData('someone-else')
+    expect(mocks.rpc).toHaveBeenCalledTimes(2)
+  })
+
+  it('runs when storage throws, rather than failing or skipping', async () => {
+    // defineProperty on the instance: spying on Storage is not consulted under happy-dom (see
+    // tests/api/cache.test.ts), which would let this pass without the failure path running.
+    const originalGet = localStorage.getItem.bind(localStorage)
+    const originalSet = localStorage.setItem.bind(localStorage)
+    let reads = 0
+    const deny = (value: unknown) =>
+      Object.defineProperty(localStorage, value === 'get' ? 'getItem' : 'setItem', {
+        configurable: true,
+        writable: true,
+        value: () => {
+          if (value === 'get') reads++
+          throw new Error('denied')
+        },
+      })
+    deny('get')
+    deny('set')
+    try {
+      await expect(maybeAutoRepairData('me')).resolves.toBeUndefined()
+      expect(mocks.rpc).toHaveBeenCalledTimes(1)
+      expect(reads).toBeGreaterThan(0)
+    } finally {
+      Object.defineProperty(localStorage, 'getItem', { configurable: true, writable: true, value: originalGet })
+      Object.defineProperty(localStorage, 'setItem', { configurable: true, writable: true, value: originalSet })
+    }
   })
 
   it('never throws when the repair fails, and retries next session', async () => {

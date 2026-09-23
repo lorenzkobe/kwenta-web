@@ -191,8 +191,9 @@ export type SyncRoundTripResult = {
   pulled: number
   /**
    * Rows this round trip actually wrote to Dexie — the only honest answer to "did anything move?".
-   * Callers use it to decide whether server-backed screens need to re-read; `pulled` cannot, because
-   * every bundle is complete and so is large on a round trip that changed nothing.
+   * `syncRoundTrip` itself bumps `dataVersion` when this is > 0 (see `invalidateIfMirrorMoved`),
+   * so callers must NOT bump for it again; `pulled` cannot gate anything, because every bundle is
+   * complete and so is large on a round trip that changed nothing.
    */
   changed: number
   errors: string[]
@@ -343,8 +344,13 @@ export async function isEntityUnsyncedForActor(
     }
     case 'settlement':
       return isUnsynced(await db.settlements.get(entityId))
-    case 'group':
-      return isUnsynced(await db.groups.get(entityId))
+    case 'group': {
+      if (isUnsynced(await db.groups.get(entityId))) return true
+      // createGroup and addExistingGroupMembers submit membership rows under the GROUP's entity:
+      // a dropped member row must not let the mutation report "applied".
+      const members = await db.group_members.where('group_id').equals(entityId).toArray()
+      return members.some(isUnsynced)
+    }
     case 'profile': {
       // The profile row itself...
       if (isUnsynced(await db.profiles.get(entityId))) return true
@@ -810,8 +816,20 @@ export function isPullBundle(x: unknown): x is KwentaSyncPullBundle {
 }
 
 /**
+ * The mirror moved, so every mounted server-backed screen must re-read. Done HERE rather than by
+ * each caller because this function has many (sync manager, data repair, conflict replay, the
+ * notification flush, realtime, the bell, bill detail) and a caller that forgot left money
+ * screens stale — which the realtime path then could not repair, since it only bumps when an
+ * event finds a row that differs from the mirror.
+ */
+function invalidateIfMirrorMoved(changed: number): void {
+  if (changed > 0) useAppStore.getState().bumpDataVersion()
+}
+
+/**
  * One RPC: apply the push payload on the server, then return the caller's COMPLETE visible row
- * set (see {@link PULL_SINCE_EPOCH}) and mirror it into Dexie.
+ * set (see {@link PULL_SINCE_EPOCH}) and mirror it into Dexie. Bumps `dataVersion` once when the
+ * mirror moved (`changed > 0`).
  * Falls back to pushChanges + pullChanges if the RPC is missing (older DB).
  */
 export async function syncRoundTrip(userId: string): Promise<SyncRoundTripResult> {
@@ -910,6 +928,7 @@ export async function syncRoundTrip(userId: string): Promise<SyncRoundTripResult
     if (code === 'PGRST202' || /does not exist/i.test(msg)) {
       const pushResult = await pushChanges()
       const pullResult = await pullChanges(userId)
+      invalidateIfMirrorMoved(pullResult.pulled)
       return {
         pushed: pushResult.pushed,
         pulled: pullResult.pulled,
@@ -1035,5 +1054,6 @@ export async function syncRoundTrip(userId: string): Promise<SyncRoundTripResult
     pushedCount += rows.length
   }
 
+  invalidateIfMirrorMoved(changed)
   return { pushed: pushedCount, pulled, changed, errors: [] }
 }

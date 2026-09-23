@@ -1,3 +1,4 @@
+import { Loader2 } from 'lucide-react'
 import { timeAgo, cn } from '@/lib/utils'
 
 /**
@@ -32,5 +33,30 @@ export function SavedCopyNotice({
         ? `Showing a saved copy from ${timeAgo(fetchedAt)} — these numbers may have moved since.`
         : 'Showing a saved copy — these numbers may have moved since.'}
     </p>
+  )
+}
+
+/**
+ * "A saved copy is on screen and the server's answer is on its way."
+ *
+ * Deliberately quieter than `SavedCopyNotice`: every navigation to a screen opened before paints
+ * its saved copy first, and a full "these numbers may have moved" line on each of those would
+ * flash on every tap. The copy is still marked as not-yet-confirmed, so a cached number never
+ * passes for a fresh one. Pages pass `query.revalidating`.
+ */
+export function RefreshingChip({ show, className }: { show: boolean; className?: string }) {
+  if (!show) return null
+  return (
+    <span
+      role="status"
+      aria-live="polite"
+      className={cn(
+        'inline-flex items-center gap-1 rounded-full bg-stone-100 px-2 py-0.5 text-[11px] font-medium text-stone-500',
+        className,
+      )}
+    >
+      <Loader2 className="size-3 animate-spin" aria-hidden="true" />
+      Updating…
+    </span>
   )
 }

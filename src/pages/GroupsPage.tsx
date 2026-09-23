@@ -3,10 +3,10 @@ import { Link } from 'react-router-dom'
 import { toast } from 'sonner'
 import { ChevronRight, Layers3, Plus, Users, X } from 'lucide-react'
 import { useCurrentUser } from '@/hooks/useCurrentUser'
-import { addExistingGroupMember, createGroup } from '@/db/operations'
+import { createGroup } from '@/db/operations'
 import { fetchGroupsWithBalances, type GroupBalanceRow } from '@/api/balances'
 import { useServerData } from '@/hooks/useServerData'
-import { SavedCopyNotice } from '@/components/common/SavedCopyNotice'
+import { RefreshingChip, SavedCopyNotice } from '@/components/common/SavedCopyNotice'
 import { loadPhonebookRows } from '@/lib/people'
 import { formatCurrency, cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
@@ -109,10 +109,7 @@ export function GroupsPage() {
     if (!userId || !name.trim() || creating) return
     setCreating(true)
     try {
-      const groupId = await createGroup(name.trim(), currency, userId)
-      for (const memberId of selectedMemberIds) {
-        await addExistingGroupMember(groupId, memberId, userId)
-      }
+      await createGroup(name.trim(), currency, userId, selectedMemberIds)
       setName('')
       setSelectedMemberIds([])
       setShowCreate(false)
@@ -245,9 +242,10 @@ export function GroupsPage() {
         </div>
       )}
 
-      {groupsQuery.fromCache && groupsQuery.data && (
+      {groupsQuery.fromCache && !groupsQuery.revalidating && groupsQuery.data && (
         <SavedCopyNotice fetchedAt={groupsQuery.fetchedAt} />
       )}
+      <RefreshingChip show={groupsQuery.revalidating} />
 
       {groupsLoading ? (
         <div className="space-y-3">

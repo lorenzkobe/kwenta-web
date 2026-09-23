@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { AlertTriangle } from 'lucide-react'
+import { AlertTriangle, Loader2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
 
@@ -9,6 +9,7 @@ export function ConfirmDialog({
   title,
   description,
   confirmLabel = 'Confirm',
+  pendingLabel,
   cancelLabel = 'Cancel',
   variant = 'default',
   confirmDisabled = false,
@@ -19,6 +20,8 @@ export function ConfirmDialog({
   title: string
   description: string
   confirmLabel?: string
+  /** Shown with a spinner while `onConfirm` is pending. Defaults to `${confirmLabel}…`. */
+  pendingLabel?: string
   cancelLabel?: string
   variant?: 'default' | 'danger'
   confirmDisabled?: boolean
@@ -87,7 +90,14 @@ export function ConfirmDialog({
             disabled={pending || confirmDisabled}
             onClick={handleConfirm}
           >
-            {pending ? '…' : confirmLabel}
+            {pending ? (
+              <>
+                <Loader2 className="size-4 animate-spin" aria-hidden />
+                {pendingLabel ?? `${confirmLabel}…`}
+              </>
+            ) : (
+              confirmLabel
+            )}
           </Button>
         </div>
       </div>

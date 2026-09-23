@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { db } from '@/db/db'
 import { syncRoundTrip, KWENTA_LAST_REFRESH_STORAGE_KEY, PULL_SINCE_EPOCH } from '@/sync/sync-service'
 import { makeProfile, makeSettlement, resetDb } from '../helpers/db'
+import { useAppStore } from '@/store/app-store'
 
 /**
  * Round-trip behaviour of the cloud-first read path: every sync asks for the COMPLETE bundle and
@@ -291,5 +292,47 @@ describe('syncRoundTrip', () => {
     expect(result.errors).toEqual(['Sync skipped: not signed in'])
     expect(mocks.rpc).not.toHaveBeenCalled()
     expect(localStorage.getItem(KWENTA_LAST_REFRESH_STORAGE_KEY)).toBeNull()
+  })
+})
+
+/**
+ * H1.1 (perf-pass-1): the mirror moving is the signal every mounted server-backed screen needs, and
+ * syncRoundTrip has many callers (sync manager, data repair, conflict replay, notification flush,
+ * realtime, the bell). It bumps `dataVersion` itself so none of them can forget — a forgotten bump
+ * left money screens stale, and realtime could not repair it because its echo then matched Dexie.
+ */
+describe('syncRoundTrip invalidates the screens only when the mirror moved', () => {
+  it('bumps dataVersion exactly once when it wrote changed rows', async () => {
+    const row = makeSettlement({ id: 'S', from_user_id: 'them', to_user_id: 'me', amount: 500 })
+    mocks.rpc.mockResolvedValue({ data: bundleWith({ settlements: [row] }), error: null })
+    const before = useAppStore.getState().dataVersion
+
+    const result = await syncRoundTrip('me')
+
+    expect(result.changed).toBe(1)
+    expect(useAppStore.getState().dataVersion).toBe(before + 1)
+  })
+
+  it('does not bump when every pulled row equals the mirror', async () => {
+    const row = makeSettlement({ id: 'S', from_user_id: 'them', to_user_id: 'me', amount: 500 })
+    await db.settlements.add(row)
+    mocks.rpc.mockResolvedValue({ data: bundleWith({ settlements: [row] }), error: null })
+    const before = useAppStore.getState().dataVersion
+
+    const result = await syncRoundTrip('me')
+
+    expect(result.errors).toEqual([])
+    expect(result.changed).toBe(0)
+    expect(useAppStore.getState().dataVersion).toBe(before)
+  })
+
+  it('does not bump when the sync failed', async () => {
+    mocks.rpc.mockResolvedValue({ data: null, error: { message: 'boom' } })
+    const before = useAppStore.getState().dataVersion
+
+    const result = await syncRoundTrip('me')
+
+    expect(result.errors.length).toBeGreaterThan(0)
+    expect(useAppStore.getState().dataVersion).toBe(before)
   })
 })

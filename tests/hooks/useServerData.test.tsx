@@ -8,6 +8,8 @@ import {
   mountedReadSpecs,
   rememberReadSpec,
 } from '@/api/primed-reads'
+import { writeCache } from '@/api/cache'
+import { ApiError, ServerDeclinedError } from '@/api/balances'
 
 /**
  * The one hook test in the suite, because the defect it pins is not expressible as a pure
@@ -227,5 +229,302 @@ describe('useServerData endpoint registration', () => {
       root.render(<KeyedProbe endpointKey={undefined} />)
     })
     expect(mountedReadSpecs()).toEqual([])
+  })
+})
+
+/**
+ * Stale-while-revalidate (perf-pass-1, cases C1-C6). A screen that has been opened before paints
+ * its last-known answer from the api cache on the FIRST render and revalidates behind it, instead
+ * of blanking to a spinner on every navigation. The seed is the same `readCache` entry that
+ * `fetchEndpoint` writes (`kwenta_api_cache_v1:<userId>:<endpoint>`), scoped to the signed-in user.
+ *
+ * Two things the seed must never do: show one user's cached money to another user on the same
+ * device (C6), and keep showing a copy after the server says the viewer lost access to it (C4).
+ */
+type SeededObserved = Observed & { revalidating: unknown; fetchedAt: string | null }
+
+type Payload = { data: unknown; fromCache: boolean; fetchedAt: string }
+
+function SeededProbe({
+  subject,
+  endpointKey,
+  fetcher,
+  seen,
+}: {
+  subject: string
+  endpointKey: string
+  fetcher: () => Promise<Payload>
+  seen: SeededObserved[]
+}) {
+  const state = useServerData(fetcher, [subject], endpointKey)
+  seen.push({
+    data: state.data,
+    loading: state.loading,
+    error: state.error,
+    fromCache: state.fromCache,
+    fetchedAt: state.fetchedAt,
+    revalidating: (state as unknown as { revalidating: unknown }).revalidating,
+  })
+  return null
+}
+
+const CACHED_AT = '2026-09-01T08:00:00.000Z'
+const FRESH_AT = '2026-09-23T09:30:00.000Z'
+
+describe('useServerData cache seed (stale-while-revalidate)', () => {
+  beforeEach(() => {
+    localStorage.clear()
+    clearPrimedReads()
+    useAppStore.getState().setCurrentUserId('u1')
+  })
+  afterEach(() => {
+    useAppStore.getState().setCurrentUserId(null)
+    localStorage.clear()
+    clearPrimedReads()
+  })
+
+  it('C1: renders the cached copy on the first render, then replaces it with the fetch result', async () => {
+    writeCache('overview', 'u1', { owed: 900 }, CACHED_AT)
+    const fresh = deferred<Payload>()
+    const seen: SeededObserved[] = []
+
+    await act(async () => {
+      root.render(
+        <SeededProbe subject="home" endpointKey="overview" fetcher={() => fresh.promise} seen={seen} />,
+      )
+    })
+
+    // The very first render already has the saved answer: no blank frame.
+    expect(seen[0]).toMatchObject({
+      data: { owed: 900 },
+      revalidating: true,
+      fromCache: true,
+      loading: true,
+      error: null,
+    })
+    // Derived: the "saved copy" line needs the cached fetch time, not null.
+    expect(seen[0].fetchedAt).toBe(CACHED_AT)
+    expect(seen.at(-1)).toMatchObject({ data: { owed: 900 }, revalidating: true })
+
+    await act(async () => {
+      fresh.resolve({ data: { owed: 1250 }, fromCache: false, fetchedAt: FRESH_AT })
+    })
+
+    expect(seen.at(-1)).toMatchObject({
+      data: { owed: 1250 },
+      revalidating: false,
+      fromCache: false,
+      loading: false,
+      error: null,
+    })
+    expect(seen.at(-1)?.fetchedAt).toBe(FRESH_AT)
+  })
+
+  it('C2: with no cached copy it starts empty and loading, not revalidating', async () => {
+    const fresh = deferred<Payload>()
+    const seen: SeededObserved[] = []
+
+    await act(async () => {
+      root.render(
+        <SeededProbe subject="home" endpointKey="overview" fetcher={() => fresh.promise} seen={seen} />,
+      )
+    })
+
+    expect(seen[0]).toMatchObject({ data: undefined, loading: true, fromCache: false, error: null })
+    expect(seen[0].revalidating).toBe(false)
+
+    await act(async () => {
+      fresh.resolve({ data: { owed: 7 }, fromCache: false, fetchedAt: FRESH_AT })
+    })
+    expect(seen.at(-1)).toMatchObject({ data: { owed: 7 }, loading: false, revalidating: false })
+  })
+
+  it("C3: a subject change seeds the NEW subject's cache and never renders the old subject's data", async () => {
+    writeCache('person:alice', 'u1', { owed: 1200 }, CACHED_AT)
+    writeCache('person:bob', 'u1', { owed: 5 }, CACHED_AT)
+    const bobFresh = deferred<Payload>()
+    const seen: SeededObserved[] = []
+
+    await act(async () => {
+      root.render(
+        <SeededProbe
+          subject="alice"
+          endpointKey="person:alice"
+          fetcher={() => Promise.resolve({ data: { owed: 1300 }, fromCache: false, fetchedAt: FRESH_AT })}
+          seen={seen}
+        />,
+      )
+    })
+    expect(seen.at(-1)?.data).toEqual({ owed: 1300 })
+
+    const before = seen.length
+    // Same component instance, new param: the /app/people/alice -> /bob navigation.
+    await act(async () => {
+      root.render(
+        <SeededProbe subject="bob" endpointKey="person:bob" fetcher={() => bobFresh.promise} seen={seen} />,
+      )
+    })
+
+    const afterSwitch = seen.slice(before).map((s) => JSON.stringify(s.data))
+    expect(afterSwitch).not.toContain(JSON.stringify({ owed: 1300 }))
+    expect(afterSwitch).not.toContain(JSON.stringify({ owed: 1200 }))
+    expect(seen.at(-1)).toMatchObject({ data: { owed: 5 }, revalidating: true, fromCache: true })
+
+    await act(async () => {
+      bobFresh.resolve({ data: { owed: 6 }, fromCache: false, fetchedAt: FRESH_AT })
+    })
+    expect(seen.at(-1)).toMatchObject({ data: { owed: 6 }, revalidating: false, fromCache: false })
+  })
+
+  it('C3: a subject change to an uncached subject shows nothing, not the previous subject', async () => {
+    writeCache('person:alice', 'u1', { owed: 1200 }, CACHED_AT)
+    const bobFresh = deferred<Payload>()
+    const seen: SeededObserved[] = []
+
+    await act(async () => {
+      root.render(
+        <SeededProbe
+          subject="alice"
+          endpointKey="person:alice"
+          fetcher={() => Promise.resolve({ data: { owed: 1300 }, fromCache: false, fetchedAt: FRESH_AT })}
+          seen={seen}
+        />,
+      )
+    })
+
+    const before = seen.length
+    await act(async () => {
+      root.render(
+        <SeededProbe subject="bob" endpointKey="person:bob" fetcher={() => bobFresh.promise} seen={seen} />,
+      )
+    })
+
+    expect(seen.slice(before).every((s) => s.data === undefined)).toBe(true)
+    expect(seen.at(-1)).toMatchObject({ data: undefined, loading: true, fromCache: false })
+    expect(seen.at(-1)?.revalidating).toBe(false)
+  })
+
+  it('C4: an access-lost ApiError during revalidation clears the seeded copy and sets the error', async () => {
+    writeCache('group:g1', 'u1', { members: 3 }, CACHED_AT)
+    const fresh = deferred<Payload>()
+    const seen: SeededObserved[] = []
+
+    await act(async () => {
+      root.render(
+        <SeededProbe subject="g1" endpointKey="group:g1" fetcher={() => fresh.promise} seen={seen} />,
+      )
+    })
+    expect(seen[0].data).toEqual({ members: 3 })
+
+    await act(async () => {
+      // The exact prefix fetchEndpoint uses for an authorization failure (src/api/balances.ts).
+      fresh.reject(new ApiError('You no longer have access to this group.'))
+    })
+
+    // Losing access must not read as staleness: the saved copy goes away with it.
+    expect(seen.at(-1)).toMatchObject({
+      data: undefined,
+      error: 'You no longer have access to this group.',
+      loading: false,
+      fromCache: false,
+    })
+    expect(seen.at(-1)?.revalidating).toBe(false)
+  })
+
+  it('C4: a ServerDeclinedError during revalidation clears the seeded copy and sets the error', async () => {
+    writeCache('group-breakdown:g1:m1', 'u1', { pays: [] }, CACHED_AT)
+    const fresh = deferred<Payload>()
+    const seen: SeededObserved[] = []
+
+    await act(async () => {
+      root.render(
+        <SeededProbe
+          subject="g1:m1"
+          endpointKey="group-breakdown:g1:m1"
+          fetcher={() => fresh.promise}
+          seen={seen}
+        />,
+      )
+    })
+    expect(seen[0].data).toEqual({ pays: [] })
+
+    await act(async () => {
+      fresh.reject(new ServerDeclinedError('Kwenta could not confirm the balances in this group.'))
+    })
+
+    expect(seen.at(-1)).toMatchObject({
+      data: undefined,
+      error: 'Kwenta could not confirm the balances in this group.',
+      loading: false,
+      fromCache: false,
+    })
+    expect(seen.at(-1)?.revalidating).toBe(false)
+  })
+
+  it('C5: a transport failure during revalidation keeps the seeded copy, flagged as cached', async () => {
+    writeCache('overview', 'u1', { owed: 900 }, CACHED_AT)
+    const fresh = deferred<Payload>()
+    const seen: SeededObserved[] = []
+
+    await act(async () => {
+      root.render(
+        <SeededProbe subject="home" endpointKey="overview" fetcher={() => fresh.promise} seen={seen} />,
+      )
+    })
+
+    await act(async () => {
+      fresh.reject(new Error('Failed to fetch'))
+    })
+
+    expect(seen.at(-1)).toMatchObject({
+      data: { owed: 900 },
+      fromCache: true,
+      loading: false,
+      error: 'Failed to fetch',
+    })
+    expect(seen.at(-1)?.revalidating).toBe(false)
+    expect(seen.at(-1)?.fetchedAt).toBe(CACHED_AT)
+  })
+
+  it("C6: another user's cached entry for the same endpoint is never seeded", async () => {
+    writeCache('overview', 'u2', { owed: 99999 }, CACHED_AT)
+    const fresh = deferred<Payload>()
+    const seen: SeededObserved[] = []
+
+    await act(async () => {
+      root.render(
+        <SeededProbe subject="home" endpointKey="overview" fetcher={() => fresh.promise} seen={seen} />,
+      )
+    })
+
+    expect(seen.every((s) => s.data === undefined)).toBe(true)
+    expect(seen[0]).toMatchObject({ loading: true, fromCache: false })
+    expect(seen[0].revalidating).toBe(false)
+
+    await act(async () => {
+      fresh.resolve({ data: { owed: 1 }, fromCache: false, fetchedAt: FRESH_AT })
+    })
+    expect(seen.at(-1)?.data).toEqual({ owed: 1 })
+  })
+
+  it('C6: with no signed-in user nothing is seeded, even under a literal "null" user key', async () => {
+    useAppStore.getState().setCurrentUserId(null)
+    writeCache('overview', 'u1', { owed: 900 }, CACHED_AT)
+    // A null user must not be coerced into `kwenta_api_cache_v1:null:overview`.
+    localStorage.setItem(
+      'kwenta_api_cache_v1:null:overview',
+      JSON.stringify({ data: { owed: 31337 }, fetchedAt: CACHED_AT }),
+    )
+    const fresh = deferred<Payload>()
+    const seen: SeededObserved[] = []
+
+    await act(async () => {
+      root.render(
+        <SeededProbe subject="home" endpointKey="overview" fetcher={() => fresh.promise} seen={seen} />,
+      )
+    })
+
+    expect(seen.every((s) => s.data === undefined)).toBe(true)
+    expect(seen[0].revalidating).toBe(false)
   })
 })

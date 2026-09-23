@@ -178,7 +178,9 @@ async function runSync(reason: SyncRunReason): Promise<boolean> {
         resetBackoff()
         useAppStore.getState().setSyncStatus('idle')
         useAppStore.getState().setPullStale(false)
-        useAppStore.getState().bumpDataVersion()
+        // First hydration always invalidates once. `syncRoundTrip` already bumped if it changed
+        // rows, so only bump here when it did not — two bumps would be two fetches per screen.
+        if (initialResult.changed === 0) useAppStore.getState().bumpDataVersion()
         await flushQueuedKwentaNotifications({ assumeCloudAck: true })
         void maybeAutoRepairData(userId)
         return true
@@ -207,8 +209,10 @@ async function runSync(reason: SyncRunReason): Promise<boolean> {
       // every mounted screen, so each one fetched on mount and then again the moment the
       // concurrent sync resolved — the duplicated request pairs visible in the network panel.
       // `pulled` cannot gate this: every bundle is complete, so it is large even when nothing
-      // changed.
-      if (reason === 'user' || result.pushed > 0 || result.changed > 0) {
+      // changed. A pull that CHANGED rows is not handled here: `syncRoundTrip` bumps for that
+      // itself, for every caller, so this adds only what it cannot know — a push, or Refresh —
+      // and only when that bump did not already happen.
+      if ((reason === 'user' || result.pushed > 0) && result.changed === 0) {
         useAppStore.getState().bumpDataVersion()
       }
       await flushQueuedKwentaNotifications({ assumeCloudAck: true })

@@ -31,6 +31,7 @@ import { Textarea } from '@/components/ui/textarea'
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@/components/ui/select'
 import { SplitPersonSelector, type SplitMemberOption } from '@/components/common/SplitPersonSelector'
 import { ConfirmDialog } from '@/components/common/ConfirmDialog'
+import { loadBillIntoMirror } from '@/sync/bill-mirror'
 
 type BillMode = 'simple' | 'itemized'
 
@@ -57,7 +58,6 @@ interface AddBillDialogProps {
   currentUserId: string
   editBillId?: string | null
   onClose: () => void
-  onSaved: () => void
 }
 
 const SPLIT_TYPE_LABEL: Record<string, string> = {
@@ -86,7 +86,6 @@ export function AddBillDialog({
   currentUserId,
   editBillId = null,
   onClose,
-  onSaved,
 }: AddBillDialogProps) {
   // Keep the latest onClose in a ref so the edit-load effect does not depend on
   // it. The parent (GroupDetailPage) passes an inline arrow for onClose, which
@@ -197,10 +196,14 @@ export function AddBillDialog({
     }
     let cancelled = false
     setLoadingEdit(true)
-    getBillWithDetails(editBillId).then(async (d) => {
+    // Load a bill this device has not received yet before filling the form: a blank edit form
+    // would otherwise save its emptiness over the real items.
+    loadBillIntoMirror(editBillId).then(() => getBillWithDetails(editBillId)).then(async (d) => {
       if (cancelled) return
       if (!d) {
         setLoadingEdit(false)
+        toast.error('This bill has been deleted.')
+        onCloseRef.current()
         return
       }
       if (d.created_by !== currentUserId) {
@@ -257,6 +260,11 @@ export function AddBillDialog({
         )
       }
       setLoadingEdit(false)
+    }).catch((err: unknown) => {
+      if (cancelled) return
+      setLoadingEdit(false)
+      toast.error(err instanceof Error ? err.message : "Couldn't load this bill.")
+      onCloseRef.current()
     })
     return () => {
       cancelled = true
@@ -642,7 +650,6 @@ export function AddBillDialog({
       } else {
         await createBill(input)
       }
-      onSaved()
       onClose()
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Could not save bill right now.'

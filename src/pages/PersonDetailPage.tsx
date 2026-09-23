@@ -36,7 +36,7 @@ import {
   removeProfilePeerLink,
 } from '@/db/operations'
 import { ConfirmDialog } from '@/components/common/ConfirmDialog'
-import { SavedCopyNotice } from '@/components/common/SavedCopyNotice'
+import { RefreshingChip, SavedCopyNotice } from '@/components/common/SavedCopyNotice'
 import { useCurrentUser } from '@/hooks/useCurrentUser'
 import { cn, formatCurrency, MONEY_EPSILON } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
@@ -915,7 +915,8 @@ export function PersonDetailPage() {
           Totals include bills where one of you paid or the other paid (not when a third person paid for
           both). All recorded payments with this person are included.
         </p>
-        {personSummary.fromCache && personSummary.data && (
+        <RefreshingChip show={personSummary.revalidating} className="mt-1" />
+        {personSummary.fromCache && !personSummary.revalidating && personSummary.data && (
           <SavedCopyNotice fetchedAt={personSummary.fetchedAt} className="mt-1" />
         )}
 
@@ -1044,7 +1045,6 @@ export function PersonDetailPage() {
           billId={openBillId}
           currentUserId={userId}
           onClose={() => setOpenBillId(null)}
-          onUpdated={() => {}}
           onEdit={(id) => {
             setOpenBillId(null)
             navigate(`/app/bills/${id}`)

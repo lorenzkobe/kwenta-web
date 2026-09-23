@@ -2,8 +2,9 @@ import { useEffect, useState } from 'react'
 import { useLiveQuery } from 'dexie-react-hooks'
 import { Loader2, Pencil, ReceiptText, Trash2, Users, X } from 'lucide-react'
 import { deleteBill, getBillWithDetails } from '@/db/operations'
-import { fullSync } from '@/sync/sync-service'
-import { formatCurrency } from '@/lib/utils'
+import { loadBillIntoMirror } from '@/sync/bill-mirror'
+import { toast } from 'sonner'
+import { describeError, formatCurrency } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { ConfirmDialog } from '@/components/common/ConfirmDialog'
 
@@ -13,17 +14,16 @@ export function BillDetailModal({
   billId,
   currentUserId,
   onClose,
-  onUpdated,
   onEdit,
 }: {
   billId: string
   currentUserId: string
   onClose: () => void
-  onUpdated: () => void
   onEdit: (billId: string) => void
 }) {
   const [billState, setBillState] = useState<BillDetails | null>(null)
   const [loadingState, setLoadingState] = useState(true)
+  const [loadError, setLoadError] = useState<string | null>(null)
   const [deleting, setDeleting] = useState(false)
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false)
   const liveBill = useLiveQuery(async () => getBillWithDetails(billId), [billId])
@@ -33,11 +33,16 @@ export function BillDetailModal({
 
     async function load() {
       setLoadingState(true)
+      setLoadError(null)
       let data = await getBillWithDetails(billId)
-      if (!data && currentUserId && !cancelled) {
-        await fullSync(currentUserId)
-        if (!cancelled) {
-          data = await getBillWithDetails(billId)
+      if (!data && !cancelled) {
+        // One bill, not the whole dataset: this used to run a full sync to find a single row.
+        try {
+          await loadBillIntoMirror(billId)
+          if (!cancelled) data = await getBillWithDetails(billId)
+        } catch (err) {
+          // Keep WHY it could not be loaded: a connection failure must not read as "not found".
+          if (!cancelled) setLoadError(err instanceof Error ? err.message : "Couldn't load this bill.")
         }
       }
       if (!cancelled) {
@@ -50,21 +55,24 @@ export function BillDetailModal({
     return () => {
       cancelled = true
     }
-  }, [billId, currentUserId])
+  }, [billId])
 
   async function executeDelete() {
     setDeleting(true)
     try {
       await deleteBill(billId, currentUserId)
-      onUpdated()
       onClose()
+    } catch (error) {
+      toast.error(describeError(error, 'Could not delete this bill right now.'))
     } finally {
       setDeleting(false)
     }
   }
 
-  const bill = liveBill === undefined ? billState : liveBill
-  const loading = liveBill === undefined ? loadingState : false
+  // A live `null` only means "not on this device yet": the load effect may still be fetching it,
+  // so "not found" waits for that answer instead of flashing first.
+  const bill = liveBill ?? billState
+  const loading = liveBill ? false : loadingState
 
   return (
     <>
@@ -90,7 +98,7 @@ export function BillDetailModal({
           )}
 
           {!loading && !bill && (
-            <p className="py-8 text-center text-sm text-stone-500">Bill not found</p>
+            <p className="py-8 text-center text-sm text-stone-500">{loadError ?? 'Bill not found'}</p>
           )}
 
           {!loading && bill && (
@@ -199,6 +207,7 @@ export function BillDetailModal({
           : 'This bill will be removed. This cannot be undone on this device.'
       }
       confirmLabel="Delete bill"
+      pendingLabel="Deleting…"
       variant="danger"
       onConfirm={executeDelete}
     />

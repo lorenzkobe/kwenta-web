@@ -7,7 +7,7 @@ import { deleteBill } from '@/db/operations'
 import { fetchPersonalBills, type PersonalBillRow } from '@/api/balances'
 import { useServerData } from '@/hooks/useServerData'
 import { loadStagedPersonalBillRows } from '@/lib/staged-rows'
-import { SavedCopyNotice } from '@/components/common/SavedCopyNotice'
+import { RefreshingChip, SavedCopyNotice } from '@/components/common/SavedCopyNotice'
 import { useCurrentUser } from '@/hooks/useCurrentUser'
 import { formatCurrency, timeAgo, cn } from '@/lib/utils'
 import {
@@ -292,7 +292,8 @@ export function BillsPage() {
         </Button>
       </div>
 
-      {billsQuery.fromCache && billsQuery.data && (
+      <RefreshingChip show={billsQuery.revalidating} />
+      {billsQuery.fromCache && !billsQuery.revalidating && billsQuery.data && (
         <SavedCopyNotice fetchedAt={billsQuery.fetchedAt} />
       )}
 

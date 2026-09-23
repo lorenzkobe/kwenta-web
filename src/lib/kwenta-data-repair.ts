@@ -91,19 +91,57 @@ export async function repairSettlementsViaServer(userId: string): Promise<Kwenta
   return result
 }
 
-// Runs once per app session (module-scoped), so the post-sync auto-repair doesn't re-run on every
-// backup sync. A full page reload resets it, re-checking for newly-accumulated artifacts.
+// Once per app session (module-scoped), so the post-sync auto-repair does not re-run on every
+// backup sync; and at most once per AUTO_REPAIR_INTERVAL_MS per user per device across sessions,
+// because the repair is a heavy server query that used to run on nearly every app open.
 let autoRepairDone = false
 let autoRepairInFlight = false
 
+const AUTO_REPAIR_INTERVAL_MS = 24 * 60 * 60 * 1000
+const autoRepairStampKey = (userId: string) => `kwenta_auto_repair_at:${userId}`
+
 /**
- * Fire-and-forget auto-repair: ask the server to repair once per session after a successful sync.
+ * Whether the last successful automatic repair for this user is recent enough to skip.
+ *
+ * The stamp is scheduling only, never a sync cursor, so the device clock is acceptable here — but
+ * a stamp in the FUTURE (a clock that ran fast, then was corrected) would otherwise suppress the
+ * repair until real time caught up, so it counts as expired. Unreadable storage counts as "never
+ * repaired": skipping a repair on a storage error would be the worse failure.
+ */
+function repairedRecently(userId: string): boolean {
+  let raw: string | null
+  try {
+    raw = localStorage.getItem(autoRepairStampKey(userId))
+  } catch {
+    return false
+  }
+  const at = raw ? Date.parse(raw) : NaN
+  if (!Number.isFinite(at)) return false
+  const age = Date.now() - at
+  return age >= 0 && age < AUTO_REPAIR_INTERVAL_MS
+}
+
+function stampRepaired(userId: string): void {
+  try {
+    localStorage.setItem(autoRepairStampKey(userId), new Date().toISOString())
+  } catch {
+    /* best effort: the next session simply repairs again */
+  }
+}
+
+/**
+ * Fire-and-forget auto-repair: ask the server to repair after a successful sync, at most once per
+ * session and once per day per user on this device. The manual repair in Settings is not throttled.
  *
  * Never throws: a repair failure must not break app startup or sync. Only marks itself done on
  * success, so a transient failure retries on the next session.
  */
 export async function maybeAutoRepairData(userId: string): Promise<void> {
   if (autoRepairDone || autoRepairInFlight) return
+  if (repairedRecently(userId)) {
+    autoRepairDone = true
+    return
+  }
   autoRepairInFlight = true
   try {
     const result = await repairSettlementsViaServer(userId)
@@ -113,6 +151,7 @@ export async function maybeAutoRepairData(userId: string): Promise<void> {
       )
     }
     autoRepairDone = true
+    stampRepaired(userId)
   } catch (err) {
     console.warn('[kwenta] auto data repair failed (will retry next session):', err)
   } finally {

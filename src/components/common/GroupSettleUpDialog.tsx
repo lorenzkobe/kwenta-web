@@ -14,7 +14,6 @@ export function GroupSettleUpDialog({
   currency,
   markedBy,
   payer,
-  onRecorded,
   onUsePayInto,
 }: {
   open: boolean
@@ -24,7 +23,6 @@ export function GroupSettleUpDialog({
   /** Signed-in user; recorded as markedBy. */
   markedBy: string
   payer: SuggestedPayerGroup | null
-  onRecorded: () => void
   onUsePayInto: () => void
 }) {
   const [note, setNote] = useState('')
@@ -48,7 +46,6 @@ export function GroupSettleUpDialog({
         label: note.trim() || undefined,
       })
       toast.success('Payment recorded')
-      onRecorded()
       onOpenChange(false)
       setNote('')
     } catch (error) {

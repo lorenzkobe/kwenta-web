@@ -11,11 +11,8 @@ import type {
   Group,
   GroupMember,
   Settlement,
-  Profile,
-  ActivityLog,
-  ProfilePeerLink,
 } from '@/types'
-import { pullChanges, syncRoundTrip } from '@/sync/sync-service'
+import { compareTimestamps, pullChanges, syncRoundTrip } from '@/sync/sync-service'
 import { useAppStore } from '@/store/app-store'
 import { latestEventCreatedAt, planRealtimeBatch, type UserEventRow } from '@/sync/realtime-batch'
 type ReconcileBundle = Partial<
@@ -45,7 +42,16 @@ const MAX_RECENT_EVENT_IDS = 1024
  * page kept showing the pre-payment hero until the 5-minute backup timer fired.
  *
  * Called once per applied unit of work (one event, or one coalesced batch), never per upserted
- * row — each bump costs every mounted screen a round trip.
+ * row — each bump costs every mounted screen a round trip. And only when that unit MOVED
+ * something: an event whose reconciled rows were new or carried a different `updated_at`, a
+ * reconcile that came back empty, or a fallback pull (which cannot tell, so counts as moved).
+ * Every write this device makes echoes back as one event per row per member, reconciling rows the
+ * write already mirrored; bumping for those refetched every mounted screen after every save for
+ * payloads that could not have changed.
+ *
+ * A `syncRoundTrip` that CHANGED rows bumps inside sync-service for every caller, so the paths
+ * here that run one bump only for a push that changed nothing — otherwise one sync would cost
+ * two re-reads.
  */
 function notifyServerDataChanged(): void {
   useAppStore.getState().bumpDataVersion()
@@ -55,40 +61,48 @@ function isRecord(v: unknown): v is Record<string, unknown> {
   return Boolean(v) && typeof v === 'object'
 }
 
-async function upsertRemoteRow<T extends SyncFields>(tableName: keyof typeof db, row: T): Promise<void> {
+/** Mirrors `row`; returns whether its content moved — `sync-service`'s `contentMoved` rule. */
+async function upsertRemoteRow<T extends SyncFields>(tableName: keyof typeof db, row: T): Promise<boolean> {
   // Dexie tables are defined on db instance; index signature is fine here.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const table = (db as any)[tableName] as { get: (id: string) => Promise<T | undefined>; add: (v: T) => Promise<void>; update: (id: string, v: Partial<T>) => Promise<void> }
   const existing = await table.get(row.id)
   if (existing) {
     await table.update(row.id, { ...(row as unknown as Partial<T>), synced_at: row.updated_at } as Partial<T>)
-    return
+    return compareTimestamps(existing.updated_at, row.updated_at) !== 0
   }
   await table.add({ ...(row as T), synced_at: row.updated_at })
+  return true
 }
 
-async function applyBillBundle(bundle: unknown): Promise<void> {
-  if (!isRecord(bundle)) return
+/** Each apply* returns how many rows MOVED (see `upsertRemoteRow`), not how many it wrote. */
+async function applyBillBundle(bundle: unknown): Promise<number> {
+  if (!isRecord(bundle)) return 0
   const bill = bundle.bill as Bill | undefined
   const items = (bundle.bill_items as BillItem[] | undefined) ?? []
   const splits = (bundle.item_splits as ItemSplit[] | undefined) ?? []
-  if (bill) await upsertRemoteRow('bills', bill)
-  for (const it of items) await upsertRemoteRow('bill_items', it)
-  for (const sp of splits) await upsertRemoteRow('item_splits', sp)
+  let moved = 0
+  if (bill && (await upsertRemoteRow('bills', bill))) moved++
+  for (const it of items) if (await upsertRemoteRow('bill_items', it)) moved++
+  for (const sp of splits) if (await upsertRemoteRow('item_splits', sp)) moved++
+  return moved
 }
 
-async function applyGroupBundle(bundle: unknown): Promise<void> {
-  if (!isRecord(bundle)) return
+async function applyGroupBundle(bundle: unknown): Promise<number> {
+  if (!isRecord(bundle)) return 0
   const group = bundle.group as Group | undefined
   const members = (bundle.group_members as GroupMember[] | undefined) ?? []
-  if (group) await upsertRemoteRow('groups', group)
-  for (const m of members) await upsertRemoteRow('group_members', m)
+  let moved = 0
+  if (group && (await upsertRemoteRow('groups', group))) moved++
+  for (const m of members) if (await upsertRemoteRow('group_members', m)) moved++
+  return moved
 }
 
-async function applySettlementBundle(bundle: unknown): Promise<void> {
-  if (!isRecord(bundle)) return
+async function applySettlementBundle(bundle: unknown): Promise<number> {
+  if (!isRecord(bundle)) return 0
   const settlement = bundle.settlement as Settlement | undefined
-  if (settlement) await upsertRemoteRow('settlements', settlement)
+  if (settlement && (await upsertRemoteRow('settlements', settlement))) return 1
+  return 0
 }
 
 function bundleRows<T extends SyncFields>(bundle: ReconcileBundle, key: keyof ReconcileBundle): T[] {
@@ -101,45 +115,31 @@ function shouldFallbackPullAfterNoopReconcile(ev: UserEventRow): boolean {
   return ev.entity_type === 'groups' || ev.entity_type === 'group_members'
 }
 
-async function applyReconcileBundle(bundle: ReconcileBundle): Promise<number> {
+/**
+ * `applied` counts rows the server returned (0 = a no-op reconcile, which may need a fallback
+ * pull); `moved` counts the ones whose content actually changed here.
+ */
+async function applyReconcileBundle(bundle: ReconcileBundle): Promise<{ applied: number; moved: number }> {
   let applied = 0
-  for (const row of bundleRows<Profile>(bundle, 'profiles')) {
-    await upsertRemoteRow('profiles', row)
-    applied++
+  let moved = 0
+  const tables: Array<keyof ReconcileBundle> = [
+    'profiles',
+    'groups',
+    'group_members',
+    'bills',
+    'bill_items',
+    'item_splits',
+    'settlements',
+    'activity_log',
+    'profile_peer_links',
+  ]
+  for (const tableName of tables) {
+    for (const row of bundleRows<SyncFields>(bundle, tableName)) {
+      if (await upsertRemoteRow(tableName, row)) moved++
+      applied++
+    }
   }
-  for (const row of bundleRows<Group>(bundle, 'groups')) {
-    await upsertRemoteRow('groups', row)
-    applied++
-  }
-  for (const row of bundleRows<GroupMember>(bundle, 'group_members')) {
-    await upsertRemoteRow('group_members', row)
-    applied++
-  }
-  for (const row of bundleRows<Bill>(bundle, 'bills')) {
-    await upsertRemoteRow('bills', row)
-    applied++
-  }
-  for (const row of bundleRows<BillItem>(bundle, 'bill_items')) {
-    await upsertRemoteRow('bill_items', row)
-    applied++
-  }
-  for (const row of bundleRows<ItemSplit>(bundle, 'item_splits')) {
-    await upsertRemoteRow('item_splits', row)
-    applied++
-  }
-  for (const row of bundleRows<Settlement>(bundle, 'settlements')) {
-    await upsertRemoteRow('settlements', row)
-    applied++
-  }
-  for (const row of bundleRows<ActivityLog>(bundle, 'activity_log')) {
-    await upsertRemoteRow('activity_log', row)
-    applied++
-  }
-  for (const row of bundleRows<ProfilePeerLink>(bundle, 'profile_peer_links')) {
-    await upsertRemoteRow('profile_peer_links', row)
-    applied++
-  }
-  return applied
+  return { applied, moved }
 }
 
 function rememberEventId(recentOrder: string[], recentSet: Set<string>, eventId: string): void {
@@ -151,7 +151,12 @@ function rememberEventId(recentOrder: string[], recentSet: Set<string>, eventId:
   if (evicted) recentSet.delete(evicted)
 }
 
-export async function processEvent(userId: string, ev: UserEventRow): Promise<void> {
+/**
+ * Applies one event to the mirror. Resolves whether it moved anything a screen could observe: a
+ * row that was new or changed, or a pull / round trip (which reports no per-row answer, so it
+ * counts as moved).
+ */
+export async function processEvent(userId: string, ev: UserEventRow): Promise<boolean> {
   const startedAt = performance.now()
 
   // A profile link event means this user now has access to historical bills and groups that
@@ -159,13 +164,14 @@ export async function processEvent(userId: string, ev: UserEventRow): Promise<vo
   // former incremental pull skipped; every round trip now fetches the complete bundle, so the
   // link case needs nothing special beyond a sync.
   if (ev.entity_type === 'profiles' && isRecord(ev.payload) && ev.payload.linked_profile_id) {
-    await syncRoundTrip(userId)
+    // A round trip that changed rows has already bumped (sync-service); report only the push.
+    const result = await syncRoundTrip(userId)
     captureMetric('realtime.event.process', true, performance.now() - startedAt, {
       entity: ev.entity_type,
       op: ev.op,
       fullPull: true,
     })
-    return
+    return result.pushed > 0 && result.changed === 0
   }
 
   if (isRuntimeFlagEnabled('targetedRealtimeReconcile')) {
@@ -180,10 +186,10 @@ export async function processEvent(userId: string, ev: UserEventRow): Promise<vo
       { entity: ev.entity_type, op: ev.op },
     )
     if (!error && data && isRecord(data)) {
-      const applied = await applyReconcileBundle(data as ReconcileBundle)
+      const { applied, moved } = await applyReconcileBundle(data as ReconcileBundle)
       if (applied > 0) {
         captureMetric('realtime.event.process', true, performance.now() - startedAt, { entity: ev.entity_type, op: ev.op, applied })
-        return
+        return moved > 0
       }
       if (shouldFallbackPullAfterNoopReconcile(ev)) {
         await pullChanges(userId)
@@ -194,11 +200,15 @@ export async function processEvent(userId: string, ev: UserEventRow): Promise<vo
           fallbackPull: true,
           noopReconcile: true,
         })
-        return
+        return true
       }
       if (ev.op !== 'DELETE') {
+        // The server no longer returns a row this event named — e.g. the viewer was taken off a
+        // personal bill and lost access. That IS a change a list or balance must re-read for. An
+        // echo of this device's own write always returns its rows, so this costs the echo path
+        // nothing.
         captureMetric('realtime.event.process', true, performance.now() - startedAt, { entity: ev.entity_type, op: ev.op, applied })
-        return
+        return true
       }
     }
   }
@@ -207,7 +217,7 @@ export async function processEvent(userId: string, ev: UserEventRow): Promise<vo
   if (ev.op === 'DELETE') {
     await pullChanges(userId)
     captureMetric('realtime.event.process', true, performance.now() - startedAt, { entity: ev.entity_type, op: ev.op, fallbackPull: true })
-    return
+    return true
   }
 
   const payload = (isRecord(ev.payload) ? ev.payload : null) as Record<string, unknown> | null
@@ -224,9 +234,9 @@ export async function processEvent(userId: string, ev: UserEventRow): Promise<vo
         captureMetric('realtime.event.process', false, performance.now() - startedAt, { entity: ev.entity_type, op: ev.op })
         throw new Error(`bill bundle fetch failed: ${error.message}`)
       }
-      await applyBillBundle(data)
+      const moved = await applyBillBundle(data)
       captureMetric('realtime.event.process', true, performance.now() - startedAt, { entity: ev.entity_type, op: ev.op })
-      return
+      return moved > 0
     }
     case 'groups': {
       const gid = (payload?.group_id as string | undefined) ?? ev.entity_id
@@ -240,9 +250,9 @@ export async function processEvent(userId: string, ev: UserEventRow): Promise<vo
         captureMetric('realtime.event.process', false, performance.now() - startedAt, { entity: ev.entity_type, op: ev.op })
         throw new Error(`group bundle fetch failed: ${error.message}`)
       }
-      await applyGroupBundle(data)
+      const moved = await applyGroupBundle(data)
       captureMetric('realtime.event.process', true, performance.now() - startedAt, { entity: ev.entity_type, op: ev.op })
-      return
+      return moved > 0
     }
     case 'group_members': {
       const gid = payload?.group_id as string | undefined
@@ -250,7 +260,7 @@ export async function processEvent(userId: string, ev: UserEventRow): Promise<vo
         // Fall back: pull changes, since we can't locate the group reliably.
         await pullChanges(userId)
         captureMetric('realtime.event.process', true, performance.now() - startedAt, { entity: ev.entity_type, op: ev.op, fallbackPull: true })
-        return
+        return true
       }
       const { data, error } = await withMetric(
         'realtime.fetch.groupBundle',
@@ -262,9 +272,9 @@ export async function processEvent(userId: string, ev: UserEventRow): Promise<vo
         captureMetric('realtime.event.process', false, performance.now() - startedAt, { entity: ev.entity_type, op: ev.op })
         throw new Error(`group bundle fetch failed: ${error.message}`)
       }
-      await applyGroupBundle(data)
+      const moved = await applyGroupBundle(data)
       captureMetric('realtime.event.process', true, performance.now() - startedAt, { entity: ev.entity_type, op: ev.op })
-      return
+      return moved > 0
     }
     case 'settlements': {
       const { data, error } = await withMetric(
@@ -277,14 +287,15 @@ export async function processEvent(userId: string, ev: UserEventRow): Promise<vo
         captureMetric('realtime.event.process', false, performance.now() - startedAt, { entity: ev.entity_type, op: ev.op })
         throw new Error(`settlement fetch failed: ${error.message}`)
       }
-      await applySettlementBundle(data)
+      const moved = await applySettlementBundle(data)
       captureMetric('realtime.event.process', true, performance.now() - startedAt, { entity: ev.entity_type, op: ev.op })
-      return
+      return moved > 0
     }
     default: {
       // Unknown entity type; reconcile via pull.
       await pullChanges(userId)
       captureMetric('realtime.event.process', true, performance.now() - startedAt, { entity: ev.entity_type, op: ev.op, fallbackPull: true })
+      return true
     }
   }
 }
@@ -313,7 +324,8 @@ async function catchUpSince(userId: string, sinceIso: string, onEvent: (ev: User
     // Many missed events — one syncRoundTrip is far cheaper than N individual RPCs. It pulls the
     // complete bundle, so a missed profile-link event needs no special handling (it used to
     // require probing kwenta_user_events and resetting the pull cursor).
-    await syncRoundTrip(userId)
+    // A round trip that changed rows has already bumped (sync-service); only a push is left.
+    const result = await syncRoundTrip(userId)
     // Advance from the SERVER clock, never this device's. `kwenta_user_events.created_at` is
     // stamped by Postgres; writing now() here means a device whose clock runs fast stores a cursor
     // in the future, and the next catch-up's `.gt('created_at', cursor)` filters out every event
@@ -322,7 +334,7 @@ async function catchUpSince(userId: string, sinceIso: string, onEvent: (ev: User
     // already advances from the event rows themselves.
     const latestCreatedAt = latestEventCreatedAt(events)
     if (latestCreatedAt) localStorage.setItem(LAST_SEEN_EVENT_KEY(userId), latestCreatedAt)
-    notifyServerDataChanged()
+    if (result.pushed > 0 && result.changed === 0) notifyServerDataChanged()
     return
   }
 
@@ -348,9 +360,11 @@ export function startRealtimeForUser(userId: string): () => void {
 
     rememberEventId(recentEventOrder, recentEventSet, ev.id)
 
+    let moved = false
     try {
-      await processEvent(userId, ev)
+      moved = await processEvent(userId, ev)
     } catch (error) {
+      moved = true
       console.warn('[realtime] event processing failed; falling back to pull', {
         eventId: ev.id,
         entity: ev.entity_type,
@@ -366,7 +380,7 @@ export function startRealtimeForUser(userId: string): () => void {
       })
     } finally {
       localStorage.setItem(LAST_SEEN_EVENT_KEY(userId), ev.created_at)
-      notifyServerDataChanged()
+      if (moved) notifyServerDataChanged()
     }
   }
 
@@ -400,14 +414,18 @@ export function startRealtimeForUser(userId: string): () => void {
     // Remember every id up front so a redelivery of any of them is skipped.
     for (const ev of plan.fresh) rememberEventId(recentEventOrder, recentEventSet, ev.id)
     const startedAt = performance.now()
+    let moved = false
     try {
-      await syncRoundTrip(userId)
+      const result = await syncRoundTrip(userId)
+      // A round trip that changed rows has already bumped (sync-service); only a push is left.
+      moved = result.pushed > 0 && result.changed === 0
       captureMetric('realtime.batch.coalesced', true, performance.now() - startedAt, {
         events: batch.length,
         fresh: plan.fresh.length,
       })
     } catch (error) {
       console.warn('[realtime] coalesced batch sync failed; falling back to pull', { error })
+      moved = true
       await pullChanges(userId)
       captureMetric('realtime.batch.coalesced', false, performance.now() - startedAt, {
         events: batch.length,
@@ -420,7 +438,7 @@ export function startRealtimeForUser(userId: string): () => void {
       // Only the coalesced branch: the `<= 1` branch above delegates to processEventSafely,
       // which bumps for itself. Bumping in both would cost every mounted screen two round trips
       // for one event.
-      notifyServerDataChanged()
+      if (moved) notifyServerDataChanged()
     }
   }
 

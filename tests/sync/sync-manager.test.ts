@@ -30,7 +30,22 @@ const mocks = vi.hoisted(() => ({
   getMillisecondsSinceLastRefresh: vi.fn(() => 0),
 }))
 
-vi.mock('@/sync/sync-service', () => mocks)
+// The real syncRoundTrip bumps `dataVersion` itself when it changed rows (H1.1: one place for every
+// caller), so the stand-ins do the same; the manager adds only the push / Refresh bump.
+vi.mock('@/sync/sync-service', async () => {
+  const { useAppStore } = await import('@/store/app-store')
+  type Result = { pushed: number; pulled: number; changed: number; errors: string[] }
+  const bumpingIfChanged = (fn: (userId: string) => Promise<Result>) => async (userId: string) => {
+    const result = await fn(userId)
+    if (result.changed > 0) useAppStore.getState().bumpDataVersion()
+    return result
+  }
+  return {
+    ...mocks,
+    fullSync: bumpingIfChanged((id) => mocks.fullSync(id)),
+    syncRoundTrip: bumpingIfChanged((id) => mocks.syncRoundTrip(id)),
+  }
+})
 vi.mock('@/lib/supabase', () => ({
   supabase: {
     auth: { getSession: async () => ({ data: { session: { user: { id: 'me' } } } }) },
@@ -198,6 +213,30 @@ describe('dataVersion invalidation', () => {
     const before = useAppStore.getState().dataVersion
 
     window.dispatchEvent(new Event('focus'))
+    await settle()
+
+    expect(useAppStore.getState().dataVersion).toBe(before + 1)
+  })
+
+  it('bumps exactly once when the round trip both pushed and changed rows', async () => {
+    // syncRoundTrip already bumped for the changed rows; a second bump for the push would make
+    // every mounted screen fetch twice for one sync.
+    mocks.fullSync.mockResolvedValue({ pushed: 2, pulled: 4213, changed: 3, errors: [] })
+    await startManager()
+    const before = useAppStore.getState().dataVersion
+
+    window.dispatchEvent(new Event('focus'))
+    await settle()
+
+    expect(useAppStore.getState().dataVersion).toBe(before + 1)
+  })
+
+  it('bumps exactly once for Refresh when the sync also changed rows', async () => {
+    mocks.fullSync.mockResolvedValue({ pushed: 0, pulled: 4213, changed: 2, errors: [] })
+    await startManager()
+    const before = useAppStore.getState().dataVersion
+
+    requestSyncNow()
     await settle()
 
     expect(useAppStore.getState().dataVersion).toBe(before + 1)

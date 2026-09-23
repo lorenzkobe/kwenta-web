@@ -48,7 +48,8 @@ import {
 } from '@/lib/bill-split-form'
 import { BILL_BACK_QUERY, parseSafeAppPath, withBillBackQuery } from '@/lib/bill-navigation'
 import { listCanonicalRelatedProfileIds, personalPickerIdFor } from '@/lib/people'
-import { fetchPersonSummary } from '@/api/balances'
+import { announceBillOffset } from '@/lib/bill-offset-notice'
+import { loadBillIntoMirror } from '@/sync/bill-mirror'
 import { normalizeAmountInput, stripLeadingZerosAmount } from '@/lib/amount-input'
 import { cn, formatCurrency } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
@@ -338,10 +339,14 @@ export function AddBillPage() {
     }
     let cancelled = false
     setLoadingEdit(true)
-    getBillWithDetails(editBillId).then(async (d) => {
+    // A bill added from another device may not be on this one yet. Load it before filling the
+    // form: an edit form left blank would otherwise save its emptiness over the real items.
+    loadBillIntoMirror(editBillId).then(() => getBillWithDetails(editBillId)).then(async (d) => {
       if (cancelled) return
       if (!d) {
         setLoadingEdit(false)
+        toast.error('This bill has been deleted.')
+        navigate('/app/bills', { replace: true })
         return
       }
       if (d.created_by !== userId) {
@@ -405,6 +410,11 @@ export function AddBillPage() {
         )
       }
       setLoadingEdit(false)
+    }).catch((err: unknown) => {
+      if (cancelled) return
+      setLoadingEdit(false)
+      toast.error(err instanceof Error ? err.message : "Couldn't load this bill.")
+      navigate('/app/bills', { replace: true })
     })
     return () => {
       cancelled = true
@@ -766,28 +776,13 @@ export function AddBillPage() {
         )
       } else {
         await createBill(input)
-        const payerId = input.paidBy
-        if (payerId && payerId !== userId) {
-          try {
-            const { data: summary, fromCache } = await fetchPersonSummary(userId, payerId)
-            // A cached answer predates the bill that was just written, so it would state a
-            // balance that is knowably wrong. This toast is a courtesy, not a screen — saying
-            // nothing is the right degradation.
-            const gNet = fromCache ? null : (summary.total[input.currency] ?? 0)
-            if (gNet === null) {
-              /* stale answer — no claim */
-            } else if (gNet > 0.005) {
-              toast.info(
-                `This bill is offset — ${payorDisplayName} still owes you ${formatCurrency(gNet, input.currency)} overall`,
-              )
-            } else if (Math.abs(gNet) <= 0.005) {
-              toast.info(`This bill cancels out — you and ${payorDisplayName} are now even`)
-            }
-          } catch {
-            // non-critical
-          }
-        }
         navigate('/app/bills')
+        announceBillOffset({
+          userId,
+          payerId: input.paidBy,
+          payerName: payorDisplayName,
+          currency: input.currency,
+        })
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Could not save bill right now.'

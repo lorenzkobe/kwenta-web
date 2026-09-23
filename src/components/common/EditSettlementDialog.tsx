@@ -25,7 +25,7 @@ export function EditSettlementDialog({
 }: {
   item: SettlementHistoryItem
   onClose: () => void
-  onSaved: () => void
+  onSaved?: () => void
 }) {
   const { userId } = useCurrentUser()
   const [amountStr, setAmountStr] = useState(() => String(item.amount))
@@ -74,7 +74,7 @@ export function EditSettlementDialog({
           userId,
         )
       }
-      onSaved()
+      onSaved?.()
       onClose()
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Could not save payment changes.'
@@ -93,7 +93,7 @@ export function EditSettlementDialog({
       } else {
         await deleteSettlement(item.id, userId)
       }
-      onSaved()
+      onSaved?.()
       onClose()
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Could not remove payment right now.'
@@ -213,6 +213,7 @@ export function EditSettlementDialog({
           : 'Balances will update to match. You can record a new payment if needed.'
       }
       confirmLabel="Remove"
+      pendingLabel="Removing…"
       variant="danger"
       onConfirm={executeRemove}
     />

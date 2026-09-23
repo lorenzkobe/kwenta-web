@@ -36,7 +36,6 @@ export function PayIntoGroupDialog({
   currency,
   currentUserId,
   members,
-  onRecorded,
 }: {
   open: boolean
   onOpenChange: (open: boolean) => void
@@ -45,7 +44,6 @@ export function PayIntoGroupDialog({
   /** The signed-in user — defaults as payer and is always recorded as `markedBy`. */
   currentUserId: string
   members: PayIntoGroupMember[]
-  onRecorded: () => void
 }) {
   const [payerId, setPayerId] = useState(currentUserId)
   const [owed, setOwed] = useState<OwedParty[]>([])
@@ -204,7 +202,6 @@ export function PayIntoGroupDialog({
           `${formatCurrency(result.unallocated, currency)} couldn't be applied — it would overpay.`,
         )
       }
-      onRecorded()
       onOpenChange(false)
     } catch (error) {
       toast.error(error instanceof Error ? error.message : 'Could not record payment.')

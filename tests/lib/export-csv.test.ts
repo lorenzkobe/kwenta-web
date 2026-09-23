@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest'
 import { db } from '@/db/db'
 import { exportBillsToCSV, exportGroupToCSV, exportPersonToCSV } from '@/lib/export-csv'
 import type {
@@ -356,6 +356,11 @@ describe('exportPersonToCSV', () => {
 
   /** A bundled payment is several real transfers; one CSV row per stored leg, not per bundle. */
   it('emits one row per leg of a bundled payment', async () => {
+    // Pinned to a time containing "30": the header's "Exported <now>" line used to match a
+    // substring filter and fail the test whenever the wall clock read :30.
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-09-23T10:30:30'))
+    onTestFinished(() => vi.useRealTimers())
     await db.profiles.add(makeProfile({ id: 'ME', display_name: 'Me' }))
 
     await exportPersonToCSV(
@@ -376,7 +381,10 @@ describe('exportPersonToCSV', () => {
     )
 
     const csv = await readCsv()
-    const paymentLines = csv.split('\r\n').filter((l) => l.includes('30'))
+    const lines = csv.split('\r\n')
+    const header = lines.indexOf('Date,From,To,Amount,Currency,Group,Note')
+    expect(header).toBeGreaterThan(-1)
+    const paymentLines = lines.slice(header + 1).filter((l) => l.split(',')[3] === '30')
     expect(paymentLines).toHaveLength(2)
     expect(csv).toContain('Cha')
   })

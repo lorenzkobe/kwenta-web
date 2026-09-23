@@ -13,7 +13,7 @@ import {
   PULL_SINCE_EPOCH,
 } from '@/sync/sync-service'
 import { KWENTA_LEGACY_LAST_PULL_STORAGE_KEY } from '@/lib/kwenta-storage-keys'
-import { makeBill, makeMember, makeProfile, makeSettlement, resetDb } from '../helpers/db'
+import { makeBill, makeGroup, makeMember, makeProfile, makeSettlement, resetDb } from '../helpers/db'
 
 // sync-service imports the Supabase client at module load; neither function
 // under test makes a network call, so a benign stub is enough.
@@ -292,5 +292,25 @@ describe('isEntityUnsyncedForActor', () => {
       makeMember({ group_id: 'G', user_id: 'PERSON', is_deleted: true, synced_at: SYNCED }),
     )
     expect(await isEntityUnsyncedForActor('profile', 'PERSON', 'ME')).toBe(false)
+  })
+
+  // H1.2 (perf-pass-1): addExistingGroupMembers and createGroup queue their mutation under the
+  // GROUP entity, but the rows that can be silently dropped are the membership rows.
+  it('flags a group mutation whose group row synced but an added member row stayed unsynced', async () => {
+    await db.groups.add(makeGroup({ id: 'G', created_by: 'ME' }))
+    await db.group_members.bulkAdd([
+      makeMember({ group_id: 'G', user_id: 'ME' }),
+      makeMember({ group_id: 'G', user_id: 'ANN', synced_at: null }),
+    ])
+    expect(await isEntityUnsyncedForActor('group', 'G', 'ME')).toBe(true)
+  })
+
+  it("does not flag a group mutation for another group's unsynced member row", async () => {
+    await db.groups.add(makeGroup({ id: 'G', created_by: 'ME' }))
+    await db.group_members.bulkAdd([
+      makeMember({ group_id: 'G', user_id: 'ANN' }),
+      makeMember({ group_id: 'OTHER', user_id: 'BEN', synced_at: null }),
+    ])
+    expect(await isEntityUnsyncedForActor('group', 'G', 'ME')).toBe(false)
   })
 })

@@ -130,8 +130,10 @@ describe('processEvent recovers on bundle-fetch failure', () => {
 
   it('does NOT throw when the bill bundle fetch succeeds', async () => {
     supa.rpcError = null
+    // processEvent now reports whether it moved a local row (perf-pass-1). The stub returns no
+    // bundle at all, so nothing moved and nothing fell back to a pull: false, not undefined.
     await expect(
       processEvent('ME', makeEvent({ entity_type: 'bills', entity_id: 'B1' })),
-    ).resolves.toBeUndefined()
+    ).resolves.toBe(false)
   })
 })

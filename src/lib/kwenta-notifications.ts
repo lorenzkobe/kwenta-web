@@ -40,6 +40,12 @@ type NotificationOutboxEntry = {
   createdAt: string
   attempts: number
   lastError: string | null
+  /**
+   * The write this notification describes was accepted by the server (`commitCloudFirstWrite`
+   * returned `mode: 'cloud'`), so it can be sent without the pre-flush `syncRoundTrip`. Entries
+   * written before this field existed lack it and are treated as unconfirmed.
+   */
+  confirmed?: boolean
 }
 
 const NOTIFICATION_OUTBOX_KEY = 'kwenta_notification_outbox_v1'
@@ -77,7 +83,7 @@ function writeOutbox(next: NotificationOutboxEntry[]) {
   localStorage.setItem(NOTIFICATION_OUTBOX_KEY, JSON.stringify(next))
 }
 
-function enqueueNotificationRows(actorId: string, rows: NotificationInsertRow[]) {
+function enqueueNotificationRows(actorId: string, rows: NotificationInsertRow[], confirmed: boolean) {
   if (rows.length === 0) return
   const queue = readOutbox()
   queue.push({
@@ -87,6 +93,7 @@ function enqueueNotificationRows(actorId: string, rows: NotificationInsertRow[])
     createdAt: new Date().toISOString(),
     attempts: 0,
     lastError: null,
+    confirmed,
   })
   writeOutbox(queue)
 }
@@ -116,7 +123,12 @@ export async function flushQueuedKwentaNotifications(options?: FlushOptions): Pr
     const queue = readOutbox()
     if (queue.length === 0) return
 
-    if (!options?.assumeCloudAck) {
+    // The sync exists so a notification never points at a row the server lacks. When every entry
+    // this actor would send describes a write the server already accepted, that already holds and
+    // the full-bundle sync is pure cost. One unconfirmed entry (e.g. staged offline) still gates
+    // the whole flush.
+    const needsSync = queue.some((entry) => entry.actorId === actorId && entry.confirmed !== true)
+    if (!options?.assumeCloudAck && needsSync) {
       const syncResult = await syncRoundTrip(actorId)
       if (syncResult.errors.length > 0) {
         return
@@ -163,6 +175,7 @@ export async function notifyProfileLinked(params: {
   actorName: string
   recipientId: string
   linkedAsName: string
+  cloudConfirmed?: boolean
 }): Promise<void> {
   enqueueNotificationRows(params.actorId, [
     {
@@ -174,7 +187,7 @@ export async function notifyProfileLinked(params: {
       entity_id: null,
       group_id: null,
     },
-  ])
+  ], params.cloudConfirmed === true)
   void flushQueuedKwentaNotifications()
 }
 
@@ -186,6 +199,7 @@ export async function notifyBillParticipantsCreated(params: {
   billTitle: string
   groupId: string | null
   groupName: string | null
+  cloudConfirmed?: boolean
 }): Promise<void> {
   if (params.recipientIds.length === 0) return
 
@@ -204,7 +218,7 @@ export async function notifyBillParticipantsCreated(params: {
     group_id: params.groupId,
   }))
 
-  enqueueNotificationRows(params.actorId, rows)
+  enqueueNotificationRows(params.actorId, rows, params.cloudConfirmed === true)
   void flushQueuedKwentaNotifications()
 }
 
@@ -219,6 +233,7 @@ export async function notifyPaymentRecorded(params: {
   groupId: string | null
   groupName: string | null
   settlementId: string
+  cloudConfirmed?: boolean
 }): Promise<void> {
   const scope =
     params.groupId && params.groupName
@@ -240,7 +255,7 @@ export async function notifyPaymentRecorded(params: {
       entity_id: params.settlementId,
       group_id: params.groupId,
     },
-  ])
+  ], params.cloudConfirmed === true)
   void flushQueuedKwentaNotifications()
 }
 
@@ -263,6 +278,7 @@ export async function notifyPaymentsRecorded(params: {
     toName: string
     settlementId: string
   }[]
+  cloudConfirmed?: boolean
 }): Promise<void> {
   if (params.payments.length === 0) return
   const scope =
@@ -281,28 +297,30 @@ export async function notifyPaymentsRecorded(params: {
     entity_id: p.settlementId,
     group_id: params.groupId,
   }))
-  enqueueNotificationRows(params.actorId, rows)
+  enqueueNotificationRows(params.actorId, rows, params.cloudConfirmed === true)
   void flushQueuedKwentaNotifications()
 }
 
+/** One outbox entry (one insert) for every member a single add brought in. */
 export async function notifyAddedToGroup(params: {
   actorId: string
   actorName: string
-  recipientId: string
+  recipientIds: string[]
   groupId: string
   groupName: string
+  cloudConfirmed?: boolean
 }): Promise<void> {
-  enqueueNotificationRows(params.actorId, [
-    {
-      recipient_id: params.recipientId,
-      actor_id: params.actorId,
-      kind: 'added_to_group',
-      title: 'Added to a group',
-      body: `${params.actorName} added you to “${params.groupName}”.`,
-      entity_id: params.groupId,
-      group_id: params.groupId,
-    },
-  ])
+  if (params.recipientIds.length === 0) return
+  const rows: NotificationInsertRow[] = params.recipientIds.map((recipient_id) => ({
+    recipient_id,
+    actor_id: params.actorId,
+    kind: 'added_to_group',
+    title: 'Added to a group',
+    body: `${params.actorName} added you to “${params.groupName}”.`,
+    entity_id: params.groupId,
+    group_id: params.groupId,
+  }))
+  enqueueNotificationRows(params.actorId, rows, params.cloudConfirmed === true)
   void flushQueuedKwentaNotifications()
 }
 

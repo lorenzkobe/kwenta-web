@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { db } from '@/db/db'
 import {
-  addExistingGroupMember,
+  addExistingGroupMembers,
   addGroupMember,
   createBill,
   createBundledGroupSettlement,
@@ -271,7 +271,9 @@ describe('updateBill', () => {
     expect(activeItems[0].name).toBe('B')
   })
 
-  it('ignores edits from a non-creator', async () => {
+  // Was "ignores": a silent return let the page navigate as if the edit had been saved. The
+  // bill must still be untouched; the caller is now TOLD (leftovers pass, user decision).
+  it('refuses edits from a non-creator, leaving the bill untouched', async () => {
     const billId = await createBill({
       title: 'Mine',
       currency: 'PHP',
@@ -280,12 +282,14 @@ describe('updateBill', () => {
       note: '',
       items: [],
     })
-    await updateBill(billId, 'INTRUDER', {
-      title: 'Hacked',
-      note: '',
-      currency: 'PHP',
-      items: [],
-    })
+    await expect(
+      updateBill(billId, 'INTRUDER', {
+        title: 'Hacked',
+        note: '',
+        currency: 'PHP',
+        items: [],
+      }),
+    ).rejects.toThrow(/added this bill/i)
     expect((await db.bills.get(billId))?.title).toBe('Mine')
   })
 
@@ -405,7 +409,8 @@ describe('deleteBill', () => {
     expect(items.every((i) => i.is_deleted)).toBe(true)
   })
 
-  it('does nothing for a non-creator', async () => {
+  // Was "does nothing": same silent-success defect as updateBill above. Still untouched, now told.
+  it('refuses a non-creator, leaving the bill untouched', async () => {
     const billId = await createBill({
       title: 'Keep',
       currency: 'PHP',
@@ -414,7 +419,7 @@ describe('deleteBill', () => {
       note: '',
       items: [],
     })
-    await deleteBill(billId, 'OTHER')
+    await expect(deleteBill(billId, 'OTHER')).rejects.toThrow(/added this bill/i)
     expect((await db.bills.get(billId))?.is_deleted).toBe(false)
   })
 })
@@ -972,16 +977,18 @@ describe('member management permissions', () => {
     await db.group_members.add(makeMember({ group_id: 'G', user_id: creator }))
   }
 
-  it('addExistingGroupMember rejects a non-creator', async () => {
+  // perf-pass-1: the single-id addExistingGroupMember was replaced by the batch
+  // addExistingGroupMembers; the permission rule is unchanged and pinned here on the new API.
+  it('addExistingGroupMembers rejects a non-creator', async () => {
     await seedGroupOwnedBy('OWNER')
-    await expect(addExistingGroupMember('G', 'NEW', 'OUTSIDER')).rejects.toThrow(
+    await expect(addExistingGroupMembers('G', ['NEW'], 'OUTSIDER')).rejects.toThrow(
       /only the group creator/i,
     )
   })
 
-  it('addExistingGroupMember allows the creator', async () => {
+  it('addExistingGroupMembers allows the creator', async () => {
     await seedGroupOwnedBy('OWNER')
-    await addExistingGroupMember('G', 'NEW', 'OWNER')
+    await addExistingGroupMembers('G', ['NEW'], 'OWNER')
     const m = await db.group_members.where('[group_id+user_id]').equals(['G', 'NEW']).first()
     expect(m?.is_deleted).toBe(false)
   })

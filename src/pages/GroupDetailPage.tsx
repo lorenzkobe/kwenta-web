@@ -26,7 +26,7 @@ import {
 } from '@/api/balances'
 import { useServerData } from '@/hooks/useServerData'
 import {
-  addExistingGroupMember,
+  addExistingGroupMembers,
   createSettlement,
   removeGroupMember,
   deleteGroup,
@@ -46,7 +46,7 @@ import {
 } from '@/lib/settlement'
 import { buildSuggestedPayers } from '@/lib/settlement-suggestions'
 import { useCurrentUser } from '@/hooks/useCurrentUser'
-import { cn, formatCurrency } from '@/lib/utils'
+import { cn, describeError, formatCurrency } from '@/lib/utils'
 import {
   CATEGORY_COLORS,
   CATEGORY_ICONS,
@@ -74,7 +74,7 @@ import { MemberMultiPicker } from '@/components/common/MemberMultiPicker'
 import { PayIntoGroupDialog } from '@/components/common/PayIntoGroupDialog'
 import { GroupSettleUpDialog } from '@/components/common/GroupSettleUpDialog'
 import { MemberBalancesDialog } from '@/components/common/MemberBalancesDialog'
-import { SavedCopyNotice } from '@/components/common/SavedCopyNotice'
+import { RefreshingChip, SavedCopyNotice } from '@/components/common/SavedCopyNotice'
 
 const CURRENCY_OPTIONS = [
   ['PHP', 'PHP — Philippine Peso'],
@@ -109,7 +109,6 @@ function ManageMembersDialog({
   creatorUserId,
   isCreator,
   onClose,
-  onChanged,
 }: {
   groupId: string
   members: MemberRow[]
@@ -117,7 +116,6 @@ function ManageMembersDialog({
   creatorUserId: string
   isCreator: boolean
   onClose: () => void
-  onChanged: () => void
 }) {
   const [selectedIds, setSelectedIds] = useState<string[]>([])
   const [adding, setAdding] = useState(false)
@@ -166,11 +164,8 @@ function ManageMembersDialog({
     if (selectedIds.length === 0) return
     setAdding(true)
     try {
-      for (const id of selectedIds) {
-        await addExistingGroupMember(groupId, id, currentUserId)
-      }
+      await addExistingGroupMembers(groupId, selectedIds, currentUserId)
       setSelectedIds([])
-      onChanged()
     } catch (error) {
       toast.error(error instanceof Error ? error.message : 'Could not add the selected member(s) right now.')
     } finally {
@@ -186,7 +181,6 @@ function ManageMembersDialog({
     try {
       await removeGroupMember(groupId, memberUserId, currentUserId)
       toast.success('Member removed')
-      onChanged()
     } catch (error) {
       toast.error(error instanceof Error ? error.message : 'Could not remove this member right now.')
     } finally {
@@ -299,6 +293,7 @@ function ManageMembersDialog({
           : 'This member will be removed from the group.'
       }
       confirmLabel="Remove member"
+      pendingLabel="Removing…"
       variant="danger"
       onConfirm={executeRemoveMember}
     />
@@ -312,14 +307,12 @@ function EditGroupDialog({
   initialCurrency,
   currentUserId,
   onClose,
-  onSaved,
 }: {
   groupId: string
   initialName: string
   initialCurrency: string
   currentUserId: string
   onClose: () => void
-  onSaved: () => void
 }) {
   const [name, setName] = useState(initialName)
   const [currency, setCurrency] = useState(initialCurrency)
@@ -330,8 +323,9 @@ function EditGroupDialog({
     setSaving(true)
     try {
       await updateGroup(groupId, { name: name.trim(), currency }, currentUserId)
-      onSaved()
       onClose()
+    } catch (error) {
+      toast.error(describeError(error, 'Could not save this group right now.'))
     } finally {
       setSaving(false)
     }
@@ -860,10 +854,14 @@ export function GroupDetailPage() {
 
   async function confirmMerge() {
     if (!mergeTarget || !userId) return
-    await mergeProfileIdentity(mergeTarget.localId, mergeTarget.targetId, userId)
+    try {
+      await mergeProfileIdentity(mergeTarget.localId, mergeTarget.targetId, userId)
+    } catch (error) {
+      toast.error(describeError(error, 'Could not merge these contacts right now.'))
+      return
+    }
     setMergeTarget(null)
     await refreshDupCandidates()
-    detail.refresh()
   }
 
   async function executeDeleteGroup() {
@@ -936,7 +934,10 @@ export function GroupDetailPage() {
   return (
     <>
       <div className="space-y-5">
-        {detail.fromCache && detail.data && <SavedCopyNotice fetchedAt={detail.fetchedAt} />}
+        {detail.fromCache && !detail.revalidating && detail.data && (
+          <SavedCopyNotice fetchedAt={detail.fetchedAt} />
+        )}
+        <RefreshingChip show={detail.revalidating} />
         <div className="flex items-center justify-between gap-2">
           <Button asChild variant="ghost" size="sm" className="rounded-full gap-1">
             <Link to="/app/groups">
@@ -1313,7 +1314,6 @@ export function GroupDetailPage() {
           initialCurrency={group.currency}
           currentUserId={userId}
           onClose={() => setShowEditGroup(false)}
-          onSaved={detail.refresh}
         />
       )}
 
@@ -1325,7 +1325,6 @@ export function GroupDetailPage() {
           creatorUserId={group?.created_by ?? ''}
           isCreator={isGroupCreator}
           onClose={() => setShowManage(false)}
-          onChanged={detail.refresh}
         />
       )}
 
@@ -1352,9 +1351,6 @@ export function GroupDetailPage() {
         <EditSettlementDialog
           item={editingSettlement}
           onClose={() => setEditingSettlement(null)}
-          onSaved={() => {
-            void detail.refresh()
-          }}
         />
       )}
 
@@ -1370,7 +1366,6 @@ export function GroupDetailPage() {
             name: m.profileName,
             isCurrentUser: m.isCurrentUser,
           }))}
-          onRecorded={() => void detail.refresh()}
         />
       )}
 
@@ -1382,7 +1377,6 @@ export function GroupDetailPage() {
           currency={group.currency}
           markedBy={userId}
           payer={settleUpPayer}
-          onRecorded={() => void detail.refresh()}
           onUsePayInto={() => { setSettleUpPayer(null); setPayIntoGroupOpen(true) }}
         />
       )}
@@ -1426,10 +1420,7 @@ export function GroupDetailPage() {
               { enforceCap: true },
             )
           }}
-          onRecorded={() => {
-            setPayPerson(null)
-            void detail.refresh()
-          }}
+          onRecorded={() => setPayPerson(null)}
         />
       )}
 
@@ -1445,6 +1436,7 @@ export function GroupDetailPage() {
             : ''
         }
         confirmLabel="Merge"
+        pendingLabel="Merging…"
         onConfirm={confirmMerge}
       />
 
@@ -1454,6 +1446,7 @@ export function GroupDetailPage() {
         title="Delete this group?"
         description="This will remove the group and related bills from this device. This cannot be undone here."
         confirmLabel="Delete group"
+        pendingLabel="Deleting…"
         variant="danger"
         onConfirm={executeDeleteGroup}
       />
@@ -1519,7 +1512,6 @@ export function GroupDetailPage() {
           billId={detailBillId}
           currentUserId={userId}
           onClose={() => setDetailBillId(null)}
-          onUpdated={detail.refresh}
           onEdit={(id) => {
             setDetailBillId(null)
             setEditBillId(id)
@@ -1543,7 +1535,6 @@ export function GroupDetailPage() {
             setShowAddBill(false)
             setEditBillId(null)
           }}
-          onSaved={detail.refresh}
         />
       )}
     </>
