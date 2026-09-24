@@ -3,6 +3,7 @@ import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 import { VitePWA } from 'vite-plugin-pwa'
+import { vendorChunkFor } from './vendor-chunks'
 
 export default defineConfig({
   plugins: [
@@ -40,6 +41,11 @@ export default defineConfig({
   build: {
     // Prevent occasional workbox SW generation failures caused by terser renderChunk hanging.
     minify: 'esbuild',
+    rollupOptions: {
+      output: {
+        manualChunks: vendorChunkFor,
+      },
+    },
   },
   resolve: {
     alias: {

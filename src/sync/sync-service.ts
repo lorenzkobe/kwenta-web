@@ -169,7 +169,11 @@ export function getMillisecondsSinceLastRefresh(): number {
   if (!v) return Number.POSITIVE_INFINITY
   const t = Date.parse(v)
   if (Number.isNaN(t)) return Number.POSITIVE_INFINITY
-  return Math.max(0, Date.now() - t)
+  // A marker in the future means the clock moved backwards since it was stamped. Reading it as
+  // "just refreshed" would switch the staleness bounds off until real time caught up; one sync
+  // restamps it with the corrected clock instead.
+  const elapsed = Date.now() - t
+  return elapsed < 0 ? Number.POSITIVE_INFINITY : elapsed
 }
 
 export const TABLE_NAMES = [
@@ -372,6 +376,28 @@ export async function isEntityUnsyncedForActor(
       // fall back to the actor-global check so a genuinely dropped write is still caught.
       return hasUnsyncedLocalDataForUser(actorUserId)
   }
+}
+
+/**
+ * Whether this device may hold a write the server has not stored, answered without reading a row:
+ * a pending mutation (by the indexed `status`), or a row that was never pushed — IndexedDB leaves
+ * null keys out of an index, so the rows missing from the `synced_at` index are exactly those.
+ * Each table's two counts share one read transaction so an insert between them cannot hide one.
+ *
+ * Only the cheap gate a tab focus puts in front of {@link hasUnsyncedLocalDataForUser}. It can
+ * miss a row edited after its last push that carries no pending mutation (a partially applied
+ * soft-delete); the 5-minute backup tick runs the full check ungated, which bounds that.
+ */
+export async function mayHaveStagedRows(): Promise<boolean> {
+  if ((await db.pending_mutations.where('status').equals('pending').count()) > 0) return true
+  for (const tableName of TABLE_NAMES) {
+    const table = getLocalTable(tableName)
+    const [all, pushed] = await db.transaction('r', table, () =>
+      Promise.all([table.count(), table.where('synced_at').above('').count()]),
+    )
+    if (all > pushed) return true
+  }
+  return false
 }
 
 /** True if this user has local rows that still need a successful cloud push. */
@@ -787,6 +813,15 @@ async function getRelevantBillIds(userId: string): Promise<string[]> {
   return rows.map((r) => r.id)
 }
 
+/**
+ * Whether a deduplicated `fullSync` is running for this user — one a new `fullSync` call would
+ * JOIN rather than start. A joined sync may have read the server before the caller's reason to
+ * sync existed, so it must not be credited with covering it.
+ */
+export function isFullSyncInFlight(userId: string): boolean {
+  return isRuntimeFlagEnabled('dedupeSyncEnabled') && fullSyncInFlight.has(userId)
+}
+
 export async function fullSync(userId: string): Promise<SyncRoundTripResult> {
   if (isRuntimeFlagEnabled('dedupeSyncEnabled')) {
     const running = fullSyncInFlight.get(userId)
@@ -1056,4 +1091,39 @@ export async function syncRoundTrip(userId: string): Promise<SyncRoundTripResult
 
   invalidateIfMirrorMoved(changed)
   return { pushed: pushedCount, pulled, changed, errors: [] }
+}
+
+/**
+ * Whether the server has any `kwenta_user_events` row for this user newer than `sinceIso` (the
+ * realtime cursor), and the newest one's `created_at`: one indexed `LIMIT 1` read of the caller's own feed, which is what lets a tab
+ * focus skip downloading the complete bundle when nothing happened. Any doubt answers true, so a
+ * failure falls back to the full sync rather than to a stale mirror.
+ */
+export async function newestUserEventSince(userId: string, sinceIso: string): Promise<UserEventProbe> {
+  try {
+    const { data, error } = await supabase
+      .from('kwenta_user_events')
+      .select('created_at')
+      .eq('user_id', userId)
+      .gt('created_at', sinceIso)
+      .order('created_at', { ascending: false })
+      .limit(1)
+    if (error || !Array.isArray(data)) return { newer: true, newest: null }
+    const newest = (data[0] as { created_at?: unknown } | undefined)?.created_at
+    return data.length === 0
+      ? { newer: false, newest: null }
+      : { newer: true, newest: typeof newest === 'string' ? newest : null }
+  } catch {
+    return { newer: true, newest: null }
+  }
+}
+
+/**
+ * `newest` is the server's `created_at` of the newest such event (null when unknown): a sync that
+ * started after this probe covers everything up to it, so the caller may move the realtime cursor
+ * there — otherwise a missed event would make every later focus pay for a full sync again.
+ */
+export interface UserEventProbe {
+  newer: boolean
+  newest: string | null
 }

@@ -45,3 +45,22 @@ export function readLastRefreshAt(): string | null {
   }
   return legacy
 }
+
+/**
+ * Per-user key of the realtime cursor: the newest `kwenta_user_events.created_at` this device has
+ * drained. Only ever written from SERVER timestamps (CLAUDE.md rule 7) — a device-clock value in
+ * the future would hide every event until real time caught up, and the tab-focus probe
+ * (`sync-manager`) asks the server for events newer than this.
+ */
+export function realtimeCursorKey(userId: string): string {
+  return `kwenta_last_seen_user_event:${userId}`
+}
+
+/** The realtime cursor, or null when there is none (or storage cannot be read). */
+export function readRealtimeCursor(userId: string): string | null {
+  try {
+    return localStorage.getItem(realtimeCursorKey(userId)) || null
+  } catch {
+    return null
+  }
+}

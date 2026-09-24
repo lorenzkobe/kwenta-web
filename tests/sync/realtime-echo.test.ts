@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { db } from '@/db/db'
 import { useAppStore } from '@/store/app-store'
-import { makeBill, makeItem, makeSplit, resetDb } from '../helpers/db'
+import { makeBill, makeItem, makeMember, makeSplit, resetDb } from '../helpers/db'
 
 /**
  * perf-pass-1, C7-C10: a realtime event must only invalidate the screens when it actually moved
@@ -43,6 +43,10 @@ const h = vi.hoisted(() => {
     /** Per-RPC answer; a function lets a test hold a call open. */
     rpcAnswer: {} as Record<string, () => Promise<{ data: unknown; error: { message: string } | null }>>,
     syncResult: { pushed: 0, pulled: 0, changed: 0, errors: [] as string[] },
+    /** What waiting for this device's in-flight cloud writes does (072 echo skip). */
+    waitWrites: async (): Promise<boolean> => true,
+    /** Each `kwenta_user_events` query built, as its chained calls. */
+    queries: [] as unknown[][][],
   }
   const rpc = vi.fn(async (fn: string) => {
     const answer = state.rpcAnswer[fn]
@@ -55,12 +59,17 @@ const h = vi.hoisted(() => {
 
 vi.mock('@/lib/supabase', () => {
   function query(): Record<string, unknown> {
+    const calls: unknown[][] = []
+    h.state.queries.push(calls)
     const q: Record<string, unknown> = {
-      select: () => q,
-      eq: () => q,
-      gt: () => q,
-      order: () => q,
-      limit: async () => ({ data: h.state.catchUpEvents, error: null }),
+      select: (...a: unknown[]) => (calls.push(['select', ...a]), q),
+      eq: (...a: unknown[]) => (calls.push(['eq', ...a]), q),
+      gt: (...a: unknown[]) => (calls.push(['gt', ...a]), q),
+      order: (...a: unknown[]) => (calls.push(['order', ...a]), q),
+      limit: async (...a: unknown[]) => {
+        calls.push(['limit', ...a])
+        return { data: h.state.catchUpEvents, error: null }
+      },
     }
     return q
   }
@@ -101,6 +110,11 @@ vi.mock('@/sync/sync-service', async (importOriginal) => ({
   KWENTA_LAST_PULL_STORAGE_KEY: 'kwenta_last_pull',
 }))
 
+vi.mock('@/sync/in-flight-writes', () => ({
+  waitForInFlightCloudWrites: () => h.state.waitWrites(),
+  trackCloudWrite: <T>(p: Promise<T>) => p,
+}))
+
 vi.mock('@/lib/runtime-flags', () => ({
   isRuntimeFlagEnabled: (key: string) => Boolean(h.state.flags[key]),
 }))
@@ -111,6 +125,7 @@ vi.mock('@/lib/client-metrics', () => ({
 }))
 
 import { processEvent, startRealtimeForUser } from '@/sync/realtime-events'
+import { clearRealtimeProcessingFailed, realtimeProcessingFailed } from '@/sync/realtime-health'
 
 const USER = 'ME'
 /** The cursor key realtime-events reads on start and writes after each event. */
@@ -181,6 +196,9 @@ beforeEach(async () => {
   h.state.onChange = null
   h.state.rpcAnswer = {}
   h.state.syncResult = { pushed: 0, pulled: 0, changed: 0, errors: [] }
+  h.state.waitWrites = async () => true
+  h.state.queries = []
+  clearRealtimeProcessingFailed()
   const { bill, item, split } = storedRows()
   await db.bills.add(bill)
   await db.bill_items.add(item)
@@ -409,5 +427,346 @@ describe('startRealtimeForUser only bumps dataVersion when something moved', () 
     await settle()
 
     expect(version()).toBe(before + 1)
+  })
+})
+
+/**
+ * 072: every event names the row that fired it and its server version. An event whose row this
+ * device already mirrors at EXACTLY that version (synced) carries no news — it is the echo of this
+ * device's own write — so it costs no RPC, no round trip and no re-read. Anything less certain
+ * falls back to today's path.
+ */
+describe('echo skip: events for a row version this device already mirrors', () => {
+  /** Postgres renders the stored STORED_AT like this (to_jsonb of a timestamptz). */
+  const STORED_PG = '2026-09-20T10:00:00+00:00'
+  const NEWER_PG = '2026-09-23T10:00:00+00:00'
+
+  function rowEv(id: string, created_at: string, row: Record<string, unknown> | null, over: Partial<Ev> = {}): Ev {
+    return ev({ id, created_at, payload: { bill_id: 'B1', group_id: null, row }, ...over })
+  }
+
+  async function started() {
+    stop = startRealtimeForUser(USER)
+    await settle()
+    h.rpc.mockClear()
+    return version()
+  }
+
+  it('C3: a lone echo makes no RPC and no re-read, and the cursor advances', async () => {
+    const before = await started()
+
+    deliver(rowEv('x-1', '2026-09-23T12:00:01.000Z', { table: 'item_splits', id: 'S1', updated_at: STORED_PG }))
+    await vi.waitFor(() => expect(localStorage.getItem(CURSOR_KEY)).toBe('2026-09-23T12:00:01.000Z'))
+    await settle()
+
+    expect(h.rpc).not.toHaveBeenCalled()
+    expect(h.syncRoundTrip).not.toHaveBeenCalled()
+    expect(h.pullChanges).not.toHaveBeenCalled()
+    expect(version()).toBe(before)
+  })
+
+  it('C4: the burst of echoes one save produces (bill, item, splits) costs no RPC and no round trip', async () => {
+    const before = await started()
+
+    deliver(rowEv('y-1', '2026-09-23T12:00:01.000Z', { table: 'bills', id: 'B1', updated_at: STORED_PG }))
+    deliver(rowEv('y-2', '2026-09-23T12:00:02.000Z', { table: 'bill_items', id: 'I1', updated_at: STORED_PG }))
+    deliver(rowEv('y-3', '2026-09-23T12:00:03.000Z', { table: 'item_splits', id: 'S1', updated_at: STORED_PG }))
+    deliver(rowEv('y-4', '2026-09-23T12:00:04.000Z', { table: 'bills', id: 'B1', updated_at: STORED_PG }))
+    deliver(rowEv('y-5', '2026-09-23T12:00:05.000Z', { table: 'item_splits', id: 'S1', updated_at: STORED_PG }))
+    await vi.waitFor(() => expect(localStorage.getItem(CURSOR_KEY)).toBe('2026-09-23T12:00:05.000Z'))
+    await settle()
+
+    expect(h.rpc).not.toHaveBeenCalled()
+    expect(h.syncRoundTrip).not.toHaveBeenCalled()
+    expect(version()).toBe(before)
+  })
+
+  it('C5: echoes drained with one foreign event: only the foreign one is reconciled, no round trip', async () => {
+    const { split } = storedRows()
+    reconcileReturns({ item_splits: [{ ...split, computed_amount: 70, updated_at: NEWER_AT }] })
+    let release!: () => void
+    const held = new Promise<void>((r) => (release = r))
+    h.state.waitWrites = async () => {
+      await held
+      return true
+    }
+    const before = await started()
+
+    // The first delivery is drained alone and parks on the wait; the rest queue behind it and
+    // drain together as one batch of four.
+    deliver(rowEv('z-1', '2026-09-23T12:00:01.000Z', { table: 'bills', id: 'B1', updated_at: STORED_PG }))
+    deliver(rowEv('z-2', '2026-09-23T12:00:02.000Z', { table: 'bill_items', id: 'I1', updated_at: STORED_PG }))
+    deliver(rowEv('z-3', '2026-09-23T12:00:03.000Z', { table: 'bills', id: 'B1', updated_at: STORED_PG }))
+    deliver(rowEv('z-4', '2026-09-23T12:00:04.000Z', { table: 'item_splits', id: 'S1', updated_at: NEWER_PG }))
+    deliver(rowEv('z-5', '2026-09-23T12:00:05.000Z', { table: 'bill_items', id: 'I1', updated_at: STORED_PG }))
+    release()
+    await vi.waitFor(() => expect(localStorage.getItem(CURSOR_KEY)).toBe('2026-09-23T12:00:05.000Z'))
+    await settle()
+
+    expect(h.syncRoundTrip).not.toHaveBeenCalled()
+    expect(h.rpc).toHaveBeenCalledTimes(1)
+    expect(h.rpc).toHaveBeenCalledWith('kwenta_reconcile_user_event', expect.anything())
+    expect((await db.item_splits.get('S1'))?.computed_amount).toBe(70)
+    expect(version()).toBe(before + 1)
+  })
+
+  it('C6: a different version (another member edited the row) is reconciled as before', async () => {
+    const { split } = storedRows()
+    reconcileReturns({ item_splits: [{ ...split, computed_amount: 55, updated_at: NEWER_AT }] })
+    const before = await started()
+    deliver(rowEv('d-1', '2026-09-23T12:00:01.000Z', { table: 'item_splits', id: 'S1', updated_at: NEWER_PG }))
+    await vi.waitFor(() => expect(h.rpc).toHaveBeenCalledTimes(1))
+    await settle()
+    expect((await db.item_splits.get('S1'))?.computed_amount).toBe(55)
+    expect(version()).toBe(before + 1)
+  })
+
+  it('C6: a version one microsecond newer is not mistaken for the stored one', async () => {
+    await db.item_splits.update('S1', {
+      updated_at: '2026-09-20T10:00:00.123456+00:00',
+      synced_at: '2026-09-20T10:00:00.123456+00:00',
+    })
+    const before = await started()
+    reconcileReturns({})
+    deliver(rowEv('u-1', '2026-09-23T12:00:01.000Z', {
+      table: 'item_splits', id: 'S1', updated_at: '2026-09-20T10:00:00.123457+00:00',
+    }))
+    await vi.waitFor(() => expect(h.rpc).toHaveBeenCalledTimes(1))
+    await settle()
+    expect(version()).toBe(before + 1)
+  })
+
+  it('C7: a payload without a row (pre-072 server) is reconciled as before', async () => {
+    const before = await started()
+    reconcileReturns({})
+    deliver(rowEv('o-1', '2026-09-23T12:00:01.000Z', null, { payload: { bill_id: 'B1', group_id: null } }))
+    await vi.waitFor(() => expect(h.rpc).toHaveBeenCalledTimes(1))
+    await settle()
+    expect(version()).toBe(before + 1)
+  })
+
+  it('C8: a row this device has staged but not pushed (synced_at null) is not skipped', async () => {
+    await db.item_splits.update('S1', { synced_at: null })
+    const before = await started()
+    reconcileReturns({})
+    deliver(rowEv('s-1', '2026-09-23T12:00:01.000Z', { table: 'item_splits', id: 'S1', updated_at: STORED_PG }))
+    await vi.waitFor(() => expect(h.rpc).toHaveBeenCalledTimes(1))
+    await settle()
+    expect(version()).toBe(before + 1)
+  })
+
+  it('C8: a row this device does not hold is not skipped', async () => {
+    await started()
+    reconcileReturns({})
+    deliver(rowEv('m-1', '2026-09-23T12:00:01.000Z', { table: 'item_splits', id: 'S9', updated_at: STORED_PG }))
+    await vi.waitFor(() => expect(h.rpc).toHaveBeenCalledTimes(1))
+  })
+
+  it('C9: a DELETE event is never skipped, even carrying a mirrored row', async () => {
+    await started()
+    reconcileReturns({})
+    deliver(rowEv('del-1', '2026-09-23T12:00:01.000Z', { table: 'bills', id: 'B1', updated_at: STORED_PG }, { op: 'DELETE' }))
+    await vi.waitFor(() => expect(h.rpc).toHaveBeenCalledTimes(1))
+    expect(h.rpc).toHaveBeenCalledWith('kwenta_reconcile_user_event', expect.anything())
+  })
+
+  it('the skip also holds on the one-event-at-a-time path (coalescing off, catch-up)', async () => {
+    h.state.flags.coalesceRealtimeBatch = false
+    const before = await started()
+    deliver(rowEv('one-1', '2026-09-23T12:00:01.000Z', { table: 'item_splits', id: 'S1', updated_at: STORED_PG }))
+    await vi.waitFor(() => expect(localStorage.getItem(CURSOR_KEY)).toBe('2026-09-23T12:00:01.000Z'))
+    await settle()
+    expect(h.rpc).not.toHaveBeenCalled()
+    expect(version()).toBe(before)
+  })
+
+  it('a catch-up of a few missed echoes skips them one by one', async () => {
+    localStorage.setItem(CURSOR_KEY, '2026-09-23T09:00:00.000Z')
+    h.state.catchUpEvents = [
+      rowEv('c-1', '2026-09-23T11:00:01.000Z', { table: 'bills', id: 'B1', updated_at: STORED_PG }),
+      rowEv('c-2', '2026-09-23T11:00:02.000Z', { table: 'item_splits', id: 'S1', updated_at: STORED_PG }),
+    ]
+    stop = startRealtimeForUser(USER)
+    await vi.waitFor(() => expect(localStorage.getItem(CURSOR_KEY)).toBe('2026-09-23T11:00:02.000Z'))
+    await settle()
+    expect(h.rpc).not.toHaveBeenCalled()
+    expect(h.syncRoundTrip).not.toHaveBeenCalled()
+  })
+
+  it('C10: an echo that arrives before its write response is mirrored waits for the write, then skips', async () => {
+    let release!: () => void
+    const held = new Promise<void>((r) => (release = r))
+    h.state.waitWrites = async () => {
+      await held
+      return true
+    }
+    const before = await started()
+
+    deliver(rowEv('w-1', '2026-09-23T12:00:01.000Z', { table: 'item_splits', id: 'S1', updated_at: NEWER_PG }))
+    deliver(rowEv('w-2', '2026-09-23T12:00:02.000Z', { table: 'bills', id: 'B1', updated_at: NEWER_PG }))
+    await settle()
+    // The write's response lands: submitCloudWrite mirrors the server's rows, then settles.
+    await db.item_splits.update('S1', { updated_at: NEWER_PG, synced_at: NEWER_PG })
+    await db.bills.update('B1', { updated_at: NEWER_PG, synced_at: NEWER_PG })
+    release()
+    await vi.waitFor(() => expect(localStorage.getItem(CURSOR_KEY)).toBe('2026-09-23T12:00:02.000Z'))
+    await settle()
+
+    expect(h.rpc).not.toHaveBeenCalled()
+    expect(h.syncRoundTrip).not.toHaveBeenCalled()
+    expect(version()).toBe(before)
+  })
+
+  it('C14: when the wait times out, unmirrored events are processed normally and the cursor advances', async () => {
+    h.state.waitWrites = async () => false
+    await started()
+    reconcileReturns({})
+    deliver(rowEv('t-1', '2026-09-23T12:00:01.000Z', { table: 'item_splits', id: 'S1', updated_at: NEWER_PG }))
+    deliver(rowEv('t-2', '2026-09-23T12:00:02.000Z', { table: 'bills', id: 'B1', updated_at: NEWER_PG }))
+    deliver(rowEv('t-3', '2026-09-23T12:00:03.000Z', { table: 'bills', id: 'B1', updated_at: NEWER_PG }))
+    await vi.waitFor(() => expect(localStorage.getItem(CURSOR_KEY)).toBe('2026-09-23T12:00:03.000Z'))
+    await settle()
+    // t-1 drains alone and is reconciled; t-2 and t-3 drain together and take the round trip.
+    expect(h.rpc).toHaveBeenCalledTimes(1)
+    expect(h.syncRoundTrip).toHaveBeenCalledTimes(1)
+  })
+
+  it('C14: a timed-out wait still skips events that ARE mirrored', async () => {
+    h.state.waitWrites = async () => false
+    await started()
+    deliver(rowEv('tm-1', '2026-09-23T12:00:01.000Z', { table: 'item_splits', id: 'S1', updated_at: STORED_PG }))
+    deliver(rowEv('tm-2', '2026-09-23T12:00:02.000Z', { table: 'bills', id: 'B1', updated_at: STORED_PG }))
+    await vi.waitFor(() => expect(localStorage.getItem(CURSOR_KEY)).toBe('2026-09-23T12:00:02.000Z'))
+    await settle()
+    expect(h.rpc).not.toHaveBeenCalled()
+    expect(h.syncRoundTrip).not.toHaveBeenCalled()
+  })
+
+  it('a batch whose wait outlives sign-out does nothing for the old session', async () => {
+    let release!: () => void
+    const held = new Promise<void>((r) => (release = r))
+    h.state.waitWrites = async () => {
+      await held
+      return true
+    }
+    await started()
+    deliver(rowEv('so-1', '2026-09-23T12:00:01.000Z', { table: 'item_splits', id: 'S1', updated_at: NEWER_PG }))
+    await settle()
+    stop?.()
+    stop = null
+    const cursorBefore = localStorage.getItem(CURSOR_KEY)
+    release()
+    await settle()
+    expect(h.rpc).not.toHaveBeenCalled()
+    expect(h.syncRoundTrip).not.toHaveBeenCalled()
+    expect(localStorage.getItem(CURSOR_KEY)).toBe(cursorBefore)
+  })
+
+  it('C14: a wait that throws does not lose the batch', async () => {
+    h.state.waitWrites = async () => {
+      throw new Error('boom')
+    }
+    await started()
+    reconcileReturns({})
+    deliver(rowEv('th-1', '2026-09-23T12:00:01.000Z', { table: 'item_splits', id: 'S1', updated_at: NEWER_PG }))
+    await vi.waitFor(() => expect(localStorage.getItem(CURSOR_KEY)).toBe('2026-09-23T12:00:01.000Z'))
+    await settle()
+    expect(h.rpc).toHaveBeenCalledTimes(1)
+  })
+
+  it('C15: the groups refresh event of a membership change is skipped by its group_members row', async () => {
+    const member = makeMember({ id: 'GM1', group_id: 'G1', user_id: USER })
+    member.updated_at = STORED_AT
+    member.synced_at = STORED_AT
+    await db.group_members.add(member)
+    const before = await started()
+
+    deliver(ev({
+      id: 'g-1', created_at: '2026-09-23T12:00:01.000Z', entity_type: 'groups', entity_id: 'G1',
+      payload: { group_id: 'G1', row: { table: 'group_members', id: 'GM1', updated_at: STORED_PG } },
+    }))
+    await vi.waitFor(() => expect(localStorage.getItem(CURSOR_KEY)).toBe('2026-09-23T12:00:01.000Z'))
+    await settle()
+
+    expect(h.rpc).not.toHaveBeenCalled()
+    expect(h.pullChanges).not.toHaveBeenCalled()
+    expect(version()).toBe(before)
+  })
+})
+
+/**
+ * The tab-focus probe trusts the cursor, so two things the full focus sync used to paper over now
+ * have to hold on their own: a failed apply is remembered (the cursor moves past it regardless),
+ * and the cursor only ever holds a SERVER timestamp.
+ */
+describe('what the focus probe relies on', () => {
+  it('C13: an event whose fetch AND fallback pull fail marks realtime as failed', async () => {
+    h.state.flags.targetedRealtimeReconcile = false
+    h.state.rpcAnswer.kwenta_fetch_bill_bundle = async () => ({ data: null, error: { message: 'boom' } })
+    h.pullChanges.mockResolvedValueOnce({ pulled: 0, errors: ['pull failed'] })
+    stop = startRealtimeForUser(USER)
+    await settle()
+    deliver(ev({ id: 'f-1', created_at: '2026-09-23T10:00:07.000Z' }))
+    await vi.waitFor(() => expect(localStorage.getItem(CURSOR_KEY)).toBe('2026-09-23T10:00:07.000Z'))
+    await settle()
+    expect(realtimeProcessingFailed()).toBe(true)
+  })
+
+  it('C13: a fetch failure healed by the fallback pull does not mark it', async () => {
+    h.state.flags.targetedRealtimeReconcile = false
+    h.state.rpcAnswer.kwenta_fetch_bill_bundle = async () => ({ data: null, error: { message: 'boom' } })
+    stop = startRealtimeForUser(USER)
+    await settle()
+    deliver(ev({ id: 'f-2', created_at: '2026-09-23T10:00:08.000Z' }))
+    await vi.waitFor(() => expect(localStorage.getItem(CURSOR_KEY)).toBe('2026-09-23T10:00:08.000Z'))
+    await settle()
+    expect(h.pullChanges).toHaveBeenCalledTimes(1)
+    expect(realtimeProcessingFailed()).toBe(false)
+  })
+
+  it('C13: a coalesced batch whose round trip reports errors marks realtime as failed', async () => {
+    let release!: () => void
+    const held = new Promise<void>((r) => (release = r))
+    const { bill } = storedRows()
+    h.state.rpcAnswer.kwenta_reconcile_user_event = async () => {
+      await held
+      return { data: { bills: [bill] }, error: null }
+    }
+    h.state.syncResult = { pushed: 0, pulled: 0, changed: 0, errors: ['round trip failed'] }
+    stop = startRealtimeForUser(USER)
+    await settle()
+    deliver(ev({ id: 'rt-1', created_at: '2026-09-23T10:01:00.000Z' }))
+    await vi.waitFor(() => expect(h.rpc).toHaveBeenCalledWith('kwenta_reconcile_user_event', expect.anything()))
+    deliver(ev({ id: 'rt-2', created_at: '2026-09-23T10:01:01.000Z' }))
+    deliver(ev({ id: 'rt-3', created_at: '2026-09-23T10:01:02.000Z' }))
+    release()
+    await vi.waitFor(() => expect(h.syncRoundTrip).toHaveBeenCalledTimes(1))
+    await settle()
+    expect(realtimeProcessingFailed()).toBe(true)
+  })
+
+  it('C15: with no cursor and no events, stopping never stamps one from the device clock', async () => {
+    stop = startRealtimeForUser(USER)
+    await settle()
+    stop()
+    stop = null
+    expect(localStorage.getItem(CURSOR_KEY)).toBeNull()
+  })
+
+  it('C15: with no cursor, it starts from the newest SERVER event without replaying it', async () => {
+    h.state.catchUpEvents = [ev({ id: 'old-1', created_at: '2026-09-22T08:00:00.000Z' })]
+    stop = startRealtimeForUser(USER)
+    await vi.waitFor(() => expect(localStorage.getItem(CURSOR_KEY)).toBe('2026-09-22T08:00:00.000Z'))
+    await settle()
+    // The NEWEST event: descending, one row. Ascending would start from the oldest and replay
+    // the whole history (the mock returns rows regardless of order, so pin the query itself).
+    expect(h.state.queries).toContainEqual([
+      ['select', 'created_at'],
+      ['eq', 'user_id', USER],
+      ['order', 'created_at', { ascending: false }],
+      ['limit', 1],
+    ])
+    expect(h.rpc).not.toHaveBeenCalled()
+    expect(h.syncRoundTrip).not.toHaveBeenCalled()
   })
 })

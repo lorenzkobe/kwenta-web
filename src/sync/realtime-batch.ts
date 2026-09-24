@@ -64,3 +64,60 @@ export function planRealtimeBatch(
   // drained and reconnect catch-up will not refetch them.
   return { fresh, latestCreatedAt: latestEventCreatedAt(batch) }
 }
+
+/** Tables whose rows an event can name as the one that fired it (migration 072). */
+const MIRRORED_EVENT_TABLES = ['bills', 'bill_items', 'item_splits', 'settlements', 'groups', 'group_members'] as const
+export type MirroredEventTable = (typeof MIRRORED_EVENT_TABLES)[number]
+
+export interface EventRowVersion {
+  table: MirroredEventTable
+  id: string
+  updatedAt: string
+}
+
+/**
+ * The row that fired an event and the version it was stored at, or null when the event does not
+ * say (a pre-072 server, a hard delete) or says it in any shape this cannot read with certainty.
+ * `row.table` names the CHANGED row, which differs from `entity_type` for item and split events
+ * (filed under their bill) and for the groups refresh that a membership change emits. A DELETE
+ * never qualifies: a row that is gone has no version to hold.
+ */
+export function eventRowVersion(ev: Pick<UserEventRow, 'op' | 'payload'>): EventRowVersion | null {
+  if (ev.op === 'DELETE') return null
+  const payload = ev.payload
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return null
+  const row = (payload as Record<string, unknown>).row
+  if (!row || typeof row !== 'object' || Array.isArray(row)) return null
+  const { table, id, updated_at: updatedAt } = row as Record<string, unknown>
+  if (typeof table !== 'string' || !(MIRRORED_EVENT_TABLES as readonly string[]).includes(table)) return null
+  if (typeof id !== 'string' || id === '' || typeof updatedAt !== 'string' || updatedAt === '') return null
+  return { table: table as MirroredEventTable, id, updatedAt }
+}
+
+const TIMESTAMP_RE = /^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})(?:\.(\d{1,9}))?(Z|[+-]\d{2}(?::?\d{2})?)$/
+
+function parseInstant(value: string): { seconds: number; nanos: string } | null {
+  const m = typeof value === 'string' ? TIMESTAMP_RE.exec(value) : null
+  if (!m) return null
+  const [, date, time, fraction = '', zone] = m
+  let offset = zone
+  if (zone !== 'Z') {
+    const digits = zone.slice(1).replace(':', '')
+    offset = `${zone[0]}${digits.slice(0, 2)}:${digits.slice(2, 4) || '00'}`
+  }
+  const ms = Date.parse(`${date}T${time}${offset}`)
+  if (Number.isNaN(ms)) return null
+  return { seconds: ms / 1000, nanos: fraction.padEnd(9, '0') }
+}
+
+/**
+ * Whether two timestamps name the same instant, to the microsecond. Postgres stores microseconds
+ * and `Date.parse` keeps milliseconds, so two versions of one row written within the same
+ * millisecond would compare equal there — and an event for the second would be skipped as if the
+ * first were it. False for anything unparseable.
+ */
+export function sameInstant(a: string, b: string): boolean {
+  const x = parseInstant(a)
+  const y = parseInstant(b)
+  return x !== null && y !== null && x.seconds === y.seconds && x.nanos === y.nanos
+}

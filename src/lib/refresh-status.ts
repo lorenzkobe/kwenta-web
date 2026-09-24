@@ -32,7 +32,7 @@ export type RefreshStateInput = {
   hasPendingUpload: boolean
   /** Set by the sync manager when a refresh failed; in-memory, so it does not survive a reload. */
   pullStale: boolean
-  /** `Number.POSITIVE_INFINITY` when this device has never completed a refresh. */
+  /** `Number.POSITIVE_INFINITY` when this device has never completed a refresh, or its marker is dated in the future (the clock moved back). */
   msSinceLastRefresh: number
 }
 

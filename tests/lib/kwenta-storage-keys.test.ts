@@ -3,6 +3,8 @@ import {
   KWENTA_LAST_REFRESH_STORAGE_KEY,
   KWENTA_LEGACY_LAST_PULL_STORAGE_KEY,
   readLastRefreshAt,
+  readRealtimeCursor,
+  realtimeCursorKey,
 } from '@/lib/kwenta-storage-keys'
 
 /**
@@ -58,5 +60,40 @@ describe('readLastRefreshAt', () => {
     })
 
     expect(readLastRefreshAt()).toBeNull()
+  })
+})
+
+/**
+ * The realtime cursor: the newest SERVER-stamped `kwenta_user_events.created_at` this device has
+ * drained. The tab-focus probe asks the server for anything newer, so the key must be one shared
+ * helper — realtime-events writes it, sync-manager reads it.
+ */
+describe('readRealtimeCursor', () => {
+  it('is per user, under the key realtime-events has always used', () => {
+    expect(realtimeCursorKey('U1')).toBe('kwenta_last_seen_user_event:U1')
+    localStorage.setItem(realtimeCursorKey('U1'), '2026-09-24T01:00:00+00:00')
+    expect(readRealtimeCursor('U1')).toBe('2026-09-24T01:00:00+00:00')
+    expect(readRealtimeCursor('U2')).toBeNull()
+  })
+
+  it('treats a blank value as no cursor', () => {
+    localStorage.setItem(realtimeCursorKey('U1'), '')
+    expect(readRealtimeCursor('U1')).toBeNull()
+  })
+
+  it('returns null rather than throwing when storage reads fail', () => {
+    // Instance property: happy-dom's proxy ignores Storage.prototype spies (see CLAUDE.md).
+    const originalGet = localStorage.getItem
+    Object.defineProperty(localStorage, 'getItem', {
+      configurable: true,
+      value: () => {
+        throw new DOMException('SecurityError')
+      },
+    })
+    try {
+      expect(readRealtimeCursor('U1')).toBeNull()
+    } finally {
+      Object.defineProperty(localStorage, 'getItem', { configurable: true, writable: true, value: originalGet })
+    }
   })
 })

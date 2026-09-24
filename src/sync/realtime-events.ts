@@ -2,7 +2,8 @@ import { supabase } from '@/lib/supabase'
 import { db } from '@/db/db'
 import { captureMetric, withMetric } from '@/lib/client-metrics'
 import { isRuntimeFlagEnabled } from '@/lib/runtime-flags'
-import { now } from '@/lib/utils'
+import { readRealtimeCursor, realtimeCursorKey } from '@/lib/kwenta-storage-keys'
+import { markRealtimeProcessingFailed } from '@/sync/realtime-health'
 import type {
   SyncFields,
   Bill,
@@ -14,7 +15,14 @@ import type {
 } from '@/types'
 import { compareTimestamps, pullChanges, syncRoundTrip } from '@/sync/sync-service'
 import { useAppStore } from '@/store/app-store'
-import { latestEventCreatedAt, planRealtimeBatch, type UserEventRow } from '@/sync/realtime-batch'
+import {
+  eventRowVersion,
+  latestEventCreatedAt,
+  planRealtimeBatch,
+  sameInstant,
+  type UserEventRow,
+} from '@/sync/realtime-batch'
+import { waitForInFlightCloudWrites } from '@/sync/in-flight-writes'
 type ReconcileBundle = Partial<
   Record<
     | 'profiles'
@@ -30,8 +38,9 @@ type ReconcileBundle = Partial<
   >
 >
 
-const LAST_SEEN_EVENT_KEY = (userId: string) => `kwenta_last_seen_user_event:${userId}`
 const MAX_RECENT_EVENT_IDS = 1024
+/** How long a realtime batch waits for this device's in-flight writes before deciding (072). */
+const ECHO_WAIT_MS = 3_000
 
 /**
  * Tell every mounted server-backed screen to re-fetch.
@@ -142,6 +151,33 @@ async function applyReconcileBundle(bundle: ReconcileBundle): Promise<{ applied:
   return { applied, moved }
 }
 
+/**
+ * Whether the row that fired `ev` is already mirrored at exactly the version the event carries
+ * (migration 072) — the echo of this device's own write, or a change a sync already brought. Such
+ * an event has no news, so it needs no reconcile, no round trip and no re-read. Anything less than
+ * certain answers false and takes the normal path: a staged row (`synced_at` null) whose server
+ * state this device has not confirmed, a missing row, a different version, an old payload.
+ */
+async function isEventAlreadyMirrored(ev: UserEventRow): Promise<boolean> {
+  const version = eventRowVersion(ev)
+  if (!version) return false
+  try {
+    const row = (await db[version.table].get(version.id)) as SyncFields | undefined
+    return Boolean(row && row.synced_at !== null && sameInstant(row.updated_at, version.updatedAt))
+  } catch {
+    return false
+  }
+}
+
+/**
+ * The fallback pull, remembering when it fails. The cursor moves past the event either way, so a
+ * failure here is otherwise forgotten; the tab-focus probe reads this to sync instead.
+ */
+async function pullOrMarkFailed(userId: string): Promise<void> {
+  const result = await pullChanges(userId)
+  if (result.errors.length > 0) markRealtimeProcessingFailed()
+}
+
 function rememberEventId(recentOrder: string[], recentSet: Set<string>, eventId: string): void {
   if (recentSet.has(eventId)) return
   recentSet.add(eventId)
@@ -166,6 +202,7 @@ export async function processEvent(userId: string, ev: UserEventRow): Promise<bo
   if (ev.entity_type === 'profiles' && isRecord(ev.payload) && ev.payload.linked_profile_id) {
     // A round trip that changed rows has already bumped (sync-service); report only the push.
     const result = await syncRoundTrip(userId)
+    if (result.errors.length > 0) markRealtimeProcessingFailed()
     captureMetric('realtime.event.process', true, performance.now() - startedAt, {
       entity: ev.entity_type,
       op: ev.op,
@@ -192,7 +229,7 @@ export async function processEvent(userId: string, ev: UserEventRow): Promise<bo
         return moved > 0
       }
       if (shouldFallbackPullAfterNoopReconcile(ev)) {
-        await pullChanges(userId)
+        await pullOrMarkFailed(userId)
         captureMetric('realtime.event.process', true, performance.now() - startedAt, {
           entity: ev.entity_type,
           op: ev.op,
@@ -215,7 +252,7 @@ export async function processEvent(userId: string, ev: UserEventRow): Promise<bo
 
   // Deletes are tricky to represent without updated_at; safest is to pull changes.
   if (ev.op === 'DELETE') {
-    await pullChanges(userId)
+    await pullOrMarkFailed(userId)
     captureMetric('realtime.event.process', true, performance.now() - startedAt, { entity: ev.entity_type, op: ev.op, fallbackPull: true })
     return true
   }
@@ -258,7 +295,7 @@ export async function processEvent(userId: string, ev: UserEventRow): Promise<bo
       const gid = payload?.group_id as string | undefined
       if (!gid) {
         // Fall back: pull changes, since we can't locate the group reliably.
-        await pullChanges(userId)
+        await pullOrMarkFailed(userId)
         captureMetric('realtime.event.process', true, performance.now() - startedAt, { entity: ev.entity_type, op: ev.op, fallbackPull: true })
         return true
       }
@@ -293,7 +330,7 @@ export async function processEvent(userId: string, ev: UserEventRow): Promise<bo
     }
     default: {
       // Unknown entity type; reconcile via pull.
-      await pullChanges(userId)
+      await pullOrMarkFailed(userId)
       captureMetric('realtime.event.process', true, performance.now() - startedAt, { entity: ev.entity_type, op: ev.op, fallbackPull: true })
       return true
     }
@@ -326,6 +363,7 @@ async function catchUpSince(userId: string, sinceIso: string, onEvent: (ev: User
     // require probing kwenta_user_events and resetting the pull cursor).
     // A round trip that changed rows has already bumped (sync-service); only a push is left.
     const result = await syncRoundTrip(userId)
+    if (result.errors.length > 0) markRealtimeProcessingFailed()
     // Advance from the SERVER clock, never this device's. `kwenta_user_events.created_at` is
     // stamped by Postgres; writing now() here means a device whose clock runs fast stores a cursor
     // in the future, and the next catch-up's `.gt('created_at', cursor)` filters out every event
@@ -333,7 +371,7 @@ async function catchUpSince(userId: string, sinceIso: string, onEvent: (ev: User
     // skipped anything created between the query above and this write. The sibling batch path
     // already advances from the event rows themselves.
     const latestCreatedAt = latestEventCreatedAt(events)
-    if (latestCreatedAt) localStorage.setItem(LAST_SEEN_EVENT_KEY(userId), latestCreatedAt)
+    if (latestCreatedAt) localStorage.setItem(realtimeCursorKey(userId), latestCreatedAt)
     if (result.pushed > 0 && result.changed === 0) notifyServerDataChanged()
     return
   }
@@ -354,11 +392,17 @@ export function startRealtimeForUser(userId: string): () => void {
 
   async function processEventSafely(ev: UserEventRow): Promise<void> {
     if (recentEventSet.has(ev.id)) {
-      localStorage.setItem(LAST_SEEN_EVENT_KEY(userId), ev.created_at)
+      localStorage.setItem(realtimeCursorKey(userId), ev.created_at)
       return
     }
 
     rememberEventId(recentEventOrder, recentEventSet, ev.id)
+
+    if (await isEventAlreadyMirrored(ev)) {
+      localStorage.setItem(realtimeCursorKey(userId), ev.created_at)
+      captureMetric('realtime.event.echoSkipped', true, 0, { entity: ev.entity_type })
+      return
+    }
 
     let moved = false
     try {
@@ -371,7 +415,7 @@ export function startRealtimeForUser(userId: string): () => void {
         op: ev.op,
         error,
       })
-      await pullChanges(userId)
+      await pullOrMarkFailed(userId)
       captureMetric('realtime.event.process', false, 0, {
         entity: ev.entity_type,
         op: ev.op,
@@ -379,7 +423,7 @@ export function startRealtimeForUser(userId: string): () => void {
         unhandledError: true,
       })
     } finally {
-      localStorage.setItem(LAST_SEEN_EVENT_KEY(userId), ev.created_at)
+      localStorage.setItem(realtimeCursorKey(userId), ev.created_at)
       if (moved) notifyServerDataChanged()
     }
   }
@@ -394,8 +438,29 @@ export function startRealtimeForUser(userId: string): () => void {
     })
   }
 
-  const lastSeen = localStorage.getItem(LAST_SEEN_EVENT_KEY(userId)) ?? now()
-  scheduleCatchUp(lastSeen)
+  // No cursor yet: there is nothing to catch up FROM, and the device clock must never stand in for
+  // one (rule 7) — start from the newest event the server has instead, without replaying it.
+  const lastSeen = readRealtimeCursor(userId)
+  if (lastSeen) scheduleCatchUp(lastSeen)
+  else void initialiseCursorFromServer()
+
+  async function initialiseCursorFromServer(): Promise<void> {
+    try {
+      const { data, error } = await supabase
+        .from('kwenta_user_events')
+        .select('created_at')
+        .eq('user_id', userId)
+        .order('created_at', { ascending: false })
+        .limit(1)
+      const newest = !error && Array.isArray(data) ? (data[0] as { created_at?: unknown } | undefined)?.created_at : null
+      // An event drained meanwhile has already set a cursor; never move it backwards.
+      if (!disposed && typeof newest === 'string' && !readRealtimeCursor(userId)) {
+        localStorage.setItem(realtimeCursorKey(userId), newest)
+      }
+    } catch {
+      // No cursor stays no cursor: the next tab focus runs a full sync, as it always did.
+    }
+  }
 
   // Collapse a burst of events (e.g. a multi-leg settle-up fanned out into one
   // event per leg) into a single syncRoundTrip instead of one reconcile RPC per
@@ -403,37 +468,63 @@ export function startRealtimeForUser(userId: string): () => void {
   async function processBatch(batch: UserEventRow[]) {
     const plan = planRealtimeBatch(batch, (id) => recentEventSet.has(id))
 
-    if (plan.fresh.length <= 1) {
-      for (const ev of plan.fresh) await processEventSafely(ev)
+    // Drop events whose rows are already mirrored at their version BEFORE choosing between one
+    // reconcile and a round trip: one save echoes back as a burst (bill, item, every split), and
+    // counting those made every save cost a full sync. Waiting for this device's in-flight writes
+    // first lets an echo that beat its own response still be recognised. Waiting is only an
+    // optimisation — the mirror check is what decides — so a timeout or failure just skips less.
+    let fresh = plan.fresh
+    if (fresh.length > 0) {
+      try {
+        await waitForInFlightCloudWrites(ECHO_WAIT_MS)
+      } catch {
+        // Never lose the batch over the wait; the check below still holds on its own.
+      }
+      // Signed out (or switched account) while waiting: this batch belongs to a session that is gone.
+      if (disposed) return
+      const unmirrored: UserEventRow[] = []
+      for (const ev of fresh) {
+        if (await isEventAlreadyMirrored(ev)) rememberEventId(recentEventOrder, recentEventSet, ev.id)
+        else unmirrored.push(ev)
+      }
+      if (unmirrored.length < fresh.length) {
+        captureMetric('realtime.event.echoSkipped', true, 0, { skipped: fresh.length - unmirrored.length })
+      }
+      fresh = unmirrored
+    }
+
+    if (fresh.length <= 1) {
+      for (const ev of fresh) await processEventSafely(ev)
       if (plan.latestCreatedAt) {
-        localStorage.setItem(LAST_SEEN_EVENT_KEY(userId), plan.latestCreatedAt)
+        localStorage.setItem(realtimeCursorKey(userId), plan.latestCreatedAt)
       }
       return
     }
 
     // Remember every id up front so a redelivery of any of them is skipped.
-    for (const ev of plan.fresh) rememberEventId(recentEventOrder, recentEventSet, ev.id)
+    for (const ev of fresh) rememberEventId(recentEventOrder, recentEventSet, ev.id)
     const startedAt = performance.now()
     let moved = false
     try {
       const result = await syncRoundTrip(userId)
+      if (result.errors.length > 0) markRealtimeProcessingFailed()
       // A round trip that changed rows has already bumped (sync-service); only a push is left.
       moved = result.pushed > 0 && result.changed === 0
       captureMetric('realtime.batch.coalesced', true, performance.now() - startedAt, {
         events: batch.length,
-        fresh: plan.fresh.length,
+        fresh: fresh.length,
       })
     } catch (error) {
       console.warn('[realtime] coalesced batch sync failed; falling back to pull', { error })
       moved = true
-      await pullChanges(userId)
+      await pullOrMarkFailed(userId)
       captureMetric('realtime.batch.coalesced', false, performance.now() - startedAt, {
         events: batch.length,
-        fresh: plan.fresh.length,
+        fresh: fresh.length,
       })
     } finally {
       if (plan.latestCreatedAt) {
-        localStorage.setItem(LAST_SEEN_EVENT_KEY(userId), plan.latestCreatedAt)
+        localStorage.setItem(realtimeCursorKey(userId), plan.latestCreatedAt)
       }
       // Only the coalesced branch: the `<= 1` branch above delegates to processEventSafely,
       // which bumps for itself. Bumping in both would cost every mounted screen two round trips
@@ -482,8 +573,8 @@ export function startRealtimeForUser(userId: string): () => void {
     .subscribe((status) => {
       // On reconnect, do a quick catch-up query based on last seen timestamp.
       if (status === 'SUBSCRIBED') {
-        const sinceIso = localStorage.getItem(LAST_SEEN_EVENT_KEY(userId)) ?? now()
-        scheduleCatchUp(sinceIso)
+        const sinceIso = readRealtimeCursor(userId)
+        if (sinceIso) scheduleCatchUp(sinceIso)
       }
     })
 
@@ -491,8 +582,6 @@ export function startRealtimeForUser(userId: string): () => void {
     disposed = true
     queue.length = 0
     void supabase.removeChannel(channel)
-    // Ensure any eventual consistency backstop still advances after a disconnect.
-    localStorage.setItem(LAST_SEEN_EVENT_KEY(userId), localStorage.getItem(LAST_SEEN_EVENT_KEY(userId)) ?? now())
   }
 }
 

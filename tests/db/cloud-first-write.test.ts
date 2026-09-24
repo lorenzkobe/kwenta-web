@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { db } from '@/db/db'
 import { createBill, deleteBill, recordPersonPayment, updateBill } from '@/db/operations'
 import { makeGroup, makeMember, makeProfile, resetDb } from '../helpers/db'
+import { waitForInFlightCloudWrites } from '@/sync/in-flight-writes'
 
 // The cloud-first write contract: when the actor is ONLINE, a mutation is only visible
 // locally once the server has accepted it. Here the Supabase RPC is driven directly, so
@@ -22,6 +23,7 @@ const cloud = vi.hoisted(() => ({
   /** Tables the fake server refuses to store, to simulate a partial server-side drop. */
   refuse: new Set<string>(),
   pushes: [] as Record<string, { id: string }[]>[],
+  hold: null as Promise<void> | null,
 }))
 
 vi.mock('@/sync/sync-manager', () => ({ requestSyncNow: vi.fn(), triggerSync: vi.fn() }))
@@ -62,6 +64,7 @@ beforeEach(async () => {
   cloud.mode = 'ok'
   cloud.refuse = new Set()
   cloud.pushes = []
+  cloud.hold = null
   await db.profiles.bulkAdd([
     makeProfile({ id: 'ME', display_name: 'Me' }),
     makeProfile({ id: 'FR', display_name: 'Friend', is_local: true, owner_id: 'ME' }),
@@ -263,5 +266,21 @@ describe('cloud-first write contract', () => {
 
     expect(await db.bills.count()).toBe(1)
     expect((await db.bills.toArray())[0].id).toBe(billId)
+  })
+})
+
+describe('a write in flight is visible to the realtime echo check (072)', () => {
+  it('registers itself until the server answers, so an echo that beats the response can wait for it', async () => {
+    let release!: () => void
+    cloud.hold = new Promise<void>((r) => (release = r))
+
+    const saving = createBill(BILL_INPUT)
+    await vi.waitFor(() => expect(cloud.pushes).toHaveLength(1))
+    await expect(waitForInFlightCloudWrites(20)).resolves.toBe(false)
+
+    release()
+    const billId = await saving
+    expect(await db.bills.get(billId)).toBeTruthy()
+    await expect(waitForInFlightCloudWrites(20)).resolves.toBe(true)
   })
 })

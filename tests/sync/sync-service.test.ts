@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { db } from '@/db/db'
 import {
   getMillisecondsSinceLastRefresh,
+  mayHaveStagedRows,
   hasUnsyncedLocalDataForUser,
   isEntityUnsyncedForActor,
   isUnsyncedRow,
@@ -48,12 +49,16 @@ describe('getMillisecondsSinceLastRefresh', () => {
     expect(elapsed).toBeLessThan(11 * 60 * 1000)
   })
 
-  it('never returns a negative value for a future marker', () => {
+  it('treats a future marker as stale, not as just refreshed', () => {
+    // Changed deliberately (perf pass 2, item 3). This used to clamp to 0, which read a marker
+    // stamped before the clock moved backwards as "refreshed this instant" — switching off the
+    // 5-minute focus bound and the backup pull until real time caught up. Both clocks here are the
+    // device's, so a future marker only means the clock went back; one sync restamps it.
     localStorage.setItem(
       KWENTA_LAST_REFRESH_STORAGE_KEY,
       new Date(Date.now() + 60_000).toISOString(),
     )
-    expect(getMillisecondsSinceLastRefresh()).toBe(0)
+    expect(getMillisecondsSinceLastRefresh()).toBe(Number.POSITIVE_INFINITY)
   })
 
   it('adopts the legacy pull cursor so an upgraded install is not re-gated', () => {
@@ -312,5 +317,47 @@ describe('isEntityUnsyncedForActor', () => {
       makeMember({ group_id: 'OTHER', user_id: 'BEN', synced_at: null }),
     ])
     expect(await isEntityUnsyncedForActor('group', 'G', 'ME')).toBe(false)
+  })
+})
+
+/**
+ * The tab-focus gate in front of hasUnsyncedLocalDataForUser: answered from index counts, so a
+ * focus with nothing staged reads no table in full.
+ */
+describe('mayHaveStagedRows', () => {
+  beforeEach(async () => {
+    await resetDb()
+  })
+
+  it('is true while a mutation is still pending, whatever the rows say', async () => {
+    await db.pending_mutations.add({
+      id: 'PM1', actor_user_id: 'me', status: 'pending', entity_type: 'bill', entity_id: 'B1',
+      created_at: '2026-09-24T01:00:00Z', updated_at: '2026-09-24T01:00:00Z',
+    } as never)
+    expect(await mayHaveStagedRows()).toBe(true)
+  })
+
+  it('is false for an empty mirror and for rows that were pushed', async () => {
+    expect(await mayHaveStagedRows()).toBe(false)
+    const bill = makeBill({ id: 'B1', created_by: 'me' })
+    bill.synced_at = bill.updated_at
+    await db.bills.add(bill)
+    expect(await mayHaveStagedRows()).toBe(false)
+  })
+
+  it('is true when any table holds a row with synced_at null', async () => {
+    const bill = makeBill({ id: 'B1', created_by: 'me' })
+    bill.synced_at = bill.updated_at
+    await db.bills.add(bill)
+    await db.settlements.add({ ...makeSettlement({ id: 'S1' }), synced_at: null })
+    expect(await mayHaveStagedRows()).toBe(true)
+  })
+
+  it('reads no row: it never calls toArray on a table', async () => {
+    await db.bills.add({ ...makeBill({ id: 'B1', created_by: 'me' }), synced_at: null })
+    const spy = vi.spyOn(db.bills, 'toArray')
+    expect(await mayHaveStagedRows()).toBe(true)
+    expect(spy).not.toHaveBeenCalled()
+    spy.mockRestore()
   })
 })

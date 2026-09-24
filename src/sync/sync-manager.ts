@@ -4,11 +4,19 @@ import { flushQueuedKwentaNotifications, hasQueuedKwentaNotifications } from '@/
 import { markPendingMutationsApplied, markPendingMutationsConflict } from '@/sync/cloud-first-mutations'
 import { supabase } from '@/lib/supabase'
 import { useAppStore } from '@/store/app-store'
-import { readLastRefreshAt } from '@/lib/kwenta-storage-keys'
+import { readLastRefreshAt, readRealtimeCursor, realtimeCursorKey } from '@/lib/kwenta-storage-keys'
+import {
+  clearRealtimeProcessingFailed,
+  realtimeHealthToken,
+  realtimeProcessingFailed,
+} from '@/sync/realtime-health'
 import {
   fullSync,
   getMillisecondsSinceLastRefresh,
+  isFullSyncInFlight,
+  mayHaveStagedRows,
   hasUnsyncedLocalDataForUser,
+  newestUserEventSince,
   syncRoundTrip,
 } from './sync-service'
 
@@ -98,13 +106,76 @@ function monotonicNow(): number {
     : Date.now()
 }
 
+/**
+ * Whether a tab activation needs the full sync, cheapest question first. It used to always run
+ * one: the complete bundle plus a scan of every Dexie table, on every focus. Now it does only when
+ * something says the mirror may be behind:
+ *   - no completed refresh yet, or the last one is at least the backup interval old — the bound on
+ *     changes that emit no event (a contact or merge made on another device, a rename);
+ *   - a realtime event failed to apply (its cursor moved on anyway);
+ *   - a queued notification or a staged write — the sync is what sends them (index counts first,
+ *     so a quiet focus reads no table in full);
+ *   - no server cursor to ask from, or the server has an event newer than it.
+ * `newest` is set when the probe found newer events: the cursor may move there once the sync
+ * that follows has succeeded.
+ */
+async function activationNeedsSync(userId: string): Promise<{ sync: boolean; newest: string | null }> {
+  const yes = { sync: true, newest: null }
+  if (!readLastRefreshAt()) return yes
+  if (getMillisecondsSinceLastRefresh() >= SYNC_BACKUP_INTERVAL_MS) return yes
+  if (realtimeProcessingFailed()) return yes
+  if (await hasQueuedKwentaNotifications(userId)) return yes
+  // Gated for focus only. The backup tick must keep calling hasUnsyncedLocalDataForUser ungated:
+  // it is what bounds the rows this gate can miss (see mayHaveStagedRows).
+  if ((await mayHaveStagedRows()) && (await hasUnsyncedLocalDataForUser(userId))) return yes
+  const cursor = readRealtimeCursor(userId)
+  if (!cursor) return yes
+  const probe = await newestUserEventSince(userId, cursor)
+  return { sync: probe.newer, newest: probe.newest }
+}
+
+/** @returns whether the activation was handled (probed, or synced) — false gives the window back. */
+async function refreshOnActivation(): Promise<boolean> {
+  if (!useAppStore.getState().isOnline) return false
+  const session = await resolveSessionWithRetry()
+  if (!session?.user) return false
+  const userId = session.user.id
+  let decision: { sync: boolean; newest: string | null }
+  try {
+    decision = await activationNeedsSync(userId)
+  } catch {
+    // Unsure (a closed database, a failed read): do what every focus used to do.
+    decision = { sync: true, newest: null }
+  }
+  if (!decision.sync) return true
+  // A sync already running may have read the server before the event the probe found.
+  const coversProbe = !isFullSyncInFlight(userId)
+  const ran = await runSync('online')
+  if (ran && coversProbe && decision.newest && useAppStore.getState().syncStatus === 'idle') {
+    advanceRealtimeCursor(userId, decision.newest)
+  }
+  return ran
+}
+
+/** Moves the realtime cursor forward to a SERVER timestamp; never backwards. */
+function advanceRealtimeCursor(userId: string, serverCreatedAt: string) {
+  try {
+    const current = readRealtimeCursor(userId)
+    if (!current || Date.parse(serverCreatedAt) > Date.parse(current)) {
+      localStorage.setItem(realtimeCursorKey(userId), serverCreatedAt)
+    }
+  } catch {
+    // Storage unavailable: the next focus just probes (and syncs) again.
+  }
+}
+
 function onTabActivated() {
   if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return
   const nowMs = monotonicNow()
   if (nowMs - lastActivationRefreshAt < ACTIVATION_REFRESH_MIN_INTERVAL_MS) return
   const previous = lastActivationRefreshAt
   lastActivationRefreshAt = nowMs
-  void runSync('online').then((ran) => {
+  void refreshOnActivation().then((ran) => {
     // runSync bails out before doing any work when offline, without a session yet, or with one
     // already in flight. Claiming the window anyway would swallow the next real activation.
     if (!ran && lastActivationRefreshAt === nowMs) lastActivationRefreshAt = previous
@@ -154,6 +225,7 @@ async function runSync(reason: SyncRunReason): Promise<boolean> {
   }
 
   isSyncing = true
+  const healthToken = realtimeHealthToken()
   useAppStore.getState().setSyncStatus('syncing')
   useAppStore.getState().setSyncRetryAt(null)
 
@@ -181,12 +253,16 @@ async function runSync(reason: SyncRunReason): Promise<boolean> {
         // First hydration always invalidates once. `syncRoundTrip` already bumped if it changed
         // rows, so only bump here when it did not — two bumps would be two fetches per screen.
         if (initialResult.changed === 0) useAppStore.getState().bumpDataVersion()
+        clearRealtimeProcessingFailed(healthToken)
         await flushQueuedKwentaNotifications({ assumeCloudAck: true })
         void maybeAutoRepairData(userId)
         return true
       }
     }
 
+    // Joining a sync that was already running: it may predate a failure marked since, so it must
+    // not clear it (realtime-health).
+    const joinedRunningSync = isFullSyncInFlight(userId)
     const result = await fullSync(userId)
     if (result.errors.length > 0) {
       console.warn('[sync] errors:', result.errors)
@@ -199,6 +275,7 @@ async function runSync(reason: SyncRunReason): Promise<boolean> {
       scheduleRetry()
     } else {
       await markPendingMutationsApplied(userId)
+      if (!joinedRunningSync) clearRealtimeProcessingFailed(healthToken)
       resetBackoff()
       useAppStore.getState().setSyncStatus('idle')
       useAppStore.getState().setPullStale(false)

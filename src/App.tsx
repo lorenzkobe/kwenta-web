@@ -2,13 +2,15 @@ import { lazy, Suspense, useEffect } from 'react'
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom'
 import { Loader2 } from 'lucide-react'
 import { Toaster } from 'sonner'
-import { LandingPage } from '@/landing/LandingPage'
 import { AppShell } from '@/components/layout/AppShell'
 import { RequireAuth } from '@/components/auth/RequireAuth'
 import { RequireGuest } from '@/components/auth/RequireGuest'
 import { RequireAdmin } from '@/components/auth/RequireAdmin'
 import { AuthProvider } from '@/hooks/AuthProvider'
 
+// Lazy like every route: the landing page is for signed-out visitors, and as a static import it
+// put ~100 kB of marketing components into the entry chunk every signed-in user downloads.
+const importLandingPage = () => import('@/landing/LandingPage').then((m) => ({ default: m.LandingPage }))
 const importLoginPage = () => import('@/pages/LoginPage').then((m) => ({ default: m.LoginPage }))
 const importHomePage = () => import('@/pages/HomePage').then((m) => ({ default: m.HomePage }))
 const importBillsPage = () => import('@/pages/BillsPage').then((m) => ({ default: m.BillsPage }))
@@ -25,6 +27,7 @@ const importSettingsPage = () => import('@/pages/SettingsPage').then((m) => ({ d
 const importAdminUsersPage = () =>
   import('@/pages/AdminUsersPage').then((m) => ({ default: m.AdminUsersPage }))
 
+const LandingPage = lazy(importLandingPage)
 const LoginPage = lazy(importLoginPage)
 const HomePage = lazy(importHomePage)
 const BillsPage = lazy(importBillsPage)

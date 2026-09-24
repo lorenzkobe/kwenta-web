@@ -56,6 +56,8 @@ export type CloudMockState = {
   readSpecs?: Record<string, unknown>[][]
   /** Every RPC name called, in order — including reads, so a test can prove one did NOT happen. */
   rpcNames?: string[]
+  /** While set, `kwenta_write` does not answer until it resolves (a write still in flight). */
+  hold?: Promise<void> | null
 }
 
 const MISSING_FUNCTION = { code: 'PGRST202', message: 'Could not find the function' }
@@ -109,6 +111,7 @@ export function makeSupabaseCloudMock(state: CloudMockState) {
         const push = (args?.p_push ?? {}) as Record<string, { id: string }[]>
         state.pushes?.push(push)
         state.submissionIds?.push(submissionId)
+        if (state.hold) await state.hold
 
         if (state.mode === 'error') return { data: null, error: { message: 'network unreachable' } }
 

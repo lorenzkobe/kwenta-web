@@ -3,6 +3,7 @@ import { withMetric } from '@/lib/client-metrics'
 import { generateId } from '@/lib/utils'
 import { useAppStore } from '@/store/app-store'
 import { mountedReadSpecs, primeReads, type ReadSpec } from '@/api/primed-reads'
+import { trackCloudWrite } from '@/sync/in-flight-writes'
 import {
   PULL_SINCE_EPOCH,
   TABLE_NAMES,
@@ -374,11 +375,15 @@ export async function commitCloudFirstWrite(input: {
     return { mode: 'queued' }
   }
 
-  await submitCloudWrite({
-    actorUserId: input.actorUserId,
-    payload: input.payload,
-    submissionId: input.submissionId ?? generateId(),
-  })
+  // Tracked so the realtime path can wait for this write's rows to be mirrored before it
+  // decides whether their events are this write's own echoes.
+  await trackCloudWrite(
+    submitCloudWrite({
+      actorUserId: input.actorUserId,
+      payload: input.payload,
+      submissionId: input.submissionId ?? generateId(),
+    }),
+  )
   // Balances are computed on the server now, so a saved bill only reaches the screen when the
   // server-backed reads run again. Without this the user saves and nothing visibly changes.
   useAppStore.getState().bumpDataVersion()
