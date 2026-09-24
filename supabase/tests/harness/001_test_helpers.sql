@@ -399,3 +399,6 @@ $$;
 -- ---------------------------------------------------------------------------
 GRANT USAGE ON SCHEMA test TO authenticated;
 GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA test TO authenticated;
+-- 073 removed PUBLIC's default EXECUTE on functions postgres creates, so a helper a suite defines
+-- in its own file would otherwise be uncallable after `test.as_user`.
+ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA test GRANT EXECUTE ON FUNCTIONS TO authenticated;

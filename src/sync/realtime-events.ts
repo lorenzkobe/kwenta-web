@@ -558,14 +558,16 @@ export function startRealtimeForUser(userId: string): () => void {
     .on(
       'postgres_changes',
       {
-        event: '*',
+        // Events are append-only; a DELETE is the prune job (073). Supabase delivers DELETEs
+        // unfiltered and without RLS, with `new` = {}, so they must never reach the queue.
+        event: 'INSERT',
         schema: 'public',
         table: 'kwenta_user_events',
         filter: `user_id=eq.${userId}`,
       },
       (payload) => {
         const row = (payload.new ?? null) as UserEventRow | null
-        if (!row || disposed) return
+        if (!row || typeof row.id !== 'string' || typeof row.created_at !== 'string' || disposed) return
         queue.push(row)
         void flush()
       },

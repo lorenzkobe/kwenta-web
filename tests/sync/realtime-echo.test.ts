@@ -40,6 +40,8 @@ const h = vi.hoisted(() => {
     catchUpEvents: [] as unknown[],
     /** The postgres_changes handler startRealtimeForUser registers. */
     onChange: null as null | ((payload: { new: unknown }) => void),
+    /** The postgres_changes filter it registered with. */
+    changeFilter: null as unknown,
     /** Per-RPC answer; a function lets a test hold a call open. */
     rpcAnswer: {} as Record<string, () => Promise<{ data: unknown; error: { message: string } | null }>>,
     syncResult: { pushed: 0, pulled: 0, changed: 0, errors: [] as string[] },
@@ -79,8 +81,9 @@ vi.mock('@/lib/supabase', () => {
       from: () => query(),
       channel: () => {
         const ch = {
-          on: (_type: string, _filter: unknown, cb: (payload: { new: unknown }) => void) => {
+          on: (_type: string, filter: unknown, cb: (payload: { new: unknown }) => void) => {
             h.state.onChange = cb
+            h.state.changeFilter = filter
             return ch
           },
           subscribe: () => ch,
@@ -194,6 +197,7 @@ beforeEach(async () => {
   }
   h.state.catchUpEvents = []
   h.state.onChange = null
+  h.state.changeFilter = null
   h.state.rpcAnswer = {}
   h.state.syncResult = { pushed: 0, pulled: 0, changed: 0, errors: [] }
   h.state.waitWrites = async () => true
@@ -257,6 +261,34 @@ describe('processEvent reports whether it moved anything', () => {
 
     await expect(processEvent(USER, ev({ op: 'DELETE' }) as never)).resolves.toBe(true)
     expect(h.pullChanges).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('startRealtimeForUser ignores deleted event rows', () => {
+  // A prune job (073) hard-deletes old kwenta_user_events rows. Supabase delivers DELETE changes
+  // unfiltered and without RLS, with `new` = {} — queued, it ran a fallback pull and wrote an
+  // undefined cursor, breaking catch-up and the focus probe.
+  it('subscribes to INSERTs only', async () => {
+    stop = startRealtimeForUser(USER)
+    await settle()
+    expect(h.state.changeFilter).toMatchObject({ event: 'INSERT', table: 'kwenta_user_events' })
+  })
+
+  it('a DELETE-shaped payload makes no request and leaves the cursor alone', async () => {
+    localStorage.setItem(CURSOR_KEY, '2026-09-23T10:00:00.000Z')
+    stop = startRealtimeForUser(USER)
+    await settle()
+    h.rpc.mockClear()
+    const before = version()
+
+    h.state.onChange!({ new: {} })
+    await settle()
+
+    expect(h.rpc).not.toHaveBeenCalled()
+    expect(h.pullChanges).not.toHaveBeenCalled()
+    expect(h.syncRoundTrip).not.toHaveBeenCalled()
+    expect(localStorage.getItem(CURSOR_KEY)).toBe('2026-09-23T10:00:00.000Z')
+    expect(version()).toBe(before)
   })
 })
 

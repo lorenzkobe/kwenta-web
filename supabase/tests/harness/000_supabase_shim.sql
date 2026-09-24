@@ -14,6 +14,7 @@
 --     to a non-owner role (see `test.as_user`, which does exactly that). A test that forgets to
 --     switch proves nothing about RLS.
 --   * `service_role` here is an ordinary role, not a BYPASSRLS superuser-ish role.
+--   * Supabase's default privileges ARE emulated (below), so grant assertions reflect production.
 -- So: RLS conclusions still need a check against a real branch database before shipping. What
 -- this harness proves reliably is the *logic* — predicates, aggregation, money arithmetic.
 
@@ -35,6 +36,18 @@ $$;
 CREATE SCHEMA IF NOT EXISTS auth;
 GRANT USAGE ON SCHEMA auth TO anon, authenticated, service_role;
 GRANT USAGE ON SCHEMA public TO anon, authenticated, service_role;
+
+-- Supabase's default privileges, verbatim from production's pg_default_acl (role postgres, schema
+-- public). Every table, sequence and function a migration creates gets EXPLICIT grants to anon and
+-- authenticated, so `REVOKE ... FROM PUBLIC` alone leaves a function callable by both. Without
+-- this the suite could not see that: eleven server-only functions stayed open in production while
+-- every grant assertion here passed (073).
+ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public
+  GRANT ALL ON TABLES TO anon, authenticated, service_role;
+ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public
+  GRANT USAGE, SELECT, UPDATE ON SEQUENCES TO anon, authenticated, service_role;
+ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public
+  GRANT EXECUTE ON FUNCTIONS TO anon, authenticated, service_role;
 
 -- Only the columns the migrations actually touch: 025/035 read `email`, `email_confirmed_at`
 -- and `raw_user_meta_data` in the on-signup trigger; 030/040/050 reference `id`.

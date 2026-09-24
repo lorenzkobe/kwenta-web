@@ -187,8 +187,8 @@ BEGIN
     'the personal fanout is not executable by authenticated');
   PERFORM test.assert_false(has_function_privilege('anon', fn, 'EXECUTE'),
     'the personal fanout is not executable by anon');
-  -- The event writers. The harness has no Supabase default privileges, so these pass even without
-  -- 072's explicit revokes; whether production had granted them must be checked on a branch DB.
+  -- The event writers. The harness emulates Supabase's default privileges (since 073), so these
+  -- fail without 072's explicit revokes, as production would have.
   PERFORM test.assert_false(has_function_privilege('authenticated',
     'public.kwenta_emit_user_event(uuid, text, text, uuid, text, jsonb)', 'EXECUTE'),
     'kwenta_emit_user_event is not executable by authenticated');
