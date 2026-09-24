@@ -227,7 +227,8 @@ function isDatabaseClosedError(err: unknown): boolean {
 
 type PushFilterContext = {
   groupsICreated: Set<string>
-  memberGroupIds: Set<string>
+  /** `kwenta_can_write_group` (075): an active member, or the group's creator. */
+  writableGroupIds: Set<string>
   allowedBillIds: Set<string>
   allowedItemIds: Set<string>
 }
@@ -237,26 +238,24 @@ export function getLocalTable(name: TableName): Table<any, string> {
   return db[name]
 }
 
-/** Rows the current user is allowed to upsert per Supabase RLS (not every local row). */
+/** Rows the current user may push, mirroring the `kwenta_push_*` validators (075). A row this
+ *  lets through that the server refuses fails its submission, so the two must agree. */
 async function buildPushFilterContext(userId: string): Promise<PushFilterContext> {
   const allGroups = await db.groups.toArray()
-  const groupsICreated = new Set(
-    allGroups.filter((g) => !g.is_deleted && g.created_by === userId).map((g) => g.id),
-  )
+  // Deleted groups included: a deleteGroup staged offline deletes the group row first and must
+  // still push the rest of its cascade, which the server admits through the creator arm.
+  const groupsICreated = new Set(allGroups.filter((g) => g.created_by === userId).map((g) => g.id))
 
   const allMemberships = await db.group_members.where('user_id').equals(userId).toArray()
-  const memberGroupIds = new Set(
-    allMemberships.filter((m) => !m.is_deleted).map((m) => m.group_id),
-  )
+  const writableGroupIds = new Set(groupsICreated)
+  for (const m of allMemberships) {
+    if (!m.is_deleted) writableGroupIds.add(m.group_id)
+  }
 
   const allBills = await db.bills.toArray()
   const allowedBillIds = new Set<string>()
   for (const b of allBills) {
-    if (b.created_by === userId) {
-      allowedBillIds.add(b.id)
-      continue
-    }
-    if (b.group_id && memberGroupIds.has(b.group_id)) {
+    if (b.group_id ? writableGroupIds.has(b.group_id) : b.created_by === userId) {
       allowedBillIds.add(b.id)
     }
   }
@@ -269,7 +268,7 @@ async function buildPushFilterContext(userId: string): Promise<PushFilterContext
     }
   }
 
-  return { groupsICreated, memberGroupIds, allowedBillIds, allowedItemIds }
+  return { groupsICreated, writableGroupIds, allowedBillIds, allowedItemIds }
 }
 
 function filterUnsyncedForPush(
@@ -282,7 +281,7 @@ function filterUnsyncedForPush(
     case 'profiles': {
       return unsynced.filter((r) => {
         const p = r as Profile
-        if (p.id === userId) return true
+        if (p.id === userId) return !p.linked_profile_id
         return Boolean(p.is_local && p.owner_id === userId)
       })
     }
@@ -304,16 +303,14 @@ function filterUnsyncedForPush(
       return unsynced.filter((r) => {
         const s = r as Settlement
         if (s.group_id) {
-          return ctx.memberGroupIds.has(s.group_id)
+          return ctx.writableGroupIds.has(s.group_id)
         }
         return s.from_user_id === userId || s.to_user_id === userId
       })
     case 'activity_log':
       return unsynced.filter((r) => {
         const a = r as ActivityLog
-        if (a.user_id === userId) return true
-        if (a.group_id && ctx.memberGroupIds.has(a.group_id)) return true
-        return false
+        return a.user_id === userId && (!a.group_id || ctx.writableGroupIds.has(a.group_id))
       })
     case 'profile_peer_links':
       return unsynced.filter((r) => (r as ProfilePeerLink).owner_user_id === userId)

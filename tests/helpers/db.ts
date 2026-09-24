@@ -1,5 +1,6 @@
 import { db } from '@/db/db'
 import type {
+  ActivityLog,
   Bill,
   BillItem,
   Group,
@@ -46,6 +47,20 @@ export function makeProfile(over: Partial<Profile> = {}): Profile {
     is_local: false,
     linked_profile_id: null,
     owner_id: null,
+    ...over,
+  }
+}
+
+export function makeActivity(over: Partial<ActivityLog> = {}): ActivityLog {
+  const id = over.id ?? tid('activity')
+  return {
+    ...syncFields(id),
+    group_id: null,
+    user_id: over.user_id ?? tid('user'),
+    action: 'created',
+    entity_type: 'bill',
+    entity_id: tid('entity'),
+    description: 'test',
     ...over,
   }
 }

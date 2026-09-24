@@ -966,6 +966,44 @@ describe('deletePerson atomic cascade', () => {
   })
 })
 
+describe('deletePerson on personal bills (075: a personal bill is its creator\'s alone)', () => {
+  it('redistributes on bills I created and leaves bills someone else created untouched', async () => {
+    await db.profiles.bulkAdd([
+      makeProfile({ id: 'ME' }),
+      makeProfile({ id: 'OTHER' }),
+      makeProfile({ id: 'Q' }),
+      makeProfile({ id: 'P', is_local: true, owner_id: 'ME' }),
+    ])
+    // Mine: three people, so P's split is dropped and the item re-split between ME and Q.
+    await db.bills.add(makeBill({ id: 'MB', group_id: null, created_by: 'ME', paid_by: 'ME', total_amount: 90 }))
+    await db.bill_items.add(makeItem({ id: 'MI', bill_id: 'MB', amount: 90 }))
+    await db.item_splits.bulkAdd([
+      makeSplit({ id: 'M-ME', item_id: 'MI', user_id: 'ME', computed_amount: 30 }),
+      makeSplit({ id: 'M-P', item_id: 'MI', user_id: 'P', computed_amount: 30 }),
+      makeSplit({ id: 'M-Q', item_id: 'MI', user_id: 'Q', computed_amount: 30 }),
+    ])
+    // Someone else's, visible here because I am on it. The server refuses any write to it (075),
+    // so touching it would make the whole deletePerson submission fail.
+    await db.bills.add(makeBill({ id: 'OB', group_id: null, created_by: 'OTHER', paid_by: 'OTHER', total_amount: 90 }))
+    await db.bill_items.add(makeItem({ id: 'OI', bill_id: 'OB', amount: 90 }))
+    await db.item_splits.bulkAdd([
+      makeSplit({ id: 'O-ME', item_id: 'OI', user_id: 'ME', computed_amount: 30 }),
+      makeSplit({ id: 'O-P', item_id: 'OI', user_id: 'P', computed_amount: 30 }),
+      makeSplit({ id: 'O-OTHER', item_id: 'OI', user_id: 'OTHER', computed_amount: 30 }),
+    ])
+
+    await deletePerson('P', 'ME')
+
+    expect((await db.item_splits.get('M-P'))?.is_deleted).toBe(true)
+    expect((await db.item_splits.get('M-ME'))?.computed_amount).toBe(45)
+    expect((await db.item_splits.get('M-Q'))?.computed_amount).toBe(45)
+
+    expect((await db.item_splits.get('O-P'))?.is_deleted).toBe(false)
+    expect((await db.item_splits.get('O-ME'))?.computed_amount).toBe(30)
+    expect((await db.bills.get('OB'))?.is_deleted).toBe(false)
+  })
+})
+
 describe('member management permissions', () => {
   async function seedGroupOwnedBy(creator: string) {
     await db.profiles.bulkAdd([

@@ -61,14 +61,16 @@ $$;
 
 DO $$
 BEGIN
-  -- Every name here is called by the client (src/**: `rpc(`, src/api/balances.ts, or kwenta_read's
+  -- Since 074 the RLS helpers here are the caller-scoped wrappers; the two-argument ones are
+  -- server-only. Every name here is called by the client (src/**: `rpc(`, src/api/balances.ts, or kwenta_read's
   -- whitelist), is an RLS policy helper, is SECURITY INVOKER and adds no authority
   -- (kwenta_read_is_allowed, kwenta_round_money), or answers only for auth.uid() and has no client
   -- caller yet (kwenta_bill_settled_for_me).
   -- Adding a client endpoint means adding it here, on purpose.
   PERFORM test.assert_eq(test.executable_by('authenticated'), ARRAY[
     'admin_delete_user', 'admin_list_profiles', 'admin_set_account_status', 'admin_set_user_type',
-    'bills_for_sync', 'is_admin', 'is_group_member',
+    'bills_for_sync', 'caller_can_read_personal_bill', 'caller_is_group_member',
+    'caller_is_participant_on_personal_bill', 'is_admin',
     'kwenta_balances_overview', 'kwenta_bill_detail', 'kwenta_bill_settled_for_me',
     'kwenta_bill_settlement_history', 'kwenta_contacts_with_balances',
     'kwenta_fetch_bill_bundle', 'kwenta_fetch_group_bundle', 'kwenta_fetch_profile_for_linking',
@@ -78,12 +80,12 @@ BEGIN
     'kwenta_person_statement', 'kwenta_person_summary', 'kwenta_personal_bills', 'kwenta_read',
     'kwenta_read_is_allowed', 'kwenta_recent_bills', 'kwenta_reconcile_user_event',
     'kwenta_repair_settlements', 'kwenta_round_money',
-    'kwenta_search', 'kwenta_sync', 'kwenta_write', 'relevant_bill_ids_for_user',
-    'user_can_read_personal_bill', 'user_is_participant_on_personal_bill'
+    'kwenta_search', 'kwenta_sync', 'kwenta_write', 'relevant_bill_ids_for_user'
   ]::text[], 'authenticated executes exactly the client allowlist');
 
   PERFORM test.assert_eq(test.executable_by('anon'), ARRAY[
-    'is_admin', 'is_group_member', 'user_can_read_personal_bill', 'user_is_participant_on_personal_bill'
+    'caller_can_read_personal_bill', 'caller_is_group_member', 'caller_is_participant_on_personal_bill',
+    'is_admin'
   ]::text[], 'anon executes only the helpers RLS policies call');
 END;
 $$;

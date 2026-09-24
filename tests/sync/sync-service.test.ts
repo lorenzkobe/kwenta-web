@@ -14,7 +14,7 @@ import {
   PULL_SINCE_EPOCH,
 } from '@/sync/sync-service'
 import { KWENTA_LEGACY_LAST_PULL_STORAGE_KEY } from '@/lib/kwenta-storage-keys'
-import { makeBill, makeGroup, makeMember, makeProfile, makeSettlement, resetDb } from '../helpers/db'
+import { makeActivity, makeBill, makeGroup, makeItem, makeMember, makeProfile, makeSettlement, makeSplit, resetDb } from '../helpers/db'
 
 // sync-service imports the Supabase client at module load; neither function
 // under test makes a network call, so a benign stub is enough.
@@ -121,6 +121,47 @@ describe('hasUnsyncedLocalDataForUser', () => {
       }),
     )
     expect(await hasUnsyncedLocalDataForUser('ME')).toBe(true)
+  })
+})
+
+describe('push filter mirrors the 075 validators', () => {
+  it("does not push an edit to someone else's personal bill, even one I am on", async () => {
+    await db.profiles.bulkAdd([makeProfile({ id: 'ME' }), makeProfile({ id: 'OTHER' })])
+    await db.bills.add(makeBill({ id: 'B', created_by: 'OTHER', paid_by: 'OTHER', group_id: null }))
+    await db.bill_items.add(makeItem({ id: 'I', bill_id: 'B' }))
+    await db.item_splits.add(makeSplit({ id: 'S', item_id: 'I', user_id: 'ME', synced_at: null }))
+    expect(await hasUnsyncedLocalDataForUser('ME')).toBe(false)
+  })
+
+  it('does not push a group bill once I am no longer a member, even one I created', async () => {
+    await db.profiles.bulkAdd([makeProfile({ id: 'ME' }), makeProfile({ id: 'OWNER' })])
+    await db.groups.add(makeGroup({ id: 'G', created_by: 'OWNER' }))
+    await db.group_members.add(makeMember({ group_id: 'G', user_id: 'ME', is_deleted: true }))
+    await db.bills.add(makeBill({ id: 'B', group_id: 'G', created_by: 'ME', paid_by: 'ME', synced_at: null }))
+    expect(await hasUnsyncedLocalDataForUser('ME')).toBe(false)
+  })
+
+  it("pushes a deleted group's cascade for its creator (deleteGroup staged offline)", async () => {
+    await db.profiles.add(makeProfile({ id: 'ME' }))
+    await db.groups.add(makeGroup({ id: 'G', created_by: 'ME', is_deleted: true }))
+    await db.group_members.add(makeMember({ group_id: 'G', user_id: 'ME', is_deleted: true }))
+    await db.bills.add(
+      makeBill({ id: 'B', group_id: 'G', created_by: 'OTHER', paid_by: 'OTHER', is_deleted: true, synced_at: null }),
+    )
+    expect(await hasUnsyncedLocalDataForUser('ME')).toBe(true)
+  })
+
+  it('does not push a log line authored by someone else', async () => {
+    await db.profiles.add(makeProfile({ id: 'ME' }))
+    await db.groups.add(makeGroup({ id: 'G', created_by: 'ME' }))
+    await db.group_members.add(makeMember({ group_id: 'G', user_id: 'ME' }))
+    await db.activity_log.add(makeActivity({ group_id: 'G', user_id: 'OTHER', synced_at: null }))
+    expect(await hasUnsyncedLocalDataForUser('ME')).toBe(false)
+  })
+
+  it('does not push my account profile carrying a link', async () => {
+    await db.profiles.add(makeProfile({ id: 'ME', linked_profile_id: 'OTHER', synced_at: null }))
+    expect(await hasUnsyncedLocalDataForUser('ME')).toBe(false)
   })
 })
 

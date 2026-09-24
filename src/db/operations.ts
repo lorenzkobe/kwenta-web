@@ -1365,7 +1365,7 @@ export async function removeGroupMember(
 }
 
 /**
- * Remove a person from all personal (non-group) bills.
+ * Remove a person from the personal (non-group) bills YOU created.
  * - If the bill only involves you and them (no other participants), soft-delete the whole bill.
  * - Otherwise remove their splits and redistribute equal splits among remaining people (same as group removal).
  */
@@ -1375,8 +1375,13 @@ async function removePersonFromPersonalBills(
   collect: MutationRowCollector,
 ): Promise<void> {
   const actorId = removedBy
+  // Only bills the actor created: a personal bill is its creator's alone (075), so a write to one
+  // someone else created is refused and would fail this whole cascade.
   const allPersonal = await db.bills
-    .filter((b) => !b.is_deleted && (b.group_id === null || b.group_id === undefined))
+    .filter(
+      (b) =>
+        !b.is_deleted && (b.group_id === null || b.group_id === undefined) && b.created_by === actorId,
+    )
     .toArray()
 
   // Bills that involve only you two are removed outright; their rows join the cascade.
