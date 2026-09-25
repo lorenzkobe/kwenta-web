@@ -1,10 +1,14 @@
 import { useState, useEffect, useCallback, useMemo } from 'react'
 import { Link } from 'react-router-dom'
 import { toast } from 'sonner'
-import { BookUser, ChevronRight, Loader2, Plus, UserPlus } from 'lucide-react'
+import { BookUser, CheckSquare, ChevronRight, Loader2, Plus, Share2, Square, UserPlus } from 'lucide-react'
 import { useLiveQuery } from 'dexie-react-hooks'
 import { fetchContactsWithBalances, totalsToMap, type ContactBalanceRow } from '@/api/balances'
 import { useServerData } from '@/hooks/useServerData'
+import { useSelection } from '@/hooks/useSelection'
+import { buildPeerShareRows, selectionShareState } from '@/lib/balance-share'
+import { ExportImageDialog } from '@/components/export/ExportImageDialog'
+import { PeopleSelectionExportCard } from '@/components/export/PeopleSelectionExportCard'
 import { loadStagedContactRows } from '@/lib/staged-rows'
 import { formatPairwiseSummary } from '@/lib/people'
 import { RefreshingChip, SavedCopyNotice } from '@/components/common/SavedCopyNotice'
@@ -22,6 +26,8 @@ export function PeoplePage() {
   const [adding, setAdding] = useState(false)
   const [duplicateNotice, setDuplicateNotice] = useState<string | null>(null)
   const [balanceFilter, setBalanceFilter] = useState<'with_balance' | 'all'>('with_balance')
+  const selection = useSelection(userId ?? '')
+  const [shareOpen, setShareOpen] = useState(false)
 
   // The server returns one row per real person with their combined standing already computed.
   // This used to load every bill and settlement in the database and then recompute a pairwise
@@ -44,13 +50,18 @@ export function PeoplePage() {
   const rows = useMemo(() => {
     if (!contacts.data) return undefined
     const confirmed = new Set(contacts.data.map((row) => row.peerId))
-    const merged = [...stagedContacts.filter((c) => !confirmed.has(c.peerId)), ...contacts.data]
-    const out = merged.map((row) => {
+    const staged = stagedContacts.filter((c) => !confirmed.has(c.peerId))
+    const out = [
+      ...staged.map((row) => ({ row, staged: true })),
+      ...contacts.data.map((row) => ({ row, staged: false })),
+    ].map(({ row, staged }) => {
       const { lines, primaryLabel, tone } = formatPairwiseSummary(totalsToMap(row.net))
       return {
         id: row.peerId,
         displayName: row.displayName,
         subtitle: row.subtitle,
+        net: row.net,
+        staged,
         primaryLabel,
         tone,
         lines,
@@ -107,6 +118,19 @@ export function PeoplePage() {
   const filteredRows = balanceFilter === 'with_balance'
     ? rows?.filter((r) => r.tone !== 'balanced')
     : rows
+  // From the rows ON SCREEN: a pick the filter now hides is neither counted nor shared.
+  const shareRows = buildPeerShareRows(
+    (filteredRows ?? []).map((r) => ({
+      peerId: r.id,
+      displayName: r.displayName,
+      net: r.net,
+      staged: r.staged,
+    })),
+    selection.selected,
+  )
+  const selectableIds = (filteredRows ?? []).filter((r) => !r.staged).map((r) => r.id)
+  const allSelected = selectableIds.length > 0 && shareRows.length === selectableIds.length
+  const shareState = selectionShareState(shareRows.length, contacts.revalidating)
 
   return (
     <div className="space-y-5">
@@ -171,6 +195,14 @@ export function PeoplePage() {
 
       {!rowsLoading && (rows?.length ?? 0) > 0 && (
         <div className="flex items-center justify-end gap-1.5">
+          <Button
+            variant="ghost"
+            size="xs"
+            className="mr-auto rounded-full"
+            onClick={selection.active ? selection.stop : selection.start}
+          >
+            {selection.active ? 'Cancel' : 'Select to share'}
+          </Button>
           <span className="text-xs text-stone-500">Filter</span>
           <Select value={balanceFilter} onValueChange={(v) => setBalanceFilter(v as typeof balanceFilter)}>
             <SelectTrigger className="h-8 w-auto rounded-full px-3 text-xs">
@@ -181,6 +213,30 @@ export function PeoplePage() {
               <SelectItem value="all">All</SelectItem>
             </SelectContent>
           </Select>
+        </div>
+      )}
+
+      {selection.active && (
+        <div className="flex flex-wrap items-center gap-2 rounded-2xl border border-teal-800/20 bg-teal-800/5 px-3 py-2.5">
+          <span className="text-sm font-medium text-stone-800">{shareRows.length} selected</span>
+          <Button
+            variant="ghost"
+            size="xs"
+            className="rounded-full"
+            disabled={selectableIds.length === 0}
+            onClick={() => selection.selectAll(allSelected ? [] : selectableIds)}
+          >
+            {allSelected ? 'Clear' : 'Select all'}
+          </Button>
+          <Button
+            size="xs"
+            className="ml-auto rounded-full"
+            disabled={shareState.disabled}
+            onClick={() => setShareOpen(true)}
+          >
+            <Share2 className="size-3.5" />
+            {shareState.label}
+          </Button>
         </div>
       )}
 
@@ -242,7 +298,49 @@ export function PeoplePage() {
           {(filteredRows?.length ?? 0) === 0 && balanceFilter === 'with_balance' && (
             <p className="py-6 text-center text-sm text-stone-400">No outstanding balances</p>
           )}
-          {filteredRows?.map((r) => (
+          {selection.active && filteredRows?.map((r) => {
+            const checked = selection.selected.has(r.id)
+            return (
+              <button
+                key={r.id}
+                type="button"
+                role="checkbox"
+                aria-checked={checked}
+                // Not on the server yet, so there is no balance to share.
+                disabled={r.staged}
+                onClick={() => selection.toggle(r.id)}
+                className={cn(
+                  'flex w-full items-center gap-3 rounded-2xl border p-4 text-left shadow-sm transition-colors disabled:opacity-60',
+                  checked ? 'border-teal-800/40 bg-teal-800/5' : 'border-stone-200 bg-white hover:bg-stone-50',
+                )}
+              >
+                {checked ? (
+                  <CheckSquare className="size-5 shrink-0 text-teal-800" />
+                ) : (
+                  <Square className="size-5 shrink-0 text-stone-400" />
+                )}
+                <div className="min-w-0 flex-1">
+                  <p className="font-semibold text-stone-800">{r.displayName}</p>
+                  <p
+                    className={cn(
+                      'mt-0.5 text-sm font-medium',
+                      r.staged && 'text-stone-400',
+                      !r.staged && r.tone === 'balanced' && 'text-stone-500',
+                      !r.staged && r.tone === 'receive' && 'text-emerald-600',
+                      !r.staged && r.tone === 'pay' && 'text-amber-600',
+                    )}
+                  >
+                    {r.staged
+                      ? 'Not synced yet'
+                      : r.lines.length > 0
+                        ? r.lines.join(' · ')
+                        : r.primaryLabel}
+                  </p>
+                </div>
+              </button>
+            )
+          })}
+          {!selection.active && filteredRows?.map((r) => (
             <Link
               key={r.id}
               to={`/app/people/${r.id}`}
@@ -266,6 +364,15 @@ export function PeoplePage() {
             </Link>
           ))}
         </div>
+      )}
+
+      {shareOpen && shareRows.length > 0 && (
+        <ExportImageDialog filename="kwenta-balances" onClose={() => setShareOpen(false)}>
+          <PeopleSelectionExportCard
+            rows={shareRows}
+            savedAt={contacts.fromCache ? contacts.fetchedAt : null}
+          />
+        </ExportImageDialog>
       )}
     </div>
   )

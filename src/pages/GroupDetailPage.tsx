@@ -2,6 +2,8 @@ import { useState, useEffect, useCallback, useMemo } from 'react'
 import {
   ArrowLeft,
   Check,
+  CheckSquare,
+  Square,
   History,
   Loader2,
   MoreVertical,
@@ -25,6 +27,8 @@ import {
   type SettlementHistoryItem,
 } from '@/api/balances'
 import { useServerData } from '@/hooks/useServerData'
+import { useSelection } from '@/hooks/useSelection'
+import { buildGroupShareRows, groupPoolAmount, selectionShareState } from '@/lib/balance-share'
 import {
   addExistingGroupMembers,
   createSettlement,
@@ -69,6 +73,7 @@ import { ConfirmDialog } from '@/components/common/ConfirmDialog'
 import { ExportImageDialog } from '@/components/export/ExportImageDialog'
 import { GroupExportCard } from '@/components/export/GroupExportCard'
 import { GroupMemberExportCard, type GroupMemberBillEntry } from '@/components/export/GroupMemberExportCard'
+import { GroupSelectionExportCard } from '@/components/export/GroupSelectionExportCard'
 import { loadPhonebookRows } from '@/lib/people'
 import { MemberMultiPicker } from '@/components/common/MemberMultiPicker'
 import { PayIntoGroupDialog } from '@/components/common/PayIntoGroupDialog'
@@ -691,6 +696,8 @@ export function GroupDetailPage() {
   const [exportOpen, setExportOpen] = useState(false)
   const [billPayorFilter, setBillPayorFilter] = useState<string | null>(null)
   const [billsShown, setBillsShown] = useState(10)
+  const selection = useSelection(`${userId ?? ''}:${groupId ?? ''}`)
+  const [shareSelectionOpen, setShareSelectionOpen] = useState(false)
   const [exportMember, setExportMember] = useState<{
     userId: string
     profileName: string
@@ -819,6 +826,30 @@ export function GroupDetailPage() {
     const payers = buildSuggestedPayers(d.rawDebts, nameOf)
     return { groupId: d.group.id, groupName: d.group.name, currency: d.group.currency, payers }
   }, [detail.data])
+
+  // Built from the CURRENT payload, so an id selected before a refresh or a member removal is
+  // simply not in the result: the count and the image can never include a stale pick.
+  const selectionRows = useMemo(() => {
+    const d = detail.data
+    if (!d || !suggestions) return []
+    return buildGroupShareRows({
+      members: d.members.map((m) => ({ userId: m.userId, name: m.profileName })),
+      memberBalances: d.memberBalances,
+      payers: suggestions.payers,
+      selectedIds: selection.selected,
+    })
+  }, [detail.data, suggestions, selection.selected])
+  const poolByUser = useMemo(
+    () => new Map((detail.data?.memberBalances ?? []).map((m) => [m.userId, m.amount])),
+    [detail.data],
+  )
+  const selectableMemberIds = useMemo(
+    () => (members ?? []).filter((m) => poolByUser.has(m.userId)).map((m) => m.userId),
+    [members, poolByUser],
+  )
+  const allMembersSelected =
+    selectableMemberIds.length > 0 && selectionRows.length === selectableMemberIds.length
+  const groupShareState = selectionShareState(selectionRows.length, detail.revalidating)
 
   const membershipLoaded = Array.isArray(members)
   const groupLoading = !userId || (detail.loading && !detail.data)
@@ -1028,7 +1059,49 @@ export function GroupDetailPage() {
           <div className="flex items-center gap-2">
             <Users className="size-4 text-teal-800" />
             <h2 className="text-lg font-semibold">Members</h2>
+            {!membersLoading && (members?.length ?? 0) > 0 && (
+              <Button
+                variant="ghost"
+                size="xs"
+                className="ml-auto rounded-full"
+                onClick={selection.active ? selection.stop : selection.start}
+              >
+                {selection.active ? 'Cancel' : 'Select'}
+              </Button>
+            )}
           </div>
+
+          {selection.active && (
+            <div className="mt-3 rounded-xl border border-teal-800/20 bg-teal-800/5 px-3 py-2.5">
+              <p className="text-xs text-stone-600">
+                Pick who to share. The image shows each person against the group, what they should
+                pay or get, and why.
+              </p>
+              <div className="mt-2 flex flex-wrap items-center gap-2">
+                <span className="text-sm font-medium text-stone-800">
+                  {selectionRows.length} selected
+                </span>
+                <Button
+                  variant="ghost"
+                  size="xs"
+                  className="rounded-full"
+                  disabled={selectableMemberIds.length === 0}
+                  onClick={() => selection.selectAll(allMembersSelected ? [] : selectableMemberIds)}
+                >
+                  {allMembersSelected ? 'Clear' : 'Select all'}
+                </Button>
+                <Button
+                  size="xs"
+                  className="ml-auto rounded-full"
+                  disabled={groupShareState.disabled}
+                  onClick={() => setShareSelectionOpen(true)}
+                >
+                  <Share2 className="size-3.5" />
+                  {groupShareState.label}
+                </Button>
+              </div>
+            </div>
+          )}
 
           <ul className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-2">
             {membersLoading &&
@@ -1040,7 +1113,61 @@ export function GroupDetailPage() {
                   <div className="h-4 w-36 animate-pulse rounded bg-stone-200" />
                 </li>
               ))}
-            {!membersLoading && (members ?? []).map((m) => {
+            {!membersLoading && selection.active && (members ?? []).map((m) => {
+              // Select mode shows the number the image will show: the member against the POOL,
+              // not the viewer-pairwise one the normal rows use. They differ with 3+ members.
+              const amount = groupPoolAmount(poolByUser.get(m.userId))
+              const checked = amount !== null && selection.selected.has(m.userId)
+              return (
+                <li key={m.id}>
+                  <button
+                    type="button"
+                    role="checkbox"
+                    aria-checked={checked}
+                    disabled={amount === null}
+                    onClick={() => selection.toggle(m.userId)}
+                    className={cn(
+                      'flex w-full items-center justify-between gap-3 rounded-xl border px-4 py-3 text-left transition-colors disabled:opacity-60',
+                      checked
+                        ? 'border-teal-800/40 bg-teal-800/10'
+                        : 'border-stone-200 bg-stone-100/60 hover:bg-stone-100',
+                    )}
+                  >
+                    <span className="flex min-w-0 items-center gap-2.5">
+                      {checked ? (
+                        <CheckSquare className="size-5 shrink-0 text-teal-800" />
+                      ) : (
+                        <Square className="size-5 shrink-0 text-stone-400" />
+                      )}
+                      <span className="truncate text-sm font-medium text-stone-800">
+                        {m.profileName}
+                        {m.isCurrentUser && (
+                          <Badge className="ml-1.5 px-2 py-0.5 text-[0.65rem] leading-none">You</Badge>
+                        )}
+                      </span>
+                    </span>
+                    {amount === null ? (
+                      <span className="shrink-0 text-xs text-stone-400">No balance yet</span>
+                    ) : (
+                    <span className="shrink-0 text-right">
+                      <span
+                        className={cn(
+                          'block text-sm font-semibold tabular-nums',
+                          amount === 0 ? 'text-stone-500' : amount > 0 ? 'text-emerald-600' : 'text-amber-600',
+                        )}
+                      >
+                        {formatCurrency(Math.abs(amount), group.currency)}
+                      </span>
+                      <span className="block text-[0.65rem] font-medium uppercase tracking-wide text-stone-400">
+                        {amount === 0 ? 'Settled' : amount > 0 ? 'gets back' : 'pays in'}
+                      </span>
+                    </span>
+                    )}
+                  </button>
+                </li>
+              )
+            })}
+            {!membersLoading && !selection.active && (members ?? []).map((m) => {
               const raw = balanceByUser.get(m.userId) ?? 0
               const rounded = Math.round(raw * 100) / 100
               const amount = Math.abs(rounded) <= 0.01 ? 0 : rounded
@@ -1488,6 +1615,20 @@ export function GroupDetailPage() {
               payorName: b.payorName,
             }))}
             payments={settlementHistory ?? []}
+          />
+        </ExportImageDialog>
+      )}
+
+      {shareSelectionOpen && selectionRows.length > 0 && (
+        <ExportImageDialog
+          filename={makeExportFilename(`${group.name} balances`, 'png').replace('.png', '')}
+          onClose={() => setShareSelectionOpen(false)}
+        >
+          <GroupSelectionExportCard
+            groupName={group.name}
+            currency={group.currency}
+            rows={selectionRows}
+            savedAt={detail.fromCache ? detail.fetchedAt : null}
           />
         </ExportImageDialog>
       )}
