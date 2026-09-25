@@ -7,6 +7,7 @@ vi.mock('@/sync/sync-manager', () => ({ requestSyncNow: vi.fn() }))
 vi.mock('@/sync/sync-service', () => ({
   getMillisecondsSinceLastRefresh: () => 0,
   hasUnsyncedLocalDataForUser: async () => false,
+  mayHaveStagedRows: async () => false,
 }))
 vi.mock('@/hooks/useCurrentUser', () => ({ useCurrentUser: () => ({ userId: null, profile: undefined }) }))
 vi.mock('dexie-react-hooks', () => ({

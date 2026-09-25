@@ -510,3 +510,110 @@ describe('fetchKwentaNotifications', () => {
     expect(await fetchKwentaNotifications('REC')).toEqual([])
   })
 })
+
+describe('C16: an outbox entry follows the queued write it describes', () => {
+  async function queueForSubmission(submissionId: string) {
+    useAppStore.getState().setOnline(false)
+    await notifyProfileLinked({
+      actorId: 'ACTOR',
+      actorName: 'Ann',
+      recipientId: 'REC',
+      linkedAsName: 'Bob',
+      cloudConfirmed: false,
+      submissionId,
+    } as Parameters<typeof notifyProfileLinked>[0])
+    useAppStore.getState().setOnline(true)
+  }
+
+  async function queueEntry(submissionId: string, status: string) {
+    await db.pending_mutations.add({
+      id: `PM-${submissionId}`, actor_user_id: 'ACTOR', operation: 'linkProfileToRemote',
+      entity_type: 'profile', entity_id: 'P', payload_json: '{}', status, retry_count: 0,
+      last_error: null, seq: 1, submission_id: submissionId, push: { profiles: [] },
+      row_keys: [], next_attempt_at: null, last_error_kind: null,
+      created_at: '2026-09-25T00:00:00.000Z', updated_at: '2026-09-25T00:00:00.000Z',
+    } as never)
+  }
+
+  it('C16: the outbox entry records the submission id of its write', async () => {
+    await queueForSubmission('SUB-1')
+
+    expect((readOutbox()[0] as unknown as { submissionId?: string }).submissionId).toBe('SUB-1')
+  })
+
+  it('C16: held while its queue entry is pending — nothing inserted, entry kept', async () => {
+    await queueForSubmission('SUB-1')
+    await queueEntry('SUB-1', 'pending')
+
+    await flushQueuedKwentaNotifications()
+
+    expect(h.state.insertedRows).toHaveLength(0)
+    expect(readOutbox()).toHaveLength(1)
+  })
+
+  it('C16: released once the entry has applied (applied entries are deleted)', async () => {
+    await queueForSubmission('SUB-1')
+    await queueEntry('SUB-1', 'pending')
+    await flushQueuedKwentaNotifications()
+    await db.pending_mutations.delete('PM-SUB-1')
+
+    await flushQueuedKwentaNotifications()
+
+    expect(h.state.insertedRows).toHaveLength(1)
+    expect((h.state.insertedRows[0][0] as { recipient_id: string }).recipient_id).toBe('REC')
+    expect(readOutbox()).toHaveLength(0)
+  })
+
+  for (const status of ['conflict', 'blocked_by_earlier']) {
+    it(`C16: never sent while its entry is ${status}`, async () => {
+      await queueForSubmission('SUB-1')
+      await queueEntry('SUB-1', status)
+
+      await flushQueuedKwentaNotifications()
+
+      expect(h.state.insertedRows).toHaveLength(0)
+    })
+  }
+
+  it('C16: a held entry does not count as queued (the drain releases it, a full sync cannot)', async () => {
+    await queueForSubmission('SUB-1')
+    await queueEntry('SUB-1', 'pending')
+
+    expect(await hasQueuedKwentaNotifications('ACTOR')).toBe(false)
+  })
+
+  it('C16: once its write has applied, the same entry counts as queued again', async () => {
+    await queueForSubmission('SUB-1')
+    await queueEntry('SUB-1', 'pending')
+    await db.pending_mutations.delete('PM-SUB-1')
+
+    expect(await hasQueuedKwentaNotifications('ACTOR')).toBe(true)
+  })
+
+  it('C16: an untracked entry beside a held one still counts as queued', async () => {
+    await queueForSubmission('SUB-1')
+    await queueEntry('SUB-1', 'pending')
+    useAppStore.getState().setOnline(false)
+    await notifyProfileLinked({
+      actorId: 'ACTOR', actorName: 'Ann', recipientId: 'OTHER', linkedAsName: 'Cy', cloudConfirmed: true,
+    } as Parameters<typeof notifyProfileLinked>[0])
+    useAppStore.getState().setOnline(true)
+
+    expect(await hasQueuedKwentaNotifications('ACTOR')).toBe(true)
+  })
+
+  it('C16: a held entry does not hold back an unrelated one', async () => {
+    await queueForSubmission('SUB-1')
+    await queueEntry('SUB-1', 'pending')
+    useAppStore.getState().setOnline(false)
+    await notifyProfileLinked({
+      actorId: 'ACTOR', actorName: 'Ann', recipientId: 'OTHER', linkedAsName: 'Cy', cloudConfirmed: true,
+    } as Parameters<typeof notifyProfileLinked>[0])
+    useAppStore.getState().setOnline(true)
+
+    await flushQueuedKwentaNotifications()
+
+    const recipients = h.state.insertedRows.flat().map((r) => (r as { recipient_id: string }).recipient_id)
+    expect(recipients).toEqual(['OTHER'])
+  })
+})

@@ -6,11 +6,21 @@ import {
   markRealtimeProcessingFailed,
   realtimeProcessingFailed,
 } from '@/sync/realtime-health'
+import * as syncManager from '@/sync/sync-manager'
 import {
   requestSyncNow,
   startSyncManager,
   __resetActivationRefreshThrottleForTests,
 } from '@/sync/sync-manager'
+import { bumpSessionEpoch } from '@/sync/session-epoch'
+
+function registerCatchUpMock() {
+  const m = syncManager as unknown as Record<string, unknown>
+  for (const name of ['registerRealtimeCatchUp', 'setRealtimeCatchUpHandler', 'registerRealtimeCatchUpHandler']) {
+    const fn = m[name]
+    if (typeof fn === 'function') (fn as (cb: () => void) => void)(() => mocks.requestRealtimeCatchUp())
+  }
+}
 
 /**
  * Two things this file pins, both cost measured in whole pull bundles.
@@ -39,11 +49,16 @@ const mocks = vi.hoisted(() => ({
   mayHaveStagedRows: vi.fn(async () => false),
   isFullSyncInFlight: vi.fn<(userId: string) => boolean>(() => false),
   hasQueuedKwentaNotifications: vi.fn(async () => false),
+  requestRealtimeCatchUp: vi.fn(() => {}),
+  drainWriteQueue: vi.fn<(userId: string, options?: { ignoreBackoff?: boolean }) => Promise<{ applied: number; refused: number } | null>>(
+    async () => ({ applied: 0, refused: 0 }),
+  ),
 }))
 
 // The real syncRoundTrip bumps `dataVersion` itself when it changed rows (H1.1: one place for every
 // caller), so the stand-ins do the same; the manager adds only the push / Refresh bump.
-vi.mock('@/sync/sync-service', async () => {
+vi.mock('@/sync/sync-service', async (importOriginal) => {
+  const actual = await importOriginal<Record<string, unknown>>()
   const { useAppStore } = await import('@/store/app-store')
   type Result = { pushed: number; pulled: number; changed: number; errors: string[] }
   const bumpingIfChanged = (fn: (userId: string) => Promise<Result>) => async (userId: string) => {
@@ -52,6 +67,7 @@ vi.mock('@/sync/sync-service', async () => {
     return result
   }
   return {
+    ...actual,
     ...mocks,
     fullSync: bumpingIfChanged((id) => mocks.fullSync(id)),
     syncRoundTrip: bumpingIfChanged((id) => mocks.syncRoundTrip(id)),
@@ -64,13 +80,28 @@ vi.mock('@/lib/supabase', () => ({
 }))
 vi.mock('@/lib/people', () => ({ hydrateLinkedRemoteProfilesForActor: vi.fn(async () => {}) }))
 vi.mock('@/lib/kwenta-data-repair', () => ({ maybeAutoRepairData: vi.fn(async () => {}) }))
-vi.mock('@/lib/kwenta-notifications', () => ({
+vi.mock('@/lib/kwenta-notifications', async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
   flushQueuedKwentaNotifications: vi.fn(async () => {}),
   hasQueuedKwentaNotifications: () => mocks.hasQueuedKwentaNotifications(),
 }))
-vi.mock('@/sync/cloud-first-mutations', () => ({
+vi.mock('@/sync/cloud-first-mutations', async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
   markPendingMutationsApplied: vi.fn(async () => {}),
-  markPendingMutationsConflict: vi.fn(async () => {}),
+}))
+// A newer server event found by the probe is handed to realtime's per-entity catch-up rather than
+// answered with a full bundle. Whether the manager imports it or realtime registers it, both
+// routes reach this one mock (see `registerCatchUpMock`).
+vi.mock('@/sync/realtime-events', async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  requestRealtimeCatchUp: () => mocks.requestRealtimeCatchUp(),
+}))
+
+// The queue's own behaviour (order, backoff, ignoreBackoff sending a backed-off head) is pinned in
+// write-queue.test.ts; here only WHEN the manager drains it, and in which order with the sync.
+vi.mock('@/sync/write-queue', () => ({
+  drainWriteQueue: (userId: string, options?: { ignoreBackoff?: boolean }) =>
+    options === undefined ? mocks.drainWriteQueue(userId) : mocks.drainWriteQueue(userId, options),
 }))
 
 const ACTIVATION_REFRESH_MIN_INTERVAL_MS = 5_000
@@ -82,11 +113,15 @@ async function settle() {
 
 let stopSyncManager: (() => void) | null = null
 
-/** Start the manager and swallow the initial sync it runs, so counts below start from zero. */
+/**
+ * Start the manager and swallow the initial refresh it runs, so counts below start from zero. The
+ * start now goes through the same gate as a focus (sync-realign), so its probe and gate checks are
+ * swallowed too — not just its sync. `mockClear` keeps each case's configured answers.
+ */
 async function startManager() {
   stopSyncManager = startSyncManager()
   await settle()
-  mocks.fullSync.mockClear()
+  for (const m of Object.values(mocks)) m.mockClear()
   __resetActivationRefreshThrottleForTests()
 }
 
@@ -104,6 +139,8 @@ beforeEach(() => {
   mocks.mayHaveStagedRows.mockResolvedValue(false)
   mocks.isFullSyncInFlight.mockReturnValue(false)
   mocks.hasQueuedKwentaNotifications.mockResolvedValue(false)
+  mocks.drainWriteQueue.mockResolvedValue({ applied: 0, refused: 0 })
+  registerCatchUpMock()
   clearRealtimeProcessingFailed()
   localStorage.clear()
   useAppStore.setState({
@@ -313,12 +350,15 @@ describe('returning to the tab: probe before syncing', () => {
     expect(mocks.fullSync).not.toHaveBeenCalled()
   })
 
-  it('C2: a newer event means one full sync', async () => {
+  it('C2: a newer event hands off to the realtime catch-up, not a full sync', async () => {
     withCursor()
     mocks.newestUserEventSince.mockResolvedValue({ newer: true, newest: '2026-09-24T02:00:00+00:00' })
     await startManager()
+    mocks.requestRealtimeCatchUp.mockClear()
     await focus()
-    expect(mocks.fullSync).toHaveBeenCalledTimes(1)
+    expect(mocks.requestRealtimeCatchUp).toHaveBeenCalledTimes(1)
+    expect(mocks.fullSync).not.toHaveBeenCalled()
+    expect(mocks.syncRoundTrip).not.toHaveBeenCalled()
   })
 
   it('C3: staged local rows sync without probing — the push must happen', async () => {
@@ -357,19 +397,19 @@ describe('returning to the tab: probe before syncing', () => {
     expect(mocks.newestUserEventSince).not.toHaveBeenCalled()
   })
 
-  it('C7/C14: a refresh at least 5 minutes old syncs even with no event (event-less changes)', async () => {
+  it('C4: a refresh 60 minutes old syncs even with no event (event-less changes)', async () => {
     withCursor()
     await startManager()
-    mocks.getMillisecondsSinceLastRefresh.mockReturnValue(5 * 60 * 1000)
+    mocks.getMillisecondsSinceLastRefresh.mockReturnValue(60 * 60 * 1000)
     await focus()
     expect(mocks.fullSync).toHaveBeenCalledTimes(1)
     expect(mocks.newestUserEventSince).not.toHaveBeenCalled()
   })
 
-  it('C7/C14: a refresh just under 5 minutes old only probes', async () => {
+  it('C4: a refresh 59 minutes old only probes', async () => {
     withCursor()
     await startManager()
-    mocks.getMillisecondsSinceLastRefresh.mockReturnValue(5 * 60 * 1000 - 1)
+    mocks.getMillisecondsSinceLastRefresh.mockReturnValue(59 * 60 * 1000)
     await focus()
     expect(mocks.fullSync).not.toHaveBeenCalled()
     expect(mocks.newestUserEventSince).toHaveBeenCalledTimes(1)
@@ -432,7 +472,7 @@ describe('returning to the tab: probe before syncing', () => {
     withCursor()
     await startManager()
     mocks.hasUnsyncedLocalDataForUser.mockClear()
-    mocks.getMillisecondsSinceLastRefresh.mockReturnValue(10 * 60 * 1000)
+    mocks.getMillisecondsSinceLastRefresh.mockReturnValue(60 * 60 * 1000)
     await focus()
     expect(mocks.hasUnsyncedLocalDataForUser).not.toHaveBeenCalled()
     expect(mocks.newestUserEventSince).not.toHaveBeenCalled()
@@ -446,21 +486,25 @@ describe('returning to the tab: probe before syncing', () => {
     expect(mocks.hasUnsyncedLocalDataForUser).not.toHaveBeenCalled()
   })
 
-  it('a probe-triggered sync that succeeds moves the cursor to the newest server event', async () => {
+  it('a probed newer event is left to the catch-up: the manager itself does not move the cursor', async () => {
+    // The cursor now moves only through realtime's catch-up (per-entity batch, or >50 → one full
+    // sync with the cursor read before it; pinned in realtime-echo.test.ts).
     withCursor()
     mocks.newestUserEventSince.mockResolvedValue({ newer: true, newest: '2026-09-24T02:00:00+00:00' })
     await startManager()
     await focus()
-    expect(mocks.fullSync).toHaveBeenCalledTimes(1)
-    expect(localStorage.getItem(realtimeCursorKey('me'))).toBe('2026-09-24T02:00:00+00:00')
+    expect(mocks.fullSync).not.toHaveBeenCalled()
+    expect(localStorage.getItem(realtimeCursorKey('me'))).toBe(CURSOR)
   })
 
-  it('a probe-triggered sync that fails leaves the cursor alone', async () => {
+  it('a stale-refresh sync that fails leaves the cursor alone', async () => {
     withCursor()
     mocks.newestUserEventSince.mockResolvedValue({ newer: true, newest: '2026-09-24T02:00:00+00:00' })
     mocks.fullSync.mockResolvedValue({ pushed: 0, pulled: 0, changed: 0, errors: ['boom'] })
     await startManager()
+    mocks.getMillisecondsSinceLastRefresh.mockReturnValue(60 * 60 * 1000)
     await focus()
+    expect(mocks.fullSync).toHaveBeenCalledTimes(1)
     expect(localStorage.getItem(realtimeCursorKey('me'))).toBe(CURSOR)
   })
 
@@ -468,6 +512,7 @@ describe('returning to the tab: probe before syncing', () => {
     withCursor()
     mocks.newestUserEventSince.mockResolvedValue({ newer: true, newest: '2026-09-23T00:00:00+00:00' })
     await startManager()
+    mocks.getMillisecondsSinceLastRefresh.mockReturnValue(60 * 60 * 1000)
     await focus()
     expect(localStorage.getItem(realtimeCursorKey('me'))).toBe(CURSOR)
   })
@@ -483,7 +528,7 @@ describe('returning to the tab: probe before syncing', () => {
   it('a failure marked while a sync is running survives that sync', async () => {
     withCursor()
     await startManager()
-    mocks.newestUserEventSince.mockResolvedValue({ newer: true, newest: null })
+    mocks.getMillisecondsSinceLastRefresh.mockReturnValue(60 * 60 * 1000)
     mocks.fullSync.mockImplementation(async () => {
       markRealtimeProcessingFailed()
       return { pushed: 0, pulled: 0, changed: 0, errors: [] }
@@ -504,14 +549,13 @@ describe('returning to the tab: probe before syncing', () => {
     expect(mocks.syncRoundTrip).toHaveBeenCalledTimes(1)
     expect(realtimeProcessingFailed()).toBe(true)
   })
-  it('a sync that joins one already running does not advance the cursor past the probed event', async () => {
+  it('a probed event while a full sync is already running does not advance the cursor', async () => {
     withCursor()
     await startManager()
     mocks.newestUserEventSince.mockResolvedValue({ newer: true, newest: '2026-09-24T02:00:00+00:00' })
     mocks.isFullSyncInFlight.mockReturnValue(true)
     await focus()
     expect(mocks.newestUserEventSince).toHaveBeenCalledTimes(1)
-    expect(mocks.fullSync).toHaveBeenCalledTimes(1)
     expect(localStorage.getItem(realtimeCursorKey('me'))).toBe(CURSOR)
   })
 
@@ -523,5 +567,232 @@ describe('returning to the tab: probe before syncing', () => {
     await focus()
     expect(mocks.fullSync).toHaveBeenCalledTimes(1)
     expect(realtimeProcessingFailed()).toBe(true)
+  })
+})
+
+/**
+ * sync-realign: app start goes through the same gate as a tab activation. A returning user used to
+ * download the complete bundle on every open (sometimes twice: a focus during that sync queued a
+ * re-run). The safety refresh for event-less changes is relaxed from 5/15 minutes to 60, because
+ * contacts, renames and peer links now emit events (077).
+ */
+describe('sync-realign: startup gate, 60-minute safety refresh, no duplicate', () => {
+  const CURSOR = '2026-09-24T01:00:00+00:00'
+  const MIN = 60 * 1000
+
+  /** Real (unfaked) macrotask turns, so Dexie/fake-indexeddb work inside the gate can finish. */
+  async function drain() {
+    for (let i = 0; i < 10; i++) {
+      await new Promise<void>((r) => setImmediate(r))
+      await settle()
+    }
+  }
+
+  function fullSyncCount() {
+    return mocks.fullSync.mock.calls.length + mocks.syncRoundTrip.mock.calls.length
+  }
+
+  it('C1: a returning user with a fresh marker, a cursor and nothing newer makes ZERO full syncs on start, one probe', async () => {
+    localStorage.setItem(realtimeCursorKey('me'), CURSOR)
+    mocks.getMillisecondsSinceLastRefresh.mockReturnValue(2 * MIN)
+    stopSyncManager = startSyncManager()
+    await drain()
+    expect(fullSyncCount()).toBe(0)
+    expect(mocks.newestUserEventSince).toHaveBeenCalledTimes(1)
+    expect(mocks.newestUserEventSince).toHaveBeenCalledWith('me', CURSOR)
+  })
+
+  it('C1: a returning user whose probe finds a newer event on start asks for the catch-up, still no full sync', async () => {
+    localStorage.setItem(realtimeCursorKey('me'), CURSOR)
+    mocks.getMillisecondsSinceLastRefresh.mockReturnValue(2 * MIN)
+    mocks.newestUserEventSince.mockResolvedValue({ newer: true, newest: '2026-09-24T02:00:00+00:00' })
+    stopSyncManager = startSyncManager()
+    await drain()
+    expect(fullSyncCount()).toBe(0)
+    expect(mocks.requestRealtimeCatchUp).toHaveBeenCalledTimes(1)
+  })
+
+  it('C2: first sign-in (no refresh marker) still runs exactly one syncRoundTrip on start, without probing', async () => {
+    localStorage.removeItem(KWENTA_LAST_REFRESH_STORAGE_KEY)
+    localStorage.setItem(realtimeCursorKey('me'), CURSOR)
+    mocks.getMillisecondsSinceLastRefresh.mockReturnValue(Number.POSITIVE_INFINITY)
+    stopSyncManager = startSyncManager()
+    await drain()
+    expect(mocks.syncRoundTrip).toHaveBeenCalledTimes(1)
+    expect(mocks.fullSync).not.toHaveBeenCalled()
+    expect(mocks.newestUserEventSince).not.toHaveBeenCalled()
+  })
+
+  it('C3: a tab focus while the startup sync is in flight does not queue a second full sync', async () => {
+    // No cursor: the start gate must sync. The sync is held open while the tab gains focus.
+    let release!: () => void
+    // Once: a regression that re-runs must not leave a second, never-settling sync holding the
+    // manager's in-flight flag for the cases after this one.
+    mocks.fullSync.mockImplementationOnce(
+      () => new Promise((r) => (release = () => r({ pushed: 0, pulled: 10, changed: 0, errors: [] }))),
+    )
+    stopSyncManager = startSyncManager()
+    await vi.waitFor(() => expect(mocks.fullSync).toHaveBeenCalledTimes(1))
+    window.dispatchEvent(new Event('focus'))
+    window.dispatchEvent(new Event('visibilitychange'))
+    await drain()
+    release()
+    await drain()
+    expect(mocks.fullSync).toHaveBeenCalledTimes(1)
+    expect(mocks.syncRoundTrip).not.toHaveBeenCalled()
+  })
+
+  it('C4: on start, a marker 59 minutes old only probes', async () => {
+    localStorage.setItem(realtimeCursorKey('me'), CURSOR)
+    mocks.getMillisecondsSinceLastRefresh.mockReturnValue(59 * MIN)
+    stopSyncManager = startSyncManager()
+    await drain()
+    expect(fullSyncCount()).toBe(0)
+    expect(mocks.newestUserEventSince).toHaveBeenCalledTimes(1)
+  })
+
+  it('C4: on start, a marker 60 minutes old runs one full sync', async () => {
+    localStorage.setItem(realtimeCursorKey('me'), CURSOR)
+    mocks.getMillisecondsSinceLastRefresh.mockReturnValue(60 * MIN)
+    stopSyncManager = startSyncManager()
+    await drain()
+    expect(fullSyncCount()).toBe(1)
+  })
+
+  it('C4: the backup tick does not full-sync at 59 minutes with nothing staged, and does at 60', async () => {
+    localStorage.setItem(realtimeCursorKey('me'), CURSOR)
+    mocks.getMillisecondsSinceLastRefresh.mockReturnValue(2 * MIN)
+    stopSyncManager = startSyncManager()
+    await drain()
+    mocks.fullSync.mockClear()
+    mocks.syncRoundTrip.mockClear()
+
+    mocks.getMillisecondsSinceLastRefresh.mockReturnValue(59 * MIN)
+    vi.advanceTimersByTime(5 * MIN)
+    await drain()
+    expect(fullSyncCount()).toBe(0)
+
+    mocks.getMillisecondsSinceLastRefresh.mockReturnValue(60 * MIN)
+    vi.advanceTimersByTime(5 * MIN)
+    await drain()
+    expect(fullSyncCount()).toBe(1)
+  })
+
+  it('the browser online event no longer starts a sync of its own (reconnect restarts the manager)', async () => {
+    localStorage.setItem(realtimeCursorKey('me'), CURSOR)
+    mocks.getMillisecondsSinceLastRefresh.mockReturnValue(2 * MIN)
+    stopSyncManager = startSyncManager()
+    await drain()
+    const probes = mocks.newestUserEventSince.mock.calls.length
+    const syncs = fullSyncCount()
+    window.dispatchEvent(new Event('online'))
+    await drain()
+    expect(fullSyncCount()).toBe(syncs)
+    expect(mocks.newestUserEventSince.mock.calls.length).toBe(probes)
+  })
+})
+
+/**
+ * sync-realign C27: a sign-out or account switch wipes the mirror while a sync is in flight. That
+ * sync's outcome belongs to no session: it must not flag an error, schedule a retry or fail the
+ * next user's hydration — and since it held the in-flight flag, the next session's own start sync
+ * may have been turned away, so it runs once more.
+ */
+describe('a sync that outlives its session', () => {
+  it('sets no error or retry and runs once more for whoever is signed in now', async () => {
+    await startManager()
+    mocks.fullSync.mockImplementationOnce(async () => {
+      bumpSessionEpoch()
+      return { pushed: 0, pulled: 0, changed: 0, errors: ['Sync abandoned: the session ended'] }
+    })
+
+    requestSyncNow()
+    await settle()
+    await settle()
+
+    expect(mocks.fullSync).toHaveBeenCalledTimes(2)
+    expect(useAppStore.getState().syncStatus).toBe('idle')
+    expect(useAppStore.getState().syncRetryAt).toBeNull()
+  })
+})
+
+/**
+ * Review H1.2: a full sync never sends a row the write queue owns, so a path that exists to get
+ * changes out must drain the queue as well — or a queued write sits behind its backoff until a
+ * focus or the backup tick, while the Refresh button the header points at does nothing for it.
+ */
+describe('the queue is drained by every path that sends changes', () => {
+  it('Refresh drains the queue ignoring its backoff, BEFORE its full sync', async () => {
+    await startManager()
+
+    requestSyncNow()
+    await settle()
+
+    expect(mocks.drainWriteQueue).toHaveBeenCalledWith('me', { ignoreBackoff: true })
+    expect(mocks.fullSync).toHaveBeenCalledTimes(1)
+    expect(mocks.drainWriteQueue.mock.invocationCallOrder[0]).toBeLessThan(mocks.fullSync.mock.invocationCallOrder[0])
+  })
+
+  it('Refresh waits for the drain: the full sync starts only once the queue has been sent', async () => {
+    await startManager()
+    let release!: () => void
+    mocks.drainWriteQueue.mockImplementationOnce(
+      () => new Promise((r) => (release = () => r({ applied: 1, refused: 0 }))),
+    )
+
+    requestSyncNow()
+    await settle()
+    expect(mocks.fullSync).not.toHaveBeenCalled()
+
+    release()
+    await settle()
+    expect(mocks.fullSync).toHaveBeenCalledTimes(1)
+  })
+
+  it('a drain that throws does not stop the Refresh sync', async () => {
+    await startManager()
+    mocks.drainWriteQueue.mockRejectedValueOnce(new Error('boom'))
+
+    requestSyncNow()
+    await settle()
+
+    expect(mocks.fullSync).toHaveBeenCalledTimes(1)
+  })
+
+  it('the sync retry timer drains the queue (keeping its backoff) along with its sync', async () => {
+    await startManager()
+    mocks.fullSync.mockResolvedValueOnce({ pushed: 0, pulled: 0, changed: 0, errors: ['boom'] })
+    requestSyncNow()
+    await settle()
+    expect(useAppStore.getState().syncStatus).toBe('error')
+    mocks.drainWriteQueue.mockClear()
+
+    vi.advanceTimersByTime(30_000)
+    await settle()
+
+    expect(mocks.drainWriteQueue).toHaveBeenCalledWith('me')
+    expect(mocks.fullSync).toHaveBeenCalledTimes(2)
+  })
+
+  it('a local change (triggerSync) drains the queue in the background, keeping its backoff', async () => {
+    await startManager()
+
+    syncManager.triggerSync()
+    vi.advanceTimersByTime(400)
+    await settle()
+
+    expect(mocks.drainWriteQueue).toHaveBeenCalledWith('me')
+    expect(mocks.fullSync).toHaveBeenCalledTimes(1)
+  })
+
+  it('a refresh through the gate drains in the background too', async () => {
+    localStorage.setItem(realtimeCursorKey('me'), '2026-09-24T01:00:00+00:00')
+    await startManager()
+
+    window.dispatchEvent(new Event('focus'))
+    await settle()
+
+    expect(mocks.drainWriteQueue).toHaveBeenCalledWith('me')
+    expect(mocks.fullSync).not.toHaveBeenCalled()
   })
 })

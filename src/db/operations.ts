@@ -6,7 +6,6 @@ import type {
   Group,
   GroupMember,
   ItemSplit,
-  MutationEntityType,
   Profile,
   ProfilePeerLink,
   Settlement,
@@ -14,7 +13,6 @@ import type {
 } from '@/types'
 import { generateId, getDeviceId, now } from '@/lib/utils'
 import { normalizePaymentMethod } from '@/lib/payment-method'
-import { enqueuePendingMutation } from '@/sync/cloud-first-mutations'
 import { commitCloudFirstWrite, type CloudWritePayload } from '@/sync/cloud-write'
 import { loadBillIntoMirror } from '@/sync/bill-mirror'
 import {
@@ -32,56 +30,6 @@ import {
   fetchRemoteProfileIntoDexie,
   participantUnionForBill,
 } from '@/lib/people'
-
-/**
- * Commit a mutation's complete rows cloud-first, deriving the offline staging from the payload.
- *
- * Every row in the payload is a whole record, so staging is just a bulkPut per table — there is
- * no need for each operation to hand-write its own local transaction. Online, nothing is written
- * until the server confirms; offline, the rows are staged and queued for replay.
- */
-async function commitRows(input: {
-  actorUserId: string
-  payload: CloudWritePayload
-  pending: {
-    operation: string
-    entityType: MutationEntityType
-    entityId: string | null
-    payload: unknown
-    routeHint: string
-  }
-}): Promise<{ mode: 'cloud' | 'queued' }> {
-  const tables = (Object.keys(input.payload) as (keyof CloudWritePayload)[]).filter(
-    (t) => (input.payload[t]?.length ?? 0) > 0,
-  )
-
-  return commitCloudFirstWrite({
-    actorUserId: input.actorUserId,
-    payload: input.payload,
-    stageOffline: async () => {
-      await db.transaction(
-        'rw',
-        tables.map((t) => db[t]),
-        async () => {
-          for (const t of tables) {
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            await (db[t] as any).bulkPut(input.payload[t])
-          }
-        },
-      )
-    },
-    queueOffline: async () => {
-      await enqueuePendingMutation({
-        actorUserId: input.actorUserId,
-        operation: input.pending.operation,
-        entityType: input.pending.entityType,
-        entityId: input.pending.entityId,
-        payload: input.pending.payload,
-        routeHint: input.pending.routeHint,
-      })
-    },
-  })
-}
 
 /** Group membership must use the Kwenta account id so Postgres RLS and sync match `auth.uid()`. */
 function membershipUserIdForProfile(p: { id: string; linked_profile_id: string | null }): string {
@@ -299,30 +247,15 @@ export async function createBill(input: CreateBillInput): Promise<string> {
 
   // COMMIT — cloud first. A rejection throws here and leaves Dexie untouched, so a failed
   // save cannot leave a bill on screen that the user retries into a duplicate.
-  const { mode } = await commitCloudFirstWrite({
+  const { mode, submissionId } = await commitCloudFirstWrite({
     actorUserId: input.createdBy,
     payload,
-    stageOffline: async () => {
-      await db.transaction(
-        'rw',
-        [db.bills, db.bill_items, db.item_splits, db.activity_log],
-        async () => {
-          await db.bills.add(bill)
-          if (billItems.length > 0) await db.bill_items.bulkAdd(billItems)
-          if (itemSplits.length > 0) await db.item_splits.bulkAdd(itemSplits)
-          await db.activity_log.add(activity)
-        },
-      )
-    },
-    queueOffline: async () => {
-      await enqueuePendingMutation({
-        actorUserId: input.createdBy,
-        operation: 'create_bill',
-        entityType: 'bill',
-        entityId: billId,
-        payload: { title: input.title, groupId: input.groupId },
-        routeHint: input.groupId ? `/app/groups/${input.groupId}` : '/app/bills',
-      })
+    pending: {
+      operation: 'create_bill',
+      entityType: 'bill',
+      entityId: billId,
+      payload: { title: input.title, groupId: input.groupId },
+      routeHint: input.groupId ? `/app/groups/${input.groupId}` : '/app/bills',
     },
   })
 
@@ -353,6 +286,7 @@ export async function createBill(input: CreateBillInput): Promise<string> {
     groupId: input.groupId,
     groupName,
     cloudConfirmed: mode === 'cloud',
+    submissionId,
   })
 
   return billId
@@ -501,27 +435,12 @@ export async function updateBill(
       item_splits: itemSplitRows,
       activity_log: [activity],
     },
-    stageOffline: async () => {
-      await db.transaction(
-        'rw',
-        [db.bills, db.bill_items, db.item_splits, db.activity_log],
-        async () => {
-          await db.bills.put(updatedBill)
-          if (billItemRows.length > 0) await db.bill_items.bulkPut(billItemRows)
-          if (itemSplitRows.length > 0) await db.item_splits.bulkPut(itemSplitRows)
-          await db.activity_log.add(activity)
-        },
-      )
-    },
-    queueOffline: async () => {
-      await enqueuePendingMutation({
-        actorUserId: editorUserId,
-        operation: 'update_bill',
-        entityType: 'bill',
-        entityId: billId,
-        payload: { title: patch.title, currency: patch.currency, groupId: bill.group_id },
-        routeHint: bill.group_id ? `/app/groups/${bill.group_id}` : `/app/bills/${billId}`,
-      })
+    pending: {
+      operation: 'update_bill',
+      entityType: 'bill',
+      entityId: billId,
+      payload: { title: patch.title, currency: patch.currency, groupId: bill.group_id },
+      routeHint: bill.group_id ? `/app/groups/${bill.group_id}` : `/app/bills/${billId}`,
     },
   })
 }
@@ -573,27 +492,12 @@ export async function deleteBill(
       item_splits: splits,
       activity_log: [activity],
     },
-    stageOffline: async () => {
-      await db.transaction(
-        'rw',
-        [db.bills, db.bill_items, db.item_splits, db.activity_log],
-        async () => {
-          await db.bills.put(deletedBill)
-          if (items.length > 0) await db.bill_items.bulkPut(items)
-          if (splits.length > 0) await db.item_splits.bulkPut(splits)
-          await db.activity_log.add(activity)
-        },
-      )
-    },
-    queueOffline: async () => {
-      await enqueuePendingMutation({
-        actorUserId: userId,
-        operation: 'delete_bill',
-        entityType: 'bill',
-        entityId: billId,
-        payload: { title: bill.title, groupId: bill.group_id },
-        routeHint: bill.group_id ? `/app/groups/${bill.group_id}` : '/app/bills',
-      })
+    pending: {
+      operation: 'delete_bill',
+      entityType: 'bill',
+      entityId: billId,
+      payload: { title: bill.title, groupId: bill.group_id },
+      routeHint: bill.group_id ? `/app/groups/${bill.group_id}` : '/app/bills',
     },
   })
 }
@@ -657,6 +561,7 @@ async function notifyMembersAdded(input: {
   addedBy: string
   pickedIds: string[]
   cloudConfirmed: boolean
+  submissionId?: string
 }): Promise<void> {
   if (input.pickedIds.length === 0) return
   const [actor, resolved] = await Promise.all([
@@ -673,6 +578,7 @@ async function notifyMembersAdded(input: {
     groupId: input.groupId,
     groupName: input.groupName,
     cloudConfirmed: input.cloudConfirmed,
+    submissionId: input.submissionId,
   })
 }
 
@@ -713,7 +619,7 @@ export async function createGroup(
   })
   await Promise.all(added.members.map((m) => fetchRemoteProfileIntoDexie(m.user_id)))
 
-  const { mode } = await commitRows({
+  const { mode, submissionId } = await commitCloudFirstWrite({
     actorUserId: createdBy,
     payload: {
       groups: [group],
@@ -746,6 +652,7 @@ export async function createGroup(
     addedBy: createdBy,
     pickedIds: added.pickedIds,
     cloudConfirmed: mode === 'cloud',
+    submissionId,
   })
   return groupId
 }
@@ -763,7 +670,7 @@ export async function updateGroup(
   const nextName = patch.name?.trim() ?? group.name
   const nextCurrency = patch.currency ?? group.currency
 
-  await commitRows({
+  await commitCloudFirstWrite({
     actorUserId: userId,
     payload: {
       groups: [
@@ -868,7 +775,7 @@ export async function addGroupMember(
     joined_at: now(),
   }
 
-  const { mode } = await commitRows({
+  const { mode, submissionId } = await commitCloudFirstWrite({
     actorUserId: addedBy,
     payload: {
       ...(newProfiles.length > 0 && { profiles: newProfiles }),
@@ -910,6 +817,7 @@ export async function addGroupMember(
       groupId,
       groupName: group.name,
       cloudConfirmed: mode === 'cloud',
+      submissionId,
     })
   }
 
@@ -919,6 +827,37 @@ export async function addGroupMember(
 export type CreateLocalProfileResult =
   | { outcome: 'created'; id: string }
   | { outcome: 'already_exists'; id: string }
+
+/**
+ * Rename the signed-in user: their own profile row plus their live membership rows (the roster
+ * name other members see), in one cloud-first write. Resolves without doing anything when the
+ * profile is not on this device yet.
+ */
+export async function renameSelf(userId: string, displayName: string): Promise<void> {
+  const trimmed = displayName.trim()
+  const existing = await db.profiles.get(userId)
+  if (!existing || !trimmed) return
+  const timestamp = now()
+  const memberships = await db.group_members
+    .where('user_id')
+    .equals(userId)
+    .filter((m) => !m.is_deleted)
+    .toArray()
+  await commitCloudFirstWrite({
+    actorUserId: userId,
+    payload: {
+      profiles: [{ ...existing, display_name: trimmed, updated_at: timestamp }],
+      group_members: memberships.map((m) => ({ ...m, display_name: trimmed, updated_at: timestamp })),
+    },
+    pending: {
+      operation: 'rename_self',
+      entityType: 'profile',
+      entityId: userId,
+      payload: { displayName: trimmed },
+      routeHint: '/app/settings',
+    },
+  })
+}
 
 /** Local phonebook contact (unique name per owner). */
 export async function createLocalProfile(
@@ -937,7 +876,7 @@ export async function createLocalProfile(
   if (existing) return { outcome: 'already_exists', id: existing.id }
 
   const userId = generateId()
-  await commitRows({
+  await commitCloudFirstWrite({
     actorUserId: ownerUserId,
     payload: {
       profiles: [
@@ -991,7 +930,7 @@ export async function addExistingGroupMembers(
 
   await Promise.all(added.members.map((m) => fetchRemoteProfileIntoDexie(m.user_id)))
 
-  const { mode } = await commitRows({
+  const { mode, submissionId } = await commitCloudFirstWrite({
     actorUserId: addedBy,
     payload: {
       group_members: added.members,
@@ -1012,6 +951,7 @@ export async function addExistingGroupMembers(
     addedBy,
     pickedIds: added.pickedIds,
     cloudConfirmed: mode === 'cloud',
+    submissionId,
   })
 }
 
@@ -1136,7 +1076,7 @@ export async function linkProfileToRemote(
     })
   }
 
-  const { mode } = await commitRows({
+  const { mode, submissionId } = await commitCloudFirstWrite({
     actorUserId,
     payload: collectorToPayload(collect),
     pending: {
@@ -1157,6 +1097,7 @@ export async function linkProfileToRemote(
     recipientId: remoteProfileId,
     linkedAsName: local.display_name,
     cloudConfirmed: mode === 'cloud',
+    submissionId,
   })
 
   // 'queued' means the link exists on THIS device only. That is the state that shows the person
@@ -1253,7 +1194,7 @@ export async function addProfilePeerLink(
     anchor_profile_id: anchorLocalId,
     peer_profile_id: peerProfileId,
   }
-  await commitRows({
+  await commitCloudFirstWrite({
     actorUserId,
     payload: { profile_peer_links: [row] },
     pending: {
@@ -1274,7 +1215,7 @@ export async function removeProfilePeerLink(linkId: string, actorUserId: string)
   if (isPrimaryAccountLink) return
 
   const timestamp = now()
-  await commitRows({
+  await commitCloudFirstWrite({
     actorUserId,
     payload: {
       profile_peer_links: [{ ...row, is_deleted: true, updated_at: timestamp, synced_at: null }],
@@ -1351,7 +1292,7 @@ export async function removeGroupMember(
     options.collect.activity_log.push(removalActivity)
     return
   }
-  await commitRows({
+  await commitCloudFirstWrite({
     actorUserId: removedBy,
     payload: { group_members: [removedMembership], activity_log: [removalActivity] },
     pending: {
@@ -1507,7 +1448,7 @@ export async function deletePerson(personId: string, actorUserId: string): Promi
     description: `Removed contact "${displayName}"`,
   })
 
-  await commitRows({
+  await commitCloudFirstWrite({
     actorUserId,
     payload: collectorToPayload(collect),
     pending: {
@@ -1552,7 +1493,7 @@ export async function deleteGroup(groupId: string, userId: string) {
     updated_at: timestamp,
   }))
 
-  await commitRows({
+  await commitCloudFirstWrite({
     actorUserId: userId,
     payload: {
       groups: [{ ...group, is_deleted: true, updated_at: timestamp }],
@@ -1647,25 +1588,16 @@ async function commitSettlementRows(input: {
     payload: unknown
     routeHint: string
   }
-}): Promise<{ mode: 'cloud' | 'queued' }> {
+}): Promise<{ mode: 'cloud' | 'queued'; submissionId: string }> {
   return commitCloudFirstWrite({
     actorUserId: input.actorUserId,
     payload: { settlements: input.settlements, activity_log: [input.activity] },
-    stageOffline: async () => {
-      await db.transaction('rw', [db.settlements, db.activity_log], async () => {
-        await db.settlements.bulkPut(input.settlements)
-        await db.activity_log.add(input.activity)
-      })
-    },
-    queueOffline: async () => {
-      await enqueuePendingMutation({
-        actorUserId: input.actorUserId,
-        operation: input.pending.operation,
-        entityType: 'settlement',
-        entityId: input.pending.entityId,
-        payload: input.pending.payload,
-        routeHint: input.pending.routeHint,
-      })
+    pending: {
+      operation: input.pending.operation,
+      entityType: 'settlement',
+      entityId: input.pending.entityId,
+      payload: input.pending.payload,
+      routeHint: input.pending.routeHint,
     },
   })
 }
@@ -1764,31 +1696,24 @@ export async function createSettlement(
   // keeps the payment atomic without needing to undo half-written legs on failure.
   // A collected leg is not submitted here, so its notification cannot claim a confirmed write.
   let cloudConfirmed = false
+  let submissionId: string | undefined
   if (options?.collect) {
     options.collect.settlements.push(settlement)
     options.collect.activity_log.push(settlementActivity)
   } else {
-    const { mode } = await commitCloudFirstWrite({
+    const committed = await commitCloudFirstWrite({
       actorUserId: markedBy,
       payload: { settlements: [settlement], activity_log: [settlementActivity] },
-      stageOffline: async () => {
-        await db.transaction('rw', [db.settlements, db.activity_log], async () => {
-          await db.settlements.add(settlement)
-          await db.activity_log.add(settlementActivity)
-        })
-      },
-      queueOffline: async () => {
-        await enqueuePendingMutation({
-          actorUserId: markedBy,
-          operation: options?.syncOperation ?? 'create_settlement',
-          entityType: 'settlement',
-          entityId: settlementId,
-          payload: { groupId, billId: billId ?? null, amount, currency },
-          routeHint: options?.routeHint ?? (groupId ? `/app/groups/${groupId}` : '/app/settings'),
-        })
+      pending: {
+        operation: options?.syncOperation ?? 'create_settlement',
+        entityType: 'settlement',
+        entityId: settlementId,
+        payload: { groupId, billId: billId ?? null, amount, currency },
+        routeHint: options?.routeHint ?? (groupId ? `/app/groups/${groupId}` : '/app/settings'),
       },
     })
-    cloudConfirmed = mode === 'cloud'
+    cloudConfirmed = committed.mode === 'cloud'
+    submissionId = committed.submissionId
   }
 
   const actor = await db.profiles.get(markedBy)
@@ -1822,6 +1747,7 @@ export async function createSettlement(
       currency,
       payments,
       cloudConfirmed,
+      submissionId,
     })
   }
 
@@ -1939,7 +1865,7 @@ export async function createBundledGroupSettlement(params: {
 
   // One payment to several people is one submission: a partially-landed bundle would clear
   // some recipients' balances and not others.
-  const { mode } = await commitSettlementRows({
+  const { mode, submissionId } = await commitSettlementRows({
     actorUserId: params.markedBy,
     settlements: bundleRows,
     activity: {
@@ -1989,6 +1915,7 @@ export async function createBundledGroupSettlement(params: {
     currency: params.currency,
     payments,
     cloudConfirmed: mode === 'cloud',
+    submissionId,
   })
 
   return { bundleId, settlementIds }
@@ -2065,7 +1992,7 @@ export async function recordDecomposedSettlement(params: {
 
   // A decomposed settle-up is one agreed set of transfers. Landing only some legs would leave
   // the group half-settled in a way no member intended.
-  const { mode } = await commitSettlementRows({
+  const { mode, submissionId } = await commitSettlementRows({
     actorUserId: params.markedBy,
     settlements: legRows,
     activity: {
@@ -2113,6 +2040,7 @@ export async function recordDecomposedSettlement(params: {
     currency: params.currency,
     payments,
     cloudConfirmed: mode === 'cloud',
+    submissionId,
   })
 
   return { bundleId, settlementIds }
@@ -2127,6 +2055,7 @@ async function emitSinglePaymentNotification(params: {
   groupId: string | null
   settlementId: string
   cloudConfirmed: boolean
+  submissionId?: string
 }) {
   const actor = await db.profiles.get(params.markedBy)
   const [fromProfile, toProfile] = await Promise.all([
@@ -2159,6 +2088,7 @@ async function emitSinglePaymentNotification(params: {
     currency: params.currency,
     payments,
     cloudConfirmed: params.cloudConfirmed,
+    submissionId: params.submissionId,
   })
 }
 
@@ -2216,24 +2146,15 @@ export async function recordPersonPayment(params: {
   // contexts, so a partial landing would misstate the balance in both directions — the group leg
   // cleared but the personal one not, or the reverse. One RPC is one Postgres transaction, so
   // either all legs are stored or none are.
-  const { mode } = await commitCloudFirstWrite({
+  const { mode, submissionId } = await commitCloudFirstWrite({
     actorUserId: params.markedBy,
     payload: { settlements: collect.settlements, activity_log: collect.activity_log },
-    stageOffline: async () => {
-      await db.transaction('rw', [db.settlements, db.activity_log], async () => {
-        await db.settlements.bulkAdd(collect.settlements)
-        await db.activity_log.bulkAdd(collect.activity_log)
-      })
-    },
-    queueOffline: async () => {
-      await enqueuePendingMutation({
-        actorUserId: params.markedBy,
-        operation: 'record_person_payment',
-        entityType: 'settlement',
-        entityId: notifyEntityId,
-        payload: { totalAmount: params.totalAmount, currency: params.currency, legs: legs.length },
-        routeHint: params.routeHint ?? `/app/people/${params.otherId}`,
-      })
+    pending: {
+      operation: 'record_person_payment',
+      entityType: 'settlement',
+      entityId: notifyEntityId,
+      payload: { totalAmount: params.totalAmount, currency: params.currency, legs: legs.length },
+      routeHint: params.routeHint ?? `/app/people/${params.otherId}`,
     },
   })
 
@@ -2255,6 +2176,7 @@ export async function recordPersonPayment(params: {
       groupId: notifyGroupId,
       settlementId: notifyEntityId,
       cloudConfirmed: mode === 'cloud',
+      submissionId,
     })
   }
 

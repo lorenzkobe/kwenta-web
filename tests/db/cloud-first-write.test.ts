@@ -3,6 +3,7 @@ import { db } from '@/db/db'
 import { createBill, deleteBill, recordPersonPayment, updateBill } from '@/db/operations'
 import { makeGroup, makeMember, makeProfile, resetDb } from '../helpers/db'
 import { waitForInFlightCloudWrites } from '@/sync/in-flight-writes'
+import { useAppStore } from '@/store/app-store'
 
 // The cloud-first write contract: when the actor is ONLINE, a mutation is only visible
 // locally once the server has accepted it. Here the Supabase RPC is driven directly, so
@@ -17,9 +18,14 @@ import { waitForInFlightCloudWrites } from '@/sync/in-flight-writes'
 // lands on failure" can.
 
 const cloud = vi.hoisted(() => ({
-  /** 'ok' echoes the push back as stored; 'error' is a transport failure; 'drop' is a
-   *  silent server-side rejection (accepted by the RPC, never stored). */
-  mode: 'ok' as 'ok' | 'error' | 'drop',
+  /** 'ok' echoes the push back as stored; 'reject' is a server refusal (Postgres error code);
+   *  'drop' is a silent server-side rejection (accepted by the RPC, never stored); 'transport'
+   *  never reaches the server; 'lost' is stored but the response is lost; 'inactive' is 076. */
+  mode: 'ok' as 'ok' | 'error' | 'drop' | 'reject' | 'transport' | 'lost' | 'inactive',
+  status: 0 as number,
+  errorCode: undefined as string | undefined,
+  errorStatus: undefined as number | undefined,
+  submissionIds: [] as (string | undefined)[],
   /** Tables the fake server refuses to store, to simulate a partial server-side drop. */
   refuse: new Set<string>(),
   pushes: [] as Record<string, { id: string }[]>[],
@@ -65,6 +71,10 @@ beforeEach(async () => {
   cloud.refuse = new Set()
   cloud.pushes = []
   cloud.hold = null
+  cloud.status = 0
+  cloud.errorCode = undefined
+  cloud.errorStatus = undefined
+  cloud.submissionIds = []
   await db.profiles.bulkAdd([
     makeProfile({ id: 'ME', display_name: 'Me' }),
     makeProfile({ id: 'FR', display_name: 'Friend', is_local: true, owner_id: 'ME' }),
@@ -102,7 +112,7 @@ describe('cloud-first write contract', () => {
   })
 
   it('leaves Dexie untouched when the cloud rejects the write', async () => {
-    cloud.mode = 'error'
+    cloud.mode = 'reject'
 
     await expect(createBill(BILL_INPUT)).rejects.toThrow()
 
@@ -149,7 +159,7 @@ describe('cloud-first write contract', () => {
   })
 
   it('does not leave an unsynced row that a later background sync would push', async () => {
-    cloud.mode = 'error'
+    cloud.mode = 'reject'
     await expect(createBill(BILL_INPUT)).rejects.toThrow()
 
     // syncRoundTrip pushes every row with synced_at === null. A rejected write that stays
@@ -160,7 +170,7 @@ describe('cloud-first write contract', () => {
 
   it('leaves the original bill intact when an update is rejected', async () => {
     const billId = await createBill(BILL_INPUT)
-    cloud.mode = 'error'
+    cloud.mode = 'reject'
 
     await expect(
       updateBill(billId, 'ME', {
@@ -185,7 +195,7 @@ describe('cloud-first write contract', () => {
 
   it('leaves the bill undeleted when a delete is rejected', async () => {
     const billId = await createBill(BILL_INPUT)
-    cloud.mode = 'error'
+    cloud.mode = 'reject'
 
     await expect(deleteBill(billId, 'ME')).rejects.toThrow()
 
@@ -245,7 +255,7 @@ describe('cloud-first write contract', () => {
     })
 
     it('records no leg at all when the payment is rejected', async () => {
-      cloud.mode = 'error'
+      cloud.mode = 'reject'
 
       await expect(recordPersonPayment(PAYMENT)).rejects.toThrow()
 
@@ -257,7 +267,7 @@ describe('cloud-first write contract', () => {
   })
 
   it('a retry after a rejected write creates exactly one bill', async () => {
-    cloud.mode = 'error'
+    cloud.mode = 'reject'
     await expect(createBill(BILL_INPUT)).rejects.toThrow()
 
     // The user is still on the filled form; they press Save again and it succeeds.
@@ -282,5 +292,98 @@ describe('a write in flight is visible to the realtime echo check (072)', () => 
     const billId = await saving
     expect(await db.bills.get(billId)).toBeTruthy()
     await expect(waitForInFlightCloudWrites(20)).resolves.toBe(true)
+  })
+})
+
+describe('C9: an online save the server accepts', () => {
+  it('C9: mirrors the rows, leaves no queue entry and bumps dataVersion exactly once', async () => {
+    const before = useAppStore.getState().dataVersion
+
+    const billId = await createBill(BILL_INPUT)
+
+    expect((await db.bills.get(billId))?.synced_at).not.toBeNull()
+    expect(await db.item_splits.count()).toBe(2)
+    expect(await db.pending_mutations.count()).toBe(0)
+    expect(useAppStore.getState().dataVersion - before).toBe(1)
+  })
+})
+
+describe('C10: a transport failure while online stages and queues instead of throwing', () => {
+  for (const [label, status] of [
+    ['no response (status 0)', 0],
+    ['a 502 gateway error', 502],
+    ['a 503', 503],
+    ['a 504 gateway timeout', 504],
+  ] as const) {
+    it(`C10: ${label} resolves, stages the bill and queues it with the SAME submission id`, async () => {
+      cloud.mode = 'transport'
+      cloud.status = status
+
+      const billId = await createBill(BILL_INPUT)
+
+      const bill = await db.bills.get(billId)
+      expect(bill).toBeTruthy()
+      expect(bill?.synced_at).toBeNull()
+      expect(await db.item_splits.count()).toBe(2)
+
+      const entries = await db.pending_mutations.toArray()
+      expect(entries).toHaveLength(1)
+      const entry = entries[0] as unknown as Record<string, unknown>
+      expect(entry.status).toBe('pending')
+      expect(entry.last_error_kind).toBe('transport')
+      expect(cloud.submissionIds).toHaveLength(1)
+      expect(typeof cloud.submissionIds[0]).toBe('string')
+      expect(entry.submission_id).toBe(cloud.submissionIds[0])
+      const push = entry.push as Record<string, { id: string }[]>
+      expect(push.bills.map((b) => b.id)).toEqual([billId])
+      expect(push.item_splits).toHaveLength(2)
+    })
+  }
+
+  it('C10: records no not-applied change for a transport failure', async () => {
+    cloud.mode = 'transport'
+
+    await createBill(BILL_INPUT)
+
+    expect(await db.not_applied_changes.count()).toBe(0)
+  })
+})
+
+describe('C12: a real server refusal throws and leaves nothing behind', () => {
+  for (const [label, setup] of [
+    ['a Postgres error code (P0001)', () => { cloud.mode = 'reject' }],
+    ['a unique violation (23505)', () => { cloud.mode = 'reject'; cloud.errorCode = '23505' }],
+    ['NOT_STORED (accepted but not applied)', () => { cloud.mode = 'drop' }],
+    ['an inactive account (076)', () => { cloud.mode = 'inactive' }],
+  ] as const) {
+    it(`C12: ${label} throws, Dexie untouched, nothing queued`, async () => {
+      setup()
+
+      await expect(createBill(BILL_INPUT)).rejects.toThrow()
+
+      expect(await db.bills.count()).toBe(0)
+      expect(await db.bill_items.count()).toBe(0)
+      expect(await db.item_splits.count()).toBe(0)
+      expect(await db.pending_mutations.count()).toBe(0)
+    })
+  }
+})
+
+describe('review H2.2: a PostgREST server-state error on an online save queues instead of throwing', () => {
+  it('PGRST003 (504, no pool connection) resolves queued with the same submission id and no not-applied change', async () => {
+    cloud.mode = 'reject'
+    cloud.errorCode = 'PGRST003'
+    cloud.errorStatus = 504
+
+    const billId = await createBill(BILL_INPUT)
+
+    expect((await db.bills.get(billId))?.synced_at).toBeNull()
+    const entries = (await db.pending_mutations.toArray()) as unknown as Record<string, unknown>[]
+    expect(entries).toHaveLength(1)
+    expect(entries[0].status).toBe('pending')
+    expect(entries[0].last_error_kind).toBe('transport')
+    expect(cloud.submissionIds).toHaveLength(1)
+    expect(entries[0].submission_id).toBe(cloud.submissionIds[0])
+    expect(await db.not_applied_changes.count()).toBe(0)
   })
 })

@@ -93,7 +93,7 @@ import { notifyPaymentsRecorded } from '@/lib/kwenta-notifications'
  * Both RPCs count: which one the client reaches depends on the server generation, and "how many
  * times did this mutation go to the server" is the same question either way.
  */
-const cloudCalls = vi.hoisted(() => ({ mode: 'ok' as const, writeRoundTrips: 0, calls: 0 }))
+const cloudCalls = vi.hoisted(() => ({ mode: 'ok' as const, writeRoundTrips: 0, calls: 0, sessionUserId: 'ME' }))
 
 vi.mock('@/lib/supabase', async () => {
   const { makeSupabaseCloudMock } = await import('../helpers/cloud-sync-mock')
@@ -101,6 +101,9 @@ vi.mock('@/lib/supabase', async () => {
   return {
     supabase: {
       ...base,
+      // A write is sent only under its actor's own session (review-5 H5.1), so the fake session is
+      // the account the test acts as.
+      auth: { getSession: async () => ({ data: { session: { user: { id: cloudCalls.sessionUserId } } } }) },
       rpc: async (fn: string, args?: Record<string, unknown>) => {
         if (fn === 'kwenta_sync' || fn === 'kwenta_write') cloudCalls.writeRoundTrips += 1
         return base.rpc(fn, args)
@@ -111,6 +114,7 @@ vi.mock('@/lib/supabase', async () => {
 
 beforeEach(async () => {
   await resetDb()
+  cloudCalls.sessionUserId = 'ME'
   serverMoney.owed = 0
   serverMoney.breakdown = {
     memberUserId: '',
@@ -494,6 +498,10 @@ describe('addGroupMember', () => {
 })
 
 describe('removeGroupMember', () => {
+  beforeEach(() => {
+    cloudCalls.sessionUserId = 'A'
+  })
+
   async function seed3MemberGroup() {
     await db.profiles.bulkAdd([makeProfile({ id: 'A' }), makeProfile({ id: 'B' }), makeProfile({ id: 'C' })])
     await db.groups.add(makeGroup({ id: 'G', created_by: 'A' }))
@@ -584,6 +592,10 @@ describe('removeGroupMember', () => {
 })
 
 describe('createSettlement', () => {
+  beforeEach(() => {
+    cloudCalls.sessionUserId = 'A'
+  })
+
   it('records a personal settlement', async () => {
     await db.profiles.bulkAdd([makeProfile({ id: 'A' }), makeProfile({ id: 'B' })])
     const id = await createSettlement(null, 'B', 'A', 50, 'PHP', 'A', 'Cash')
@@ -601,6 +613,10 @@ describe('createSettlement', () => {
   })
 
   describe('createSettlement identity', () => {
+    beforeEach(() => {
+      cloudCalls.sessionUserId = 'ME'
+    })
+
     it('rewrites group settlement parties to roster ids (by email)', async () => {
       await db.groups.add(makeGroup({ id: 'G', created_by: 'ME' }))
       await db.group_members.bulkAdd([
@@ -1005,6 +1021,10 @@ describe('deletePerson on personal bills (075: a personal bill is its creator\'s
 })
 
 describe('member management permissions', () => {
+  beforeEach(() => {
+    cloudCalls.sessionUserId = 'OWNER'
+  })
+
   async function seedGroupOwnedBy(creator: string) {
     await db.profiles.bulkAdd([
       makeProfile({ id: creator }),
@@ -1033,6 +1053,10 @@ describe('member management permissions', () => {
 })
 
 describe('payment caps', () => {
+  beforeEach(() => {
+    cloudCalls.sessionUserId = 'B'
+  })
+
   async function seedDebt() {
     await db.profiles.bulkAdd([makeProfile({ id: 'A' }), makeProfile({ id: 'B' })])
     await db.groups.add(makeGroup({ id: 'G', created_by: 'A' }))
@@ -1180,6 +1204,10 @@ describe('payment caps', () => {
 })
 
 describe('recordDecomposedSettlement', () => {
+  beforeEach(() => {
+    cloudCalls.sessionUserId = 'Ana'
+  })
+
   async function seedChain() {
     // Ana owes Carlo 200 (Carlo paid); Carlo owes John 100 (John paid).
     await db.groups.add(makeGroup({ id: 'G', name: 'Trip', currency: 'PHP' }))
@@ -1264,6 +1292,10 @@ describe('recordDecomposedSettlement', () => {
 })
 
 describe('recordPersonPayment', () => {
+  beforeEach(() => {
+    cloudCalls.sessionUserId = 'me'
+  })
+
   beforeEach(async () => {
     await db.profiles.bulkAdd([makeProfile({ id: 'me' }), makeProfile({ id: 'other' })])
   })
@@ -1311,6 +1343,7 @@ describe('recordPersonPayment', () => {
   })
 
   it('attributes the notification to the group when every leg is that one group', async () => {
+    cloudCalls.sessionUserId = 'other'
     await db.groups.add(makeGroup({ id: 'G', created_by: 'me', currency: 'PHP' }))
     await db.group_members.bulkAdd([
       makeMember({ group_id: 'G', user_id: 'me' }),
@@ -1333,6 +1366,7 @@ describe('recordPersonPayment', () => {
   })
 
   it('leaves the notification un-grouped for a personal payment', async () => {
+    cloudCalls.sessionUserId = 'other'
     await seedSimpleBill({ groupId: null, paidBy: 'me', shares: { other: 100 } })
     vi.mocked(notifyPaymentsRecorded).mockClear()
     await recordPersonPayment({
@@ -1424,6 +1458,10 @@ describe('recordPersonPayment', () => {
  * mirrored the row.
  */
 describe('settlement deletes against an incomplete mirror', () => {
+  beforeEach(() => {
+    cloudCalls.sessionUserId = 'me'
+  })
+
   it('refuses rather than silently succeeding when the row is not mirrored yet', async () => {
     // The dialog treated a resolved promise as success: it called onSaved()/onClose() with no
     // toast, the payment was still listed after the refetch, and the user pressed Remove again.

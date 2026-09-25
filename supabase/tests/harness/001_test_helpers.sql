@@ -172,14 +172,27 @@ $$;
 -- id to a variable first, then use the variable. (This has bitten twice; hence the note.)
 -- ---------------------------------------------------------------------------
 
-/** Create an auth user + its public.profiles row (the 025/035 trigger builds the profile). */
-CREATE OR REPLACE FUNCTION test.new_account(p_email text, p_display text DEFAULT NULL)
+/** Create an auth user + its public.profiles row (the 025/035 trigger builds the profile).
+
+    The account is ACTIVE unless `p_status` says otherwise. The signup trigger leaves a confirmed
+    user 'inactive' until an admin approves it, and since 076 the server refuses an inactive
+    caller's reads and writes — so a fixture account that stayed 'inactive' would fail every suite
+    for a reason none of them is about. `p_status` is last so every positional call keeps working.
+
+    The status is set the way an admin action would, with auth.uid() NULL: a pre-058 suite that set
+    `request.jwt.claim.sub` alone and stayed the owner would otherwise hit 025's privilege guard
+    ("cannot modify account_status") and 076's caller check. The claims are restored afterwards. */
+CREATE OR REPLACE FUNCTION test.new_account(p_email text, p_display text DEFAULT NULL, p_status text DEFAULT 'active')
 RETURNS uuid
 LANGUAGE plpgsql
 AS $$
 DECLARE
   v_id uuid := gen_random_uuid();
+  v_sub text := current_setting('request.jwt.claim.sub', true);
+  v_claims text := current_setting('request.jwt.claims', true);
 BEGIN
+  PERFORM set_config('request.jwt.claim.sub', '', true);
+  PERFORM set_config('request.jwt.claims', '', true);
   INSERT INTO auth.users (id, email, email_confirmed_at, raw_user_meta_data)
   VALUES (
     v_id,
@@ -188,6 +201,10 @@ BEGIN
     CASE WHEN p_display IS NULL THEN '{}'::jsonb
          ELSE jsonb_build_object('display_name', p_display) END
   );
+  UPDATE public.profiles SET account_status = p_status
+  WHERE id = v_id AND account_status IS DISTINCT FROM p_status;
+  PERFORM set_config('request.jwt.claim.sub', COALESCE(v_sub, ''), true);
+  PERFORM set_config('request.jwt.claims', COALESCE(v_claims, ''), true);
   RETURN v_id;
 END;
 $$;

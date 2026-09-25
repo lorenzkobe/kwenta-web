@@ -265,7 +265,7 @@ $$;
 -- ---------------------------------------------------------------------------
 DO $$
 DECLARE
-  alice uuid; bob uuid; bob_contact uuid; bill uuid; item uuid; res jsonb;
+  alice uuid; bob uuid; bob_contact uuid; bill uuid; item uuid; res jsonb; msg text;
 BEGIN
   PERFORM test.as_owner();
   alice := test.new_account('p66g-alice@example.com', 'Alice');
@@ -275,22 +275,26 @@ BEGIN
 
   PERFORM test.as_user(alice);
   -- Alice tries to smuggle Bob's private contact into her own submission's applied set by pushing
-  -- it. The validators refuse it, so it is neither stored nor echoed.
-  res := public.kwenta_write(
-    test.bill_push(bill, item, alice, 'Nice try', 10, ARRAY[alice]) ||
-      jsonb_build_object('profiles', jsonb_build_array(
-        jsonb_build_object(
-          'id', bob_contact, 'email', '', 'display_name', 'HIJACKED',
-          'avatar_url', NULL, 'user_type', 'user', 'account_status', 'active',
-          'is_local', true, 'linked_profile_id', NULL, 'owner_id', bob,
-          'created_at', now(), 'updated_at', now(), 'synced_at', NULL,
-          'is_deleted', false, 'device_id', 'test'))),
-    NULL, '[]'::jsonb);
+  -- it. The validators refuse it, so it is neither stored nor echoed. Since 078 a refused row
+  -- fails the whole kwenta_write (naming the row), so no echo is returned at all.
+  BEGIN
+    res := public.kwenta_write(
+      test.bill_push(bill, item, alice, 'Nice try', 10, ARRAY[alice]) ||
+        jsonb_build_object('profiles', jsonb_build_array(
+          jsonb_build_object(
+            'id', bob_contact, 'email', '', 'display_name', 'HIJACKED',
+            'avatar_url', NULL, 'user_type', 'user', 'account_status', 'active',
+            'is_local', true, 'linked_profile_id', NULL, 'owner_id', bob,
+            'created_at', now(), 'updated_at', now(), 'synced_at', NULL,
+            'is_deleted', false, 'device_id', 'test'))),
+      NULL, '[]'::jsonb);
+  EXCEPTION WHEN raise_exception THEN
+    GET STACKED DIAGNOSTICS msg = MESSAGE_TEXT;
+  END;
 
-  PERFORM test.assert_false(res -> 'applied' -> 'profiles' ? bob_contact::text,
-    'the push validator refuses another user''s contact');
-  PERFORM test.assert_eq(jsonb_array_length(res -> 'profiles'), 0,
-    'and it is not echoed back either');
+  PERFORM test.assert_true(COALESCE(msg LIKE '%profiles:' || bob_contact::text || '%', false),
+    'the push validator refuses another user''s contact (got: ' || COALESCE(msg, 'no error') || ')');
+  PERFORM test.assert_eq(res, NULL::jsonb, 'and it is not echoed back either');
 
   PERFORM test.as_owner();
   PERFORM test.assert_eq((SELECT display_name FROM public.profiles WHERE id = bob_contact),

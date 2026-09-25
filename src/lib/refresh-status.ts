@@ -13,6 +13,7 @@ export type RefreshState =
   | 'syncing'
   | 'updating'
   | 'error'
+  | 'not-applied'
   | 'pending-upload'
   | 'stale'
   | 'idle'
@@ -31,6 +32,8 @@ export type RefreshStateInput = {
   syncStatus: 'idle' | 'syncing' | 'error'
   /** Local writes not yet confirmed by the server. */
   hasPendingUpload: boolean
+  /** Queued writes the server refused (or that are blocked behind one); they wait for the user. */
+  hasNotApplied: boolean
   /** Set by the sync manager when a refresh failed; in-memory, so it does not survive a reload. */
   pullStale: boolean
   /** `Number.POSITIVE_INFINITY` when this device has never completed a refresh, or its marker is dated in the future (the clock moved back). */
@@ -43,13 +46,15 @@ export type RefreshStateInput = {
  * Precedence matters more than any individual state: offline outranks everything (nothing can
  * be done), a sync or a screen fetch in flight outranks a past error (either may be the
  * recovery), and an unsent write outranks mere staleness (the user's own data is the more urgent
- * fact).
+ * fact). A refused write outranks an unsent one: it will not resolve on its own, and a pending
+ * write that did resolve must not leave the refusal reading as "Waiting to sync" forever.
  */
 export function resolveRefreshState(input: RefreshStateInput): RefreshState {
   if (!input.isOnline) return 'offline'
   if (input.syncStatus === 'syncing') return 'syncing'
   if (input.screenLoading) return 'updating'
   if (input.syncStatus === 'error') return 'error'
+  if (input.hasNotApplied) return 'not-applied'
   if (input.hasPendingUpload) return 'pending-upload'
   if (input.pullStale || input.msSinceLastRefresh >= STALE_AFTER_MS) return 'stale'
   return 'idle'
@@ -77,6 +82,8 @@ export function refreshStatusLabel(state: RefreshState, retrySeconds: number | n
       return 'Updating…'
     case 'error':
       return retrySeconds !== null ? `Retry in ~${retrySeconds}s` : "Couldn't sync"
+    case 'not-applied':
+      return 'Changes not applied'
     case 'pending-upload':
       return 'Waiting to sync'
     case 'stale':
@@ -107,6 +114,8 @@ export function refreshTitle(state: RefreshState, retrySeconds: number | null): 
       return retrySeconds !== null
         ? `Sync failed — retry in ~${retrySeconds}s (tap to retry now)`
         : 'Sync failed — tap to retry'
+    case 'not-applied':
+      return 'Some changes were refused — see Settings'
     case 'pending-upload':
       return 'Waiting to sync — tap to sync now'
     case 'stale':
@@ -130,6 +139,8 @@ export function refreshAriaLabel(state: RefreshState, lastUpdated: string): stri
       return 'Updating'
     case 'error':
       return 'Refresh data. Last sync failed'
+    case 'not-applied':
+      return `Changes not applied. ${lastUpdated}`
     default:
       return `Refresh data. ${lastUpdated}`
   }

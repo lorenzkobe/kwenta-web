@@ -19,16 +19,23 @@ import { db } from '@/db/db'
 import type { NotAppliedChange } from '@/types'
 import { markVoluntarySignOut } from '@/lib/auth-session-flags'
 import { clearKwentaLocalData } from '@/lib/clear-kwenta-local'
+import { claimDeviceFor } from '@/lib/device-owner'
 import {
   dismissNotAppliedChange,
   listPendingConflictsForActor,
   retryNotAppliedChange,
 } from '@/sync/cloud-first-mutations'
+import {
+  dismissQueuedWrite,
+  hasUnsentWrites,
+  retryQueuedWrite,
+  sendUnsentWritesBeforeWipe,
+} from '@/sync/write-queue'
 import { useAuth } from '@/hooks/useAuth'
 import { useCurrentUser } from '@/hooks/useCurrentUser'
 import { useAppStore } from '@/store/app-store'
 import { supabase } from '@/lib/supabase'
-import { hasUnsyncedLocalDataForUser, fullSync } from '@/sync/sync-service'
+import { fullSync } from '@/sync/sync-service'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { RepairDataPanel } from '@/components/settings/RepairDataPanel'
@@ -50,13 +57,22 @@ export function SettingsPage() {
   const setSyncStatus = useAppStore((s) => s.setSyncStatus)
 
   const hasPendingSync = useLiveQuery(
-    async () => (user?.id ? hasUnsyncedLocalDataForUser(user.id) : false),
+    async () => (user?.id ? hasUnsentWrites(user.id) : false),
     [user?.id],
   )
-  const pendingConflicts = useLiveQuery(
-    async () => (userId ? listPendingConflictsForActor(userId) : []),
-    [userId],
-  )
+  // `queued`: the refused change is a write-queue entry, so Dismiss restores the server's version
+  // and Apply again resends it. Anything else is a legacy (pre-v15) notice.
+  const pendingConflicts = useLiveQuery(async () => {
+    if (!userId) return []
+    const changes = await listPendingConflictsForActor(userId)
+    const entryIds = changes.flatMap((c) => (c.pending_mutation_id ? [c.pending_mutation_id] : []))
+    const entries = await db.pending_mutations.bulkGet(entryIds)
+    const refused = new Set(entries.flatMap((e) => (e && e.push != null && e.status === 'conflict' ? [e.id] : [])))
+    return changes.map((change) => ({
+      change,
+      queued: change.pending_mutation_id !== null && refused.has(change.pending_mutation_id),
+    }))
+  }, [userId])
 
   const [editing, setEditing] = useState(false)
   const [displayName, setDisplayName] = useState('')
@@ -67,6 +83,7 @@ export function SettingsPage() {
   const [signOutBusy, setSignOutBusy] = useState(false)
   const [resetOpen, setResetOpen] = useState(false)
   const [resetBusy, setResetBusy] = useState(false)
+  const [resetHasUnsent, setResetHasUnsent] = useState<boolean | null>(null)
   const [activityOpen, setActivityOpen] = useState(false)
   const recentActivityLoading = recentActivity === undefined
 
@@ -81,6 +98,10 @@ export function SettingsPage() {
     try {
       await updateDisplayName(displayName.trim())
       setEditing(false)
+    } catch (err) {
+      // Refused by the server (the rename is cloud-first): nothing was saved, so the editor stays
+      // open with the typed name for another try.
+      toast.error(err instanceof Error ? err.message : 'Could not rename you')
     } finally {
       setSavingName(false)
     }
@@ -92,7 +113,7 @@ export function SettingsPage() {
     setSignOutHasUnsynced(null)
     setSignOutBusy(true)
     try {
-      const has = await hasUnsyncedLocalDataForUser(user.id)
+      const has = await hasUnsentWrites(user.id)
       setSignOutHasUnsynced(has)
     } finally {
       setSignOutBusy(false)
@@ -102,7 +123,7 @@ export function SettingsPage() {
   async function runSignOutAndClearLocal(options?: { skipFinalSync?: boolean }) {
     if (!options?.skipFinalSync && navigator.onLine && user?.id) {
       try {
-        const result = await fullSync(user.id)
+        const result = await sendUnsentWritesBeforeWipe(user.id)
         if (result.errors.length > 0) {
           console.warn('[sign-out] push sync failed', result.errors)
         }
@@ -118,15 +139,49 @@ export function SettingsPage() {
     navigate('/login', { replace: true })
   }
 
+  // A reset wipes the device exactly as a sign-out does, queued writes included, so it warns the same way.
+  async function openResetDialog() {
+    if (!userId) return
+    setResetOpen(true)
+    setResetHasUnsent(null)
+    setResetBusy(true)
+    try {
+      setResetHasUnsent(await hasUnsentWrites(userId))
+    } finally {
+      setResetBusy(false)
+    }
+  }
+
   async function handleReset() {
     if (!userId) return
     setResetBusy(true)
     try {
-      await clearKwentaLocalData()
+      // The same user stays signed in, so the device stays theirs: a reset that left no owner key
+      // blocked their offline open and re-ran adoption on the next start.
+      await claimDeviceFor(userId)
       await fullSync(userId)
     } finally {
       setResetBusy(false)
       setResetOpen(false)
+    }
+  }
+
+  async function handleSyncThenReset() {
+    if (!userId) return
+    setResetBusy(true)
+    setSyncStatus('syncing')
+    try {
+      const { errors, stillUnsent } = await sendUnsentWritesBeforeWipe(userId)
+      if (errors.length > 0) {
+        console.warn('[reset sync]', errors)
+        setSyncStatus('error')
+        return
+      }
+      setSyncStatus('idle')
+      setResetHasUnsent(stillUnsent)
+      if (!stillUnsent) await handleReset()
+    } finally {
+      setResetBusy(false)
     }
   }
 
@@ -135,16 +190,15 @@ export function SettingsPage() {
     setSignOutBusy(true)
     setSyncStatus('syncing')
     try {
-      const result = await fullSync(user.id)
-      if (result.errors.length > 0) {
-        console.warn('[sign-out sync]', result.errors)
+      const { errors, stillUnsent } = await sendUnsentWritesBeforeWipe(user.id)
+      if (errors.length > 0) {
+        console.warn('[sign-out sync]', errors)
         setSyncStatus('error')
         return
       }
       setSyncStatus('idle')
-      const stillUnsynced = await hasUnsyncedLocalDataForUser(user.id)
-      setSignOutHasUnsynced(stillUnsynced)
-      if (!stillUnsynced) {
+      setSignOutHasUnsynced(stillUnsent)
+      if (!stillUnsent) {
         await runSignOutAndClearLocal({ skipFinalSync: true })
       }
     } finally {
@@ -161,15 +215,25 @@ export function SettingsPage() {
     return '/app/settings'
   }
 
-  async function handleDismissConflict(changeId: string) {
+  async function handleDismissConflict(change: NotAppliedChange, queued: boolean) {
     if (!window.confirm('Dismiss this change? It will be permanently discarded.')) {
       return
     }
-    await dismissNotAppliedChange(changeId)
+    if (!queued) {
+      await dismissNotAppliedChange(change.id)
+      return
+    }
+    try {
+      await dismissQueuedWrite(change.pending_mutation_id!)
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not discard this change')
+    }
   }
 
-  async function handleApplyAgain(change: NotAppliedChange) {
-    const success = await retryNotAppliedChange(change)
+  async function handleApplyAgain(change: NotAppliedChange, queued: boolean) {
+    const success = queued
+      ? await retryQueuedWrite(change.pending_mutation_id!).catch(() => false)
+      : await retryNotAppliedChange(change)
     if (success) {
       toast.success('Change re-applied')
       navigate(change.route_hint ?? fallbackRouteForConflict(change.entity_type, change.entity_id))
@@ -312,13 +376,14 @@ export function SettingsPage() {
               <div className="min-w-0 flex-1">
                 <h2 className="text-base font-semibold text-amber-900">Not applied changes</h2>
                 <p className="mt-1 text-xs text-amber-800">
-                  These changes were not applied after sync conflict checks. Review each one.
+                  The server refused these changes. Apply again to resend one, or dismiss it to go back to the
+                  saved version.
                 </p>
               </div>
             </div>
 
             <div className="mt-4 space-y-2">
-              {pendingConflicts!.map((change) => (
+              {pendingConflicts!.map(({ change, queued }) => (
                 <div key={change.id} className="rounded-xl border border-amber-200 bg-white px-4 py-3">
                   <p className="text-sm font-medium text-stone-900">{change.operation.replaceAll('_', ' ')}</p>
                   <p className="mt-1 text-xs text-stone-600">{change.reason_message}</p>
@@ -329,7 +394,7 @@ export function SettingsPage() {
                       size="sm"
                       className="rounded-lg"
                       onClick={() =>
-                        void handleApplyAgain(change)
+                        void handleApplyAgain(change, queued)
                       }
                     >
                       Apply again
@@ -350,7 +415,9 @@ export function SettingsPage() {
                       size="sm"
                       variant="ghost"
                       className="rounded-lg text-stone-600"
-                      onClick={() => void handleDismissConflict(change.id)}
+                      disabled={queued && !isOnline}
+                      title={queued && !isOnline ? 'Connect to the internet to discard this change' : undefined}
+                      onClick={() => void handleDismissConflict(change, queued)}
                     >
                       Dismiss
                     </Button>
@@ -398,7 +465,7 @@ export function SettingsPage() {
             {isAuthenticated && (
               <button
                 type="button"
-                onClick={() => setResetOpen(true)}
+                onClick={() => void openResetDialog()}
                 className="flex w-full items-center gap-3 px-5 py-4 text-left text-amber-700 transition-colors hover:bg-amber-500/5"
               >
                 <RotateCcw className="size-4" />
@@ -487,18 +554,31 @@ export function SettingsPage() {
               Reset local data?
             </h2>
             <p className="mt-2 text-sm leading-relaxed text-stone-600">
-              Clears all data stored in this browser and re-downloads everything fresh from the server.
-              Your account and all data stay on the server — nothing is deleted. Use this if you're
-              seeing stale or incorrect data after a refresh.
+              {resetHasUnsent === null && resetBusy
+                ? 'Checking for unsynced changes…'
+                : resetHasUnsent
+                  ? 'You have changes that are not uploaded yet. Resetting removes all Kwenta data from this browser. Those changes will be lost unless you sync first.'
+                  : "Clears all data stored in this browser and re-downloads everything fresh from the server. Your account and all data stay on the server — nothing is deleted. Use this if you're seeing stale or incorrect data after a refresh."}
             </p>
             <div className="mt-5 flex flex-col gap-2">
+              {resetHasUnsent && isOnline && (
+                <Button
+                  type="button"
+                  className="w-full rounded-xl"
+                  disabled={resetBusy}
+                  onClick={() => void handleSyncThenReset()}
+                >
+                  {resetBusy ? '…' : 'Sync now, then reset'}
+                </Button>
+              )}
               <Button
                 type="button"
+                variant={resetHasUnsent ? 'destructive' : 'default'}
                 className="w-full rounded-xl"
-                disabled={resetBusy}
+                disabled={resetBusy || resetHasUnsent === null}
                 onClick={() => void handleReset()}
               >
-                {resetBusy ? 'Resetting…' : 'Reset & reload'}
+                {resetBusy && resetHasUnsent !== null ? 'Resetting…' : resetHasUnsent ? 'Reset anyway' : 'Reset & reload'}
               </Button>
               <Button
                 type="button"

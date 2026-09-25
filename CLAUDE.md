@@ -40,14 +40,17 @@ Tests are **mandatory** for this project — we create tests and run testing as 
   - `tests/lib/settlement.test.ts` is now ONLY `buildMovementChains` — the last pure transform in that module. Everything else it covered moved into SQL with the code (053/061/064).
   - `tests/lib/payment-allocation.test.ts` (was `group-payments`): BOTH split policies, which differ on whether a payment may exceed what is owed — `allocateLumpSum` caps (a group write refuses the excess), `allocatePersonPayment` does not (overpaying flips the tab; there is no credit). Plus `rebalanceCustomAmounts`, the rule that keeps the hand-typed boxes summing to the typed total: the box being edited wins and the one touched longest ago gives way, so no entry sequence can strand the difference. Before this, the per-context boxes REDEFINED the total — typing 4,000 and then splitting by hand recorded something else.
   - `tests/lib/money-flow.test.ts`: the running-balance walk, plus `collapsePaymentLegs` — the legs of one bundle merge into one statement row carrying a `parts` entry per context. Pinned hard: a personal-first split no longer reports the whole payment as personal (it kept only the FIRST leg's context, so group money rendered as personal money).
-  - `tests/lib/` with mocked deps: `kwenta-notifications` (outbox/senders/flush/dead-letter, and the `confirmed` flag: a confirmed-only outbox flushes with no `syncRoundTrip`, a staged or legacy entry keeps it), `cloud-first-mutations` (pending-mutation + conflict tracking)
+  - `tests/lib/` with mocked deps: `kwenta-notifications` (outbox/senders/flush/dead-letter, and the `confirmed` flag: a confirmed-only outbox flushes with no `syncRoundTrip`, a staged or legacy entry keeps it; an entry for a queued write held while it is pending and dropped when it is refused), `cloud-first-mutations` (queue-entry + "not applied" records; the deleted `finalizeMutationSync`'s behaviour is covered by `write-queue.test.ts`)
   - `tests/db/`: `operations` (createBill/updateBill/deleteBill, createGroup, addGroupMember, removeGroupMember split redistribution, deletePerson redistributing only on personal bills YOU created (075), createSettlement, linkProfileToRemote id rewrites, deleteGroup cascade, getBillWithDetails). The write-path guards mock `@/api/balances` and pin how each DEGRADES when the server cannot answer: the payment cap is skipped (overpaying is legal), member removal is refused. Payment tests assert the ROWS written, not a recomputed balance — that arithmetic is SQL's. `updateSettlement`/`updateBundledPaymentDetails` pin the `method` write path: an OMITTED key preserves the stored value (a caller predating the field must not erase one someone recorded), an explicit null or blank clears it, and a bundle update reaches every ACTIVE leg.
   - `tests/lib/` storage: `kwenta-storage-keys` (refresh marker + legacy-cursor migration, incl. failing storage writes)
   - `tests/sync/realtime-echo.test.ts` pins that the channel subscribes to INSERTs only and that a DELETE-shaped payload (`new = {}`) makes no request and leaves the cursor alone (073's prune job). It also pins the `072` echo skip: a lone echo and a save's whole echo burst make no RPC, no round trip and no re-read; a burst with one foreign event reconciles only that one; a different (or one-microsecond-newer) version, a pre-072 payload, an unsynced or missing row, and a DELETE are never skipped; an echo that beats its write response waits for the write; a timed-out or throwing wait loses nothing (and still skips what IS mirrored); a batch whose wait outlives sign-out does nothing; the one-at-a-time and catch-up paths skip too; the membership `groups` refresh is matched by its `row.table`. `tests/db/cloud-first-write.test.ts` pins that a save registers itself for that wait while its RPC is pending. `tests/sync/in-flight-writes.test.ts` pins the wait (never throws, times out, forgets settled writes); `realtime-batch.test.ts` pins `eventRowVersion` and `sameInstant`.
-  - `tests/sync/sync-manager.test.ts` also pins the tab-focus probe: one probe and no sync when nothing is newer; a sync for a newer event, a staged write or queued notification (without probing), no cursor, no refresh marker, a refresh >= 5 min old, or a failed realtime apply (cleared only by a SUCCESSFUL sync); the cheap checks before the Dexie scan before the network; the throttle window claimed by a probe-only activation. `user-events-probe.test.ts` pins the query shape (newest first, one row) and fail-open; `sync-service.test.ts` pins `mayHaveStagedRows` (index counts, no `toArray`) and the future-marker rule; `realtime-health.test.ts` the flag; `realtime-echo.test.ts` that a failed fallback pull or round trip marks it, and that the cursor is never stamped from the device clock (server-initialised, not written on dispose); `kwenta-storage-keys.test.ts` the cursor helpers.
+  - `tests/sync/sync-manager.test.ts` also pins the shared startup/activation/backup gate (`refreshIfNeeded`: queue drained first, no full bundle on a quiet returning-user open, no duplicate sync from a focus during the startup sync, a newer event requesting the realtime catch-up) and the tab-focus probe: one probe and no sync when nothing is newer; a sync for a newer event, a staged write or queued notification (without probing), no cursor, no refresh marker, a refresh at least 60 min old, or a failed realtime apply (cleared only by a SUCCESSFUL sync); the cheap checks before the Dexie scan before the network; the throttle window claimed by a probe-only activation. `user-events-probe.test.ts` pins the query shape (newest first, one row) and fail-open; `sync-service.test.ts` pins `mayHaveStagedRows` (index counts, no `toArray`) and the future-marker rule; `realtime-health.test.ts` the flag; `realtime-echo.test.ts` that a failed fallback pull or round trip marks it, and that the cursor is never stamped from the device clock (server-initialised, not written on dispose); `kwenta-storage-keys.test.ts` the cursor helpers.
   - `tests/sync/`: `sync-service` helpers (`getMillisecondsSinceLastRefresh`, `hasUnsyncedLocalDataForUser` incl. the push filter mirroring 075 — someone else's personal bill, a group after removal, a deleted group's cascade for its creator, a foreign-authored log line, a linked account row, `shouldApplyPulledRow`, `compareTimestamps`); `sync-round-trip` (complete-bundle guarantees, echo guard, push stamping); `sync-manager` (navigation refresh: throttle, release, backoff isolation, monotonic clock); `pull-pagination` (PostgREST max-rows paging in the fallback path); `realtime-batch` (burst coalescing + `latestEventCreatedAt`, the server-clock cursor source)
   - `tests/api/primed-reads.test.ts` + `tests/sync/write-returns-reads.test.ts`: the 066 client contract — a write asks for exactly the mounted endpoints and for nothing when no screen is up; the returned payload is served to the next read with NO request, through the endpoint's own mapper (so `numeric`-as-string still becomes a number), reported fresh rather than as a saved copy, consumed once, and discarded by the next write; a rejected write primes nothing; the mirror-refresh marker is NOT stamped on the `kwenta_write` path but IS on the `kwenta_sync` fallback; and the full fallback chain against a pre-066 and a pre-050 database
   - `tests/db/cloud-first-write.test.ts`: the cloud-first write contract (accept / transport error / silent server-side drop / partial drop; rejected update and delete leave the original intact; multi-leg payment is all-or-nothing; a retry after rejection makes exactly one bill)
+  - `tests/sync/write-queue.test.ts`: the ordered write queue — `seq` order, head-of-line blocking and backoff on a transport failure, a lost response replayed into exactly one bill, a refusal marking the entry `conflict` and its row-sharing dependents `blocked_by_earlier`, Dismiss (refused entries only, online, refused while a pending entry shares rows) and Retry (sent before its dependents even when retried during the drain that refused it), the retry timer at `next_attempt_at`, `ignoreBackoff`, the session-epoch guard. `tests/sync/write-errors.test.ts`: `classifyWriteFailure` (`transport | rejected | inactive`; doubtful → transport, an expired token → transport, PGRST000-003 and any PGRST code on a 5xx → transport). `tests/sync/sync-manager.test.ts` pins that Refresh awaits a drain with `ignoreBackoff` before its full sync (and a throwing drain does not stop it) while the gate, a retry and `triggerSync` drain in the background. `tests/db/db-v15.test.ts`: the v14 → v15 upgrade backfill. `cloud-first-write.test.ts` also pins that a transport failure stages + queues with the same submission id and does not throw (the old "transport → throw, nothing staged" test was reversed on purpose), and `tests/helpers/cloud-sync-mock.ts` has `reject | transport | lost | inactive` modes.
+  - `tests/sync/session-epoch.test.ts`: a `kwenta_write` response that lands after `clearKwentaLocalData` writes nothing to Dexie (driven through `createBill` with the RPC held open).
+  - `tests/lib/device-owner.test.ts`: `ensureDeviceOwnedBy` per branch — same owner keeps, a different owner wipes (or asks when unsent), and with NO owner key each H1.4 rule (adopt an empty device, the same user's mirror, another user's contact linked to me; wipe for a foreign queue entry, a foreign unlinked contact, an unreferenced foreign account) plus the review H2.3 rule: a previous user's mirror whose contacts all link to me is wiped even with my row hydrated, and unsent work that is all mine is adopted despite a stray account. `tests/hooks/AuthProvider.test.tsx`: renders before the background account gate; inactive signs out keeping the copy; a transport failure stays signed in; a different user's mirror is gone before the first render; the Continue/Cancel warning; offline session mode (opens for the device owner, refreshes on reconnect, signs out when the refresh is rejected, never opens for anyone else). `tests/lib/supabase-fetch.test.ts`: the `global.fetch` wrapper signs out (local scope, status kept for the login notice) only on a 403 PostgREST 42501 error whose message starts with `kwenta_account_inactive:` — not a plain 403, the marker in another field or code, a 200 mentioning it, or a transport failure — and hands the caller the original response. `tests/pages/SettingsPage.signout.test.tsx`: sign-out and Reset local data warn about a queued write (any status) the row scan ignores, and their "sync first" paths drain the queue and keep the device when it could not be sent. Session-epoch cases beyond `session-epoch.test.ts`: `tests/sync/sync-round-trip.test.ts` (a late response writes no row, stamps no push, does not mark refreshed), `tests/api/cache.test.ts` + `tests/api/balances.test.ts` (a late response is not cached), `tests/lib/people-remote-profile.test.ts` (`fetchRemoteProfileIntoDexie`). `tests/lib/clear-kwenta-local.test.ts` also pins realtime cursors, repair stamps and queued writes being dropped. `tests/components/RefreshButton.pending.test.tsx`: the header's unsent / not-applied state from index counts against a real Dexie (no synced-table `toArray`). `tests/build/claude-md.test.ts`: this file's next migration number, Dexie version, migration rows and coverage entries.
   - `tests/sync/cloud-write-idempotency.test.ts`: submission ids (replay reports the original outcome; fallback and probe-caching against a pre-`050` server)
   - `tests/api/`: `cache` (per-user scoping, corrupt entries, quota failure + evict-and-retry, the 60-entry cap, `clearApiCache`). **Injecting a storage failure needs `Object.defineProperty` on the `localStorage` INSTANCE** — plain assignment is swallowed by happy-dom's proxy and `vi.spyOn(Storage.prototype, …)` is never consulted, so either one makes a "survives a failing write" test pass without the failure path running; `balances` (the RPC mappers for every endpoint — overview, contacts, person summary, groups, personal bills, recent bills — PostgREST returns `numeric` as a STRING, and a null total must be DROPPED rather than coerced to a real zero balance; cache fallback, offline, and cross-user isolation); `settlement-history` (the 064 mappers — bundled item shape, legs kept distinct from recipients, a null `groupName` becoming an ABSENT key rather than the string "null", null-vs-empty group history, that the two GUARD loaders never serve a cached answer, and that `method` survives the mapper while a MISSING key — what a pre-069 server sends — becomes `null` rather than `undefined` or `""`)
   - `tests/lib/kwenta-data-repair`: the CLIENT contract only (asks, never decides; mirrors; surfaces a failed mirror), plus the auto-repair throttle: at most once per 24h per user per device (`kwenta_auto_repair_at:<userId>`), a future stamp counts as expired, a failed run does not stamp, unreadable storage runs rather than skips. The repair RULES are SQL — see below.
@@ -55,7 +58,8 @@ Tests are **mandatory** for this project — we create tests and run testing as 
   - `tests/lib/local-search`: the offline fallback for global search (substring/case, email match, deletions and the viewer excluded, per-kind cap keeping the newest). Authoritative search is `kwenta_search`; this can only ever be NARROWER.
   - `tests/hooks/useServerData.test.tsx`: a hook test driven by React's own `act` + `react-dom/client` (no testing-library dependency; `vitest.config.ts` sets `esbuild.jsx: 'automatic'` for it). It pins what a pure function cannot express: a subject change (`/app/people/alice` → `/bob`) clears `data`, `error` and `fromCache` so one person's balance never renders under another's name, while an invalidation TICK keeps the current data so a mutation does not blank the screen.
   - `useServerData.test.tsx` also pins the cache seed: saved copy on the first render with `revalidating`, replaced by the fetch; no seed without a cache or signed-in user, never another user's entry; access loss clears the seed while a transport failure keeps it.
-  - `useServerData.test.tsx` also pins the screen-load counter: one pair per in-flight ONLINE fetch, released on resolve, reject, access loss, unmount and going offline; a subject change or invalidation tick mid-fetch keeps ONE pair; offline fetches never count; a page does not re-render when the counter moves. `tests/store/app-store.test.ts` pins the counter's floor at 0; `tests/hooks/useScreenLoading.test.tsx` the 200 ms continuous-load debounce and the immediate drop; `tests/components/TopLoadingBar.test.tsx` the bar (screen load past the delay, or a sync); `tests/components/RefreshButton.test.tsx` "Updating…" on the same signal — spinning, `aria-busy`, still pressable, kept out of the live region, outranked by offline and syncing — and no reserved label width below `sm`; `tests/lib/refresh-status.test.ts` the `updating` rung; `tests/components/SavedCopyNotice.test.tsx` that the per-page chip is gone.
+  - `useServerData.test.tsx` also pins the screen-load counter: one pair per in-flight ONLINE fetch, released on resolve, reject, access loss, unmount and going offline; a subject change or invalidation tick mid-fetch keeps ONE pair; offline fetches never count; a page does not re-render when the counter moves. `tests/store/app-store.test.ts` pins the counter's floor at 0; `tests/hooks/useScreenLoading.test.tsx` the 200 ms continuous-load debounce and the immediate drop; `tests/components/TopLoadingBar.test.tsx` the bar (screen load past the delay, or a sync); `tests/components/RefreshButton.test.tsx` "Updating…" on the same signal — spinning, `aria-busy`, still pressable, kept out of the live region, outranked by offline and syncing — and no reserved label width below `sm`; `tests/lib/refresh-status.test.ts` the `updating` rung and the `not-applied` rung (a refused queued write: below error, above pending-upload and stale); `tests/components/SavedCopyNotice.test.tsx` that the per-page chip is gone.
+  - `tests/pages/SettingsPage.rename.test.tsx`: a refused rename toasts the reason and keeps the editor open with the typed name. `tests/pages/LoginPage.inactive-notice.test.tsx` + `tests/lib/account-gate-messages.test.ts` (`inactiveNoticeFromFlag`): the inactive sign-out flag carries the status, so 'unconfirmed' and 'inactive' read differently and the legacy '1' keeps the generic notice.
   - `tests/app/root-route.test.tsx`: a signed-in visitor to `/` lands on `/app`; a signed-out one still sees the landing page, and neither shows while auth bootstraps.
   - `tests/components/ConfirmDialog.test.tsx`: the pending state — spinner plus `pendingLabel` (default `${confirmLabel}…`), no double fire.
   - `tests/sync/realtime-echo.test.ts`: `processEvent` reports whether it moved a row; an echo of rows Dexie already holds does not bump `dataVersion` (cursor still advances); a batch/catch-up bumps only when the round trip pushed or changed something; fallback pulls still bump.
@@ -87,7 +91,9 @@ existing local cluster.
   new_bundle`. The last two take an optional trailing `p_method` (069); it is **last** so every
   existing positional call keeps working. Note `new_settlement` sets `created_at` and `updated_at`
   to the SAME value — a test that needs them to differ (068 does: the family key is `updated_at`,
-  the survivor tiebreak is `created_at`) must insert the rows directly.
+  the survivor tiebreak is `created_at`) must insert the rows directly. `new_account` creates an
+  ACTIVE account (076 would otherwise refuse every read and write of the fixture); pass the
+  optional trailing `p_status` for an inactive or unconfirmed one.
 - `test.as_user(uid)` sets `auth.uid()` **and** drops to the `authenticated` role so RLS applies.
   Fixture setup runs as the owner, where RLS does not — **a test that forgets `as_user` proves
   nothing about RLS.** The helper schema is granted to `authenticated` at the end of
@@ -255,6 +261,19 @@ SQL coverage so far (`supabase/tests/sql/`):
   direct-write revoke. Mutation-checked: each validator reverted alone, the creator arm, the
   no-resurrect guard, the participant arm, the account-link check, the profiles trigger, both
   new-row-only liveness checks, and the participant's payment tag.
+- `076_account_active_enforcement` — an inactive (and an unconfirmed) account under `as_user` reads
+  0 rows from every gated table except its own profile; `kwenta_write`, `kwenta_sync` and direct
+  `profiles` writes are refused with the stored rows byte-identical; active accounts and
+  `auth.uid()`-NULL writers (signup, prune jobs) are unaffected; the RESTRICTIVE + `(SELECT …)`
+  policy form; the pre-request hook's exemption of exactly `kwenta_my_account_status`.
+- `077_profile_and_peer_link_events` — recipients (contact owner; the account and owners of live
+  contacts linked to it; the peer link's owner) including the negatives (strangers, co-members,
+  soft-deleted contacts, a no-op update, an account insert), the row version in the payload, and no
+  `linked_profile_id` key.
+- `078_kwenta_write_all_or_nothing` — a refused split stores no bill and records no submission, so
+  a retry under the same id applies; an `activity_log` refusal alone does not fail the write;
+  accepted writes are unchanged; `kwenta_sync` stays partial; an inactive caller's replay is
+  refused.
 - `069_settlement_history_method` — `method` from all three endpoints; first-non-blank across a
   bundle (and one leg losing its method not blanking the payment); unset arriving as JSON `null`
   rather than `""` or the string `"null"`; whitespace reading as unset; `064`'s guarantees intact
@@ -315,19 +334,20 @@ When writing copy, defaults, or UX: personal = "you paid"; group = collaborative
 
 ```
 User action
-  → operations.ts (write Dexie + set synced_at = null)
-  → notifySyncAfterMutation → finalizeMutationSync
-  → syncRoundTrip (kwenta_sync RPC: push unsynced + pull changed)
-  → Dexie updated with server response
-  → bumpDataVersion → useServerData re-fetches → UI re-renders
+  → operations.ts builder (rows in memory, Dexie untouched)
+  → commitCloudFirstWrite (src/sync/cloud-write.ts)
+      online:  kwenta_write (066/078) → mirror the server's rows → bumpDataVersion
+      offline / transport failure: stage rows + queue entry (same submission id) → 'queued'
+  → primed reads serve the re-fetch → UI re-renders
+Queue: drainWriteQueue (src/sync/write-queue.ts) replays entries in seq order through kwenta_write
 ```
 
 Realtime path (another device/user changes something):
 ```
 DB trigger → kwenta_user_events → Supabase Realtime
-  → realtime-events.ts processes event
-  → fetch bundle RPC (bill/group/settlement)
-  → upsert into Dexie → bumpDataVersion → useServerData re-fetches
+  → realtime-events.ts: debounce (150 ms, 1 s cap) → echo skip → groupByEntity
+  → one kwenta_reconcile_user_event per entity (>10 entities or a link/DELETE/unknown event → one fullSync)
+  → upsert into Dexie (a staged row only when the server copy is strictly newer) → ONE bumpDataVersion per batch
 ```
 
 That last `bumpDataVersion` is load-bearing and was missing: screens read SQL endpoints, not
@@ -356,11 +376,38 @@ complete rows the mutation implies) and a **commit** through `commitCloudFirstWr
 (`src/sync/cloud-write.ts`):
 
 1. Build the rows in memory. Nothing touches Dexie yet.
-2. **Online:** `submitCloudWrite` hands the rows to `kwenta_sync` as `p_push` **directly**, then
-   confirms the server stored them and mirrors the server's returned rows into Dexie. On
-   rejection it throws and **Dexie is left untouched**.
-3. **Offline:** the rows are staged (`synced_at = null`) and queued in `pending_mutations`;
-   the sync manager replays them on reconnect. The app stays fully usable offline.
+2. **Online:** `submitCloudWrite` hands the rows to `kwenta_write` as `p_push` **directly**
+   (`kwenta_sync` against a pre-066 server), confirms the server stored them and mirrors the
+   server's returned rows into Dexie. A **refusal** (`classifyWriteFailure` in
+   `src/sync/write-errors.ts`: `rejected`, or `inactive` for 076) throws and **Dexie is left
+   untouched**.
+3. **Offline, or a transport failure** (status 0, timeout — 20 s `AbortSignal.timeout` — 5xx,
+   PostgREST's server-state codes PGRST000-003, an expired token; anything doubtful counts as
+   transport): `enqueueWrite` stages the rows and
+   the queue entry in ONE transaction and returns `'queued'` without throwing. The entry keeps the
+   exact rows (`push`) and the SAME submission id, so a replay after a lost response returns the
+   original outcome instead of a second bill. The app stays fully usable offline.
+4. **Older pending entries first:** a save while `pending` entries exist drains them (bounded,
+   10 s) before submitting, else queues behind them — edits to the same rows never reorder. A
+   refused (`conflict`) entry never holds a new save back.
+
+**The write queue** (`src/sync/write-queue.ts`, Dexie v15 `pending_mutations`). `drainWriteQueue`
+is single-flight (`navigator.locks` across tabs), replays in `seq` order, one `kwenta_write` per
+entry, never skipping past the earliest pending entry, and bumps `dataVersion` once per drain.
+Transport failure → per-entry backoff that holds everything behind it (head-of-line), plus the
+queue's own retry timer at the head's `next_attempt_at` (`cancelScheduledDrainRetry` on a wipe);
+Refresh drains with `ignoreBackoff`. Rejection → the entry becomes `conflict` (a Settings "not
+applied" row) and later entries sharing its `row_keys` become `blocked_by_earlier`; their queued
+notifications are dropped. Only refused entries can be dismissed (`dismissQueuedWrite`, online, and
+refused while a `pending` entry still shares their rows: never-synced rows it created are evicted,
+edited rows restored from `kwenta_reconcile_user_event`) or retried (`retryQueuedWrite`, same
+submission id). A network blip no longer marks anything "not applied". Legacy entries from v14
+(`push = null`) keep the row-scan `fullSync` safety net.
+
+**A wipe never silently drops unsent work.** Sign-out and Reset local data warn via
+`hasUnsentWrites` (a queue entry in any status, or a row only a full sync sends) and their "sync
+first" paths call `sendUnsentWritesBeforeWipe` (drain with `ignoreBackoff`, then `fullSync`), wiping
+only when nothing is left unsent.
 
 Why the submit path is separate from `syncRoundTrip`: that function builds its push payload by
 *scanning Dexie for unsynced rows*, so a write had to be committed locally before it could be
@@ -387,7 +434,17 @@ into a lost write.
 **Submission ids** (migration `050`): every write carries one, so replaying the *same*
 submission returns the original outcome instead of applying twice. This covers the case the
 inversion cannot — the request lands, the row is stored, and the response is lost. The client
-falls back to the two-argument RPC if `050` has not been applied.
+falls back to the two-argument RPC if `050` has not been applied. Since `078` `kwenta_write` is
+all-or-nothing: one refused non-`activity_log` row rolls back the whole call, marker included,
+so a corrected retry under the same id applies afresh.
+
+**Session epoch** (`src/sync/session-epoch.ts`). `clearKwentaLocalData` bumps it before it deletes
+anything; every Dexie write driven by a response captures it before the request and checks it
+(`assertSessionEpoch`) before writing, so a response that lands after a sign-out or account switch
+never writes the previous account's rows into the next one's mirror. Checked in `submitCloudWrite`,
+the drain, `syncRoundTrip` (rows, push stamps, the refresh marker), realtime upserts and cursors,
+`loadBillIntoMirror`, `fetchRemoteProfileIntoDexie` and the API cache (`writeCache` takes the
+epoch its request started in).
 
 **Guests** (unauthenticated): Dexie only, no sync.
 
@@ -435,18 +492,30 @@ Three profile flavors in Dexie (`src/types/index.ts`):
 
 **`kwenta_user_events`** — `realtime-events.ts` subscribes for entity change events.
 - INSERT only, and a payload without a string `id`/`created_at` is dropped: the 073 prune job hard-deletes rows, and Supabase sends DELETE changes to every subscriber unfiltered with `new = {}` — queued, that wrote an `undefined` cursor (pinned in `realtime-echo.test.ts`)
-- On event: call targeted bundle fetch RPC (bill/group/settlement)
-- On reconnect: catch up via `catchUpSince` from last-seen event id (localStorage)
-- `catchUpSince` bulk path (>5 missed events): one `syncRoundTrip` instead of N per-event RPCs. It needs no profile-link special-casing any more — every pull is already a complete bundle — and it advances the cursor to the max `created_at` of the events it fetched, not `now()`
-- `realtimeCatchupSingleRun` flag deduplicates concurrent catch-ups
-- `targetedRealtimeReconcile` flag: use `kwenta_reconcile_user_event` RPC instead of full pull
-- `coalesceRealtimeBatch` flag (default on): `flush()` drains the whole queue per burst and runs `planRealtimeBatch` (`src/sync/realtime-batch.ts`, pure/tested). A lone fresh event keeps the targeted reconcile; **≥2 fresh events collapse into one `syncRoundTrip`** instead of one reconcile RPC per event. A bundled settle-up fans out into one settlement event *per leg per member* (trigger `kwenta_on_settlement_changed` is `FOR EACH ROW`), so this turns N reconcile RPCs into a single round trip. The last-seen cursor always advances to the max **server-supplied** `created_at` of the events drained — on both the batch path and the bulk catch-up path. Never stamp it from the device clock: a fast clock writes a cursor into the future and `.gt('created_at', cursor)` then filters out every event the server creates until real time catches up, permanently. Profile-link events need no special handling any more (every pull is a complete bundle).
+- A burst is debounced (150 ms trailing, 1 s cap), deduped, echo-skipped (072), then grouped by
+  entity with the pure `groupByEntity` (`src/sync/realtime-batch.ts`): a bill with its items and
+  splits, a group with its members, a settlement, a profile, a peer link. Each entity costs ONE
+  `kwenta_reconcile_user_event` (at most 3 concurrent); more than 10 entities, a `linked_profile_id`
+  (034) payload, a DELETE or an unknown table → one `fullSync` instead. Exactly one
+  `bumpDataVersion` per batch (`syncRoundTrip` takes `{ invalidate: false }` there). A reconcile
+  applies `shouldApplyPulledRow`: a staged (unsynced) local row is overwritten — and marked synced —
+  only when the server copy is strictly newer; Dismiss's restore is the one forced write.
+- Catch-up (reconnect, SUBSCRIBED, or a newer event seen by the startup/focus probe via
+  `requestRealtimeCatchUp`) reads at most 51 missed events: up to 50 go through the batch path;
+  more → one `fullSync`, then the cursor moves to the newest server `created_at` read BEFORE it.
+- With no events at all for the user, the cursor initialises to `PULL_SINCE_EPOCH` (a server-safe
+  floor), so "no cursor" never recurs.
+- The cursor always advances to the max **server-supplied** `created_at` drained. Never stamp it
+  from the device clock: a fast clock writes a cursor into the future and `.gt('created_at',
+  cursor)` then filters out every event the server creates until real time catches up, permanently.
+- Since `077`, contact/account renames and deletes (`profiles`) and merges (`profile_peer_links`)
+  emit events too, so they no longer wait for a periodic full refresh.
 
 ---
 
 ## Dexie Schema (`src/db/db.ts`)
 
-Current version: **14** (v14 added optional `settlements.method` — cash/transfer/… payment audit). All tables extend sync fields: `id` (UUID PK), `created_at`, `updated_at`, `synced_at` (null = unsynced), `is_deleted`, `device_id`. Versions 9+ added compound indexes (e.g. `[group_id+is_deleted]`) for query performance.
+Current version: **15** (v15 turned `pending_mutations` into the ordered write queue: `seq`, `submission_id`, the exact `push` rows, multi-entry `row_keys`, `next_attempt_at`, `last_error_kind`, index `[actor_user_id+status+seq]`; the upgrade backfills legacy entries with `push = null`, `seq` by `created_at`. A rolled-back v14 build cannot open a v15 database. v14 added optional `settlements.method`). All tables extend sync fields: `id` (UUID PK), `created_at`, `updated_at`, `synced_at` (null = unsynced), `is_deleted`, `device_id`. Versions 9+ added compound indexes (e.g. `[group_id+is_deleted]`) for query performance.
 
 | Table | Key Indexes | Purpose |
 |-------|---------|---------|
@@ -459,7 +528,7 @@ Current version: **14** (v14 added optional `settlements.method` — cash/transf
 | `settlements` | `id, group_id, bill_id, bundle_id, from_user_id, to_user_id, is_settled, synced_at, is_deleted, [group_id+is_deleted], [bill_id+is_deleted], [from_user_id+to_user_id]` | Payments; `bundle_id` groups multiple recipients into one logical payment |
 | `activity_log` | `id, group_id, user_id, entity_type, entity_id, created_at, synced_at, is_deleted, [user_id+created_at]` | Audit trail |
 | `profile_peer_links` | `id, owner_user_id, anchor_profile_id, peer_profile_id, synced_at, is_deleted, [owner_user_id+anchor_profile_id], [owner_user_id+is_deleted]` | Manual “same person” edges (local anchor → peer); server-backed sync |
-| `pending_mutations` | `id, actor_user_id, status, entity_type, entity_id, created_at, updated_at` | Cloud-first conflict tracking |
+| `pending_mutations` | `id, actor_user_id, status, entity_type, entity_id, created_at, updated_at, seq, submission_id, *row_keys, [actor_user_id+status+seq]` | The ordered write queue (v15); applied entries are deleted |
 | `not_applied_changes` | `id, actor_user_id, resolution, entity_type, entity_id, [entity_type+entity_id], created_at, resolved_at, pending_mutation_id` | Failed mutations surfaced to user |
 
 **Split types:** `'equal' | 'percentage' | 'custom'`
@@ -473,12 +542,16 @@ Current version: **14** (v14 added optional `settlements.method` — cash/transf
 ### Key Files
 - `src/sync/sync-service.ts` — `syncRoundTrip`, `fullSync`, push/pull logic
 - `src/sync/sync-manager.ts` — orchestration, debounce, backoff, backup timer
-- `src/sync/cloud-first-mutations.ts` — `finalizeMutationSync`, pending mutation tracking
-- `src/sync/realtime-events.ts` — Supabase Realtime subscription + reconcile
+- `src/sync/cloud-write.ts` — `commitCloudFirstWrite` / `submitCloudWrite`
+- `src/sync/write-queue.ts` — the ordered write queue (enqueue, drain, dismiss, retry)
+- `src/sync/write-errors.ts` — `classifyWriteFailure` (`transport | rejected | inactive`)
+- `src/sync/cloud-first-mutations.ts` — queue-entry and "not applied" record helpers
+- `src/sync/session-epoch.ts` — the guard against responses landing after a wipe
+- `src/sync/realtime-events.ts` — Supabase Realtime subscription + per-entity reconcile
 
 ### syncRoundTrip vs fullSync
 
-- **`syncRoundTrip(userId)`** — atomic: single `kwenta_sync` RPC call, applies push payload server-side, returns pull bundle; updates `synced_at` on both sides
+- **`syncRoundTrip(userId)`** — atomic: single `kwenta_sync` RPC call, applies push payload server-side, returns pull bundle; updates `synced_at` on both sides. Its push EXCLUDES rows owned by any queue entry (pending, conflict or blocked) — only legacy/untracked unsynced rows ride `kwenta_sync`; the queue sends the rest
 - **`fullSync(userId)`** — dedup wrapper around `syncRoundTrip`; if `dedupeSyncEnabled` flag is on, concurrent calls share one in-flight Promise
 
 ### Reads: a server-sourced mirror, computed locally
@@ -526,9 +599,25 @@ What is left in TypeScript is pure transforms of bounded input, each with its Vi
 
 The old incremental cursor (`kwenta_last_pull`) was stamped from the **device clock** after the query ran, so clock skew or a row written mid-round-trip was skipped permanently, and any server-side change that did not bump the client-written `updated_at` could never reach a device — the only cure was wiping local data. Do not reintroduce it (guarded by a test on `PULL_SINCE_EPOCH`).
 
-`kwenta_last_refresh` in `localStorage` records the last successful refresh. It is **display/scheduling only** (staleness chip, backup-timer skip, initial-hydration gate) and never filters a query; `readLastRefreshAt()` migrates the legacy `kwenta_last_pull` key once. Mirror-refresh triggers: app start, tab activation (one handler for `focus` + `visibilitychange`, rate-limited to 5s), reconnect, the 5-minute backup timer, realtime events, and an offline write replaying.
+`kwenta_last_refresh` in `localStorage` records the last successful refresh. It is **display/scheduling only** (staleness chip, backup-timer skip, initial-hydration gate) and never filters a query; `readLastRefreshAt()` migrates the legacy `kwenta_last_pull` key once. Mirror-refresh triggers: app start, tab activation (one handler for `focus` + `visibilitychange`, rate-limited to 5s) and the 5-minute backup tick — all three through ONE gated `refreshIfNeeded` (below) — plus realtime events and the Refresh button, which awaits a queue drain (`ignoreBackoff`) and then always runs a full sync.
 
-**A tab activation probes before it syncs** *(2026-09-24)*. `activationNeedsSync` (`sync-manager.ts`) runs the full sync only when the last refresh is missing or at least 5 minutes old (the bound on changes that emit no event — contacts, merges, renames made elsewhere), a realtime apply failed (`src/sync/realtime-health.ts`; the cursor moves past a failed event), a notification or a staged write is queued (`mayHaveStagedRows` answers from index counts — a pending mutation, or a row missing from the `synced_at` index — so a quiet focus reads no table in full; the backup tick keeps the full check ungated, which bounds what the gate can miss), there is no realtime cursor, or `newestUserEventSince` (one indexed `LIMIT 1` on the caller's own `kwenta_user_events`, failing open) finds an event newer than the cursor — after which a SUCCESSFUL sync moves the cursor to that server timestamp, unless it joined a deduplicated `fullSync` already running (`isFullSyncInFlight`), which may predate the event. Otherwise the focus costs that one probe. A failure is cleared only by a sync that started after it (`realtimeHealthToken`, and never by a joined one), and a refresh marker dated in the future reads as stale (the clock moved back), not as fresh. The realtime cursor (`realtimeCursorKey` / `readRealtimeCursor` in `kwenta-storage-keys.ts`) is now only ever a SERVER timestamp: with none stored, realtime starts from the newest server event instead of `now()`, and disposing no longer stamps one.
+**Startup, tab activation and the backup tick share one gate** *(2026-09-25; the tab-focus probe
+dates from 2026-09-24)*. `refreshIfNeeded` (`sync-manager.ts`) starts a write-queue drain in the
+BACKGROUND alongside the gate (a full sync never pushes queue-owned rows, so the two cannot reorder
+a write, and a slow head entry must not hold the refresh); held notifications are flushed only
+after a drain that applied something. The gate runs a full sync only when: there is no refresh marker (first
+sign-in on this device — the hydration splash stays), the marker is at least **60 min** old
+(`MIRROR_SAFETY_REFRESH_MS`, the bound on anything that emits no event; relaxed from 5 min once
+`077` made contacts, renames and merges emit events), a realtime apply failed
+(`src/sync/realtime-health.ts`), there is no realtime cursor, legacy unsynced rows exist
+(`mayHaveStagedRows` — index counts only, and rows a queue entry owns do not count: a pending entry
+means a DRAIN, never a full sync), or an unconfirmed notification is queued. Otherwise it costs one
+probe: `newestUserEventSince` (an indexed `LIMIT 1` on the caller's own `kwenta_user_events`,
+failing open); a newer event triggers the realtime catch-up (per entity), not a full download. A
+returning user with nothing new makes **zero** full bundles on open. An activation while a sync is
+in flight does not queue a second one. A failure is cleared only by a sync that started after it
+(`realtimeHealthToken`), a refresh marker dated in the future reads as stale, and the realtime
+cursor is only ever a SERVER timestamp.
 
 **Route changes do NOT sync** *(removed 2026-08-04)*. Opening a screen fetches that screen's own scoped endpoint, which IS server truth (rule 7), so pulling the whole bundle per route change bought nothing and cost 213 kB a tap. A write no longer refreshes the mirror either: `kwenta_write` (066) returns only its own rows and deliberately does not stamp `kwenta_last_refresh`.
 
@@ -538,14 +627,14 @@ Pushed rows are stamped `synced_at` only for ids the server reports in `applied`
 
 ### Sync Manager Lifecycle
 
-- `startSyncManager()` initializes on `useSync` hook mount
-- Initial sync on startup
-- 5-minute backup timer for eventual consistency
-- Debounced trigger (400ms) after each local mutation
-- Online event triggers immediate sync
-- On error: exponential backoff (30s → 5 min), schedules retry
-
-Backup sync skips if no unsynced data, no new pull data expected, and no queued notifications.
+- `startSyncManager()` initializes on `useSync` hook mount; `useSync` restarts it on reconnect
+  (there is no separate `online` handler)
+- Startup, activation and the 5-minute backup tick go through `refreshIfNeeded` (above)
+- `triggerSync` (400 ms debounce, drains in the background, then a full sync) is called only by
+  `ensureProfile` for a new-account stub; operations no longer trigger a sync — a write is
+  `commitCloudFirstWrite` plus the queue
+- On error: exponential backoff (30s → 5 min); the retry drains the queue (keeping its backoff)
+  along with its sync
 
 ### Push Payload RLS Filtering
 
@@ -558,12 +647,17 @@ Before pushing, `buildPushFilterContext` determines what the user is allowed to 
 - **item_splits**: `user_id` is rewritten to `linked_profile_id` immediately in Dexie during `linkProfileToRemote`; `resolveSplitUserIdForPush` provides a server-side safety net for any remaining stale rows
 - **settlements**: `from/to_user_id` may be rewritten to linked account ids
 
-### Pending Mutations (Conflict Tracking)
+### Pending Mutations (the write queue)
 
-1. `enqueuePendingMutation` creates a `pending` record before sync
-2. On success: `markPendingMutationsApplied`
-3. On failure: `markPendingMutationsConflict` → creates `NotAppliedChange` record
-4. Failed mutations surface as conflict notices; user can retry or dismiss
+`pending_mutations` IS the write queue (see Cloud-First Mutations). Statuses: `pending` (unsent —
+the header reads "Waiting to sync"), `conflict` (the server refused it — a `NotAppliedChange` row
+in Settings, the header reads "Changes not applied"), `blocked_by_earlier` (shares rows with a
+refused entry). Only real server refusals become `conflict`; a transport failure only backs off.
+Settings offers **Dismiss** (online, refused entries only: discards the local change) and
+**Retry** (same submission id). Applied entries are deleted. The header counts these from the
+`[actor_user_id+status+seq]` index — never a table scan (`RefreshButton`).
+
+Known gap (unchanged, 021b): a queued edit that loses to a newer server edit is reported applied.
 
 ---
 
@@ -576,7 +670,7 @@ Before pushing, `buildPushFilterContext` determines what the user is allowed to 
 - `'added_to_group'` — added to a group
 
 ### Outbox Pattern
-Notifications are queued in `localStorage` (`kwenta_notification_outbox_v1`) and flushed after the mutation syncs, not during. This ensures notifications only go out after cloud data is confirmed. `flushQueuedKwentaNotifications` runs a `syncRoundTrip` first (unless `assumeCloudAck`), then inserts rows into `kwenta_notifications`. Each outbox entry records `confirmed` — whether the write it describes was accepted by the server (`commitCloudFirstWrite` mode `'cloud'`, passed as `cloudConfirmed`). When every entry for the actor is confirmed the flush skips that `syncRoundTrip`; a staged (offline) entry, or a legacy entry without the field, keeps the sync gate. Before this every bill/payment/member write triggered a full-bundle sync just to send its notification.
+Notifications are queued in `localStorage` (`kwenta_notification_outbox_v1`) and flushed after the mutation syncs, not during. This ensures notifications only go out after cloud data is confirmed. `flushQueuedKwentaNotifications` runs a `syncRoundTrip` first (unless `assumeCloudAck`), then inserts rows into `kwenta_notifications`. Each outbox entry records `confirmed` — whether the write it describes was accepted by the server (`commitCloudFirstWrite` mode `'cloud'`, passed as `cloudConfirmed`). When every entry for the actor is confirmed the flush skips that `syncRoundTrip`; a staged (offline) entry, or a legacy entry without the field, keeps the sync gate. Before this every bill/payment/member write triggered a full-bundle sync just to send its notification. An entry for a QUEUED write carries its `submissionId`: it is held while that queue entry is still in `pending_mutations` and dropped (`dropQueuedKwentaNotifications`) if the entry is refused or blocked — it describes a write that did not happen.
 
 ### Recipient Resolution
 `resolveRecipientProfileIdForNotify(splitUserId)` — returns the Kwenta account id to notify:
@@ -694,7 +788,7 @@ Split types computed at write time and stored as `computed_amount`:
 
 ## Operations Layer (`src/db/operations.ts`)
 
-All operations: write to Dexie in a transaction → create activity_log entry → call `notifySyncAfterMutation` (which calls `finalizeMutationSync`). IDs and timestamps are generated locally.
+All operations: build the rows (activity_log line included) in memory → ONE `commitCloudFirstWrite` → queue notifications in the outbox. IDs and timestamps are generated locally. Offline staging is generic (`enqueueWrite`), not per operation.
 
 Key operations:
 - `createBill / updateBill / deleteBill` — `createBill` accepts `paidBy` (defaults to `createdBy`); `updateBill` accepts `paidBy` patch
@@ -702,21 +796,35 @@ Key operations:
 - `createSettlement / recordSettlement` (supports bundled multi-recipient)
 - `linkProfileToRemote(localProfileId, remoteProfileId, actorUserId)` — sets `linked_profile_id`; rewrites `group_members.user_id`, `item_splits.user_id`, `bills.paid_by`, and `settlements.from/to_user_id` from local contact id to remote profile id; notifies remote user
 - `getBillWithDetails(billId)` — returns bill + items + splits with resolved display names; uses `group_members.display_name` fallback for local contacts
+- `renameSelf(userId, name)` — the account's own profile row plus its live roster rows, one cloud-first write (it replaced AuthProvider's write-then-sync `updateDisplayName`)
 
 ---
 
-## Auth Flow (`src/hooks/useAuth.tsx`)
+## Auth Flow (`src/hooks/AuthProvider.tsx`)
 
-`AuthProvider` wraps the app. On session change:
-1. Call `ensureProfile(userId, email)`:
-   - Check Dexie first
-   - Try fetch remote via `kwenta_fetch_profile_for_linking` RPC
-   - If remote exists: insert with `synced_at = updated_at`
-   - If not: create stub (`display_name = email prefix`, `synced_at = null`)
-2. Update `store.currentUserId`
-3. Start sync to push stub if needed
+`AuthProvider` wraps the app. On session change (`applySession`):
+1. **Device owner** (`ensureDeviceOwnedBy`, `src/lib/device-owner.ts`; owner key
+   `kwenta_local_user_id`). Same user → keep the mirror and its unsent changes. A different user →
+   wipe (`clearKwentaLocalData`: Dexie, API cache, primed reads, realtime cursors, repair stamps,
+   session epoch) BEFORE the first render as the new user; when the previous user has unsent
+   changes, a Continue/Cancel warning first (Cancel signs out, keeping them). No key (upgraded
+   device) → adopt when every unsent change on it is this user's; otherwise wipe if the mirror
+   provably belongs to someone else (a foreign queue entry, a foreign unlinked contact, or an
+   account row neither mine nor linked from my contacts — checked even when my own row is present).
+2. `ensureProfile(userId, email)` — Dexie first; only a first sign-in fetches the profile row.
+3. Render. The **account gate runs in the background** (`kwenta_my_account_status`, 076; the
+   `profiles` row on an older server): inactive/unconfirmed → sign out keeping this user's offline
+   copy (the login page shows the status-specific copy); a transport failure stays signed in and
+   asks again on reconnect; an auth failure tries one refresh, then signs out as expired.
+4. **Offline session mode**: offline with an expired token and a device owned by this user → open
+   with sync and realtime off (`authReady` false); on reconnect refresh the session, sign out if the
+   refresh token is rejected. A stored session for anyone else does not open offline.
 
-On sign-out: clear local Dexie data (`src/lib/clear-kwenta-local.ts`), set voluntary sign-out flag (`src/lib/auth-session-flags.ts`).
+Server-side (076) an inactive caller gets 403 `kwenta_account_inactive:<status>` from every
+endpoint; the Supabase client's `global.fetch` wrapper (`src/lib/supabase.ts`) signs THIS device
+out (`scope: 'local'`) on the first one it sees — only a PostgREST JSON error with code `42501`
+and a message starting with the marker counts. Voluntary sign-out (Settings) still wipes the device and sets the voluntary flag
+(`src/lib/auth-session-flags.ts`); an expiry or deactivation sign-out does not wipe.
 
 ---
 
@@ -769,6 +877,9 @@ Migrations are numbered; there are two `021_` files. Core RPCs:
 | `073` | **Server-only functions were open to anon in production.** Supabase's default privileges give every new public function EXPLICIT `anon`/`authenticated` EXECUTE, which `REVOKE ... FROM PUBLIC` never removes, so the global sweeps and repairs (`kwenta_identity_repair_apply/_report`, `kwenta_collapse_legacy_credit_*`, `kwenta_prune_write_submissions`, `kwenta_prune_user_events`, …) were callable by anyone. Now service_role only; `anon` keeps only the four RLS-policy helpers; and postgres's DEFAULT privileges no longer grant new functions to PUBLIC/anon/authenticated — **a new client endpoint must `GRANT EXECUTE ... TO authenticated` explicitly or the screen breaks**. Adds `kwenta_schedule_housekeeping()` (daily pg_cron prune of events and submission markers, 30 days). The migration does NOT run it: run `SELECT public.kwenta_schedule_housekeeping();` once, by hand, after the INSERT-only realtime client has been live for a few days (installed PWAs update only when their user taps Refresh; a client still on the old build self-heals at its next real event). Bills-list pills prefer the person's account over another user's private nickname for them. Apply any time |
 | `074` | **The RLS helpers stop answering about other people.** `is_group_member(group, user)` and the two personal-bill helpers took the user as an argument and had to stay client-callable because the ten policies call them, so anyone with two uuids could ask whether a user is in a group or on a bill. The policies now call caller-only wrappers (`caller_is_group_member(group)`, `caller_is_participant_on_personal_bill(bill)`, `caller_can_read_personal_bill(bill)`) that use `auth.uid()`; the two-argument helpers are service_role only (the SECURITY DEFINER server functions keep calling them). **Each wrapper holds a COPY of its helper's predicate on purpose**: calling the helper made RLS reads 4.5-8x slower (a DEFINER function with SET is never inlined). Change one, change both — the 074 suite checks every copy against its helper. RLS behaviour unchanged; no client change; apply any time |
 | `075` | **The push validators authorize the row they OVERWRITE.** Each `kwenta_push_*` checked only the incoming row (whose `created_by`/`user_id`/`owner_id` the caller supplies) and then `ON CONFLICT DO UPDATE`d unconditionally, so any account could rewrite or delete another user's bill, join any group, plant a group bill or rewrite another account's profile. Now a new row passes a create rule, an existing row is updated only when the STORED row passes the write rule (the conflict `WHERE`; a refused row drops out of `applied`), and key columns (group, parent, creator, owner, author) are frozen. `kwenta_can_write_group` = active member OR the group's creator — the creator arm is what lets `deleteGroup`'s cascade run after it deletes the creator's own membership (that cascade silently dropped other members' bills before 075). Narrower on purpose: removed members, non-creator membership inserts, log lines authored as someone else, a participant editing someone else's PERSONAL bill (creator-only now; `deletePerson` redistributes only on your own bills), and an ACCOUNT profile carrying `linked_profile_id` (a self-link moved your debts onto the other account via 045's trigger) — the last also blocked on direct `profiles` writes by the `kwenta_profiles_guard_identity` trigger. deleteGroup with a bill-tagged payment and deletePerson with an anchored peer link no longer half-apply. Direct INSERT/UPDATE/DELETE/TRUNCATE on the eight synced tables revoked from client roles (`profiles` and `kwenta_notifications` keep RLS-guarded writes). The offline push filter (`buildPushFilterContext`) mirrors these rules. Apply any time; an older client's deletePerson fails when the contact is on someone else's personal bill |
+| `076` | **Account status is enforced by the server.** `account_status` was checked only by the client at app open, so any valid JWT (a deactivated user, an unapproved account, an old install) could read and write through PostgREST. Three gates, one question — is `auth.uid()` active (`kwenta_caller_is_active`; `auth.uid()` NULL always passes, so signup, prune jobs and maintenance are unaffected): a RESTRICTIVE `SELECT` policy (as `(SELECT …)`, one InitPlan per query) on the synced tables, `kwenta_user_events`, `kwenta_notifications`, `kwenta_write_submissions` (`profiles` also admits your own row); a statement-level write trigger `kwenta_enforce_caller_active` that fires inside the DEFINER write RPCs too; and `kwenta_pre_request` as PostgREST's `db_pre_request` hook for the DEFINER read RPCs. All raise 42501 `kwenta_account_inactive:<status>` (HTTP 403). `kwenta_my_account_status()` is the one exempt endpoint, so the client's background gate can tell 'unconfirmed' from 'inactive'. The hook is installed only when none is set (never overwritten) and granted to `anon` too. **Verify on a branch DB** (the shim has no PostgREST/GoTrue): `rolconfig` shows the hook, an inactive account gets 403 while the status RPC answers, sign-in of a not-yet-active account still works. Apply any time |
+| `077` | **Contacts, renames and merges emit realtime events.** `profiles` (a local contact → its owner; an account → itself and the owners of live contacts linked to it) and `profile_peer_links` (→ its owner) get AFTER INSERT/UPDATE triggers with 072's `row` payload; an UPDATE emits only when a rendered column changed, an account INSERT emits nothing, and the payload deliberately has NO `linked_profile_id` key (an older client full-syncs on it). Served by 028's `kwenta_reconcile_user_event`. **Apply BEFORE the client** that relaxes the periodic full refresh to 60 min, or a rename made elsewhere takes up to an hour to show |
+| `078` | **`kwenta_write` is all-or-nothing.** It used to commit whatever part of a push its validators accepted, so a refused split left a half-written bill that every balance endpoint read, and the recorded submission marker made the corrected retry (same id — how the queue replays) a no-op. Now one refused non-`activity_log` row raises P0001 `kwenta_write refused rows: <table>:<id>, …` and rolls back everything, marker included; the caller must be active (checked first, so a replay cannot answer a deactivated account). `kwenta_sync` is deliberately unchanged (the bulk safety-net replay; all-or-nothing there would let one bad legacy row block every later sync). Apply any time after 076 |
 | `049` | Pull follows linked profiles: personal settlements, `bills_for_sync` / `relevant_bill_ids_for_user`, `kwenta_fetch_bill_bundle` and additive `FOR SELECT` policies route by identity, so a row that missed canonicalization still reaches the right account. **Reads only** — `user_is_participant_on_personal_bill` stays literal-id because it is the `USING` clause of the `FOR ALL` policies in `007` and the `WHERE` of the push validators in `044`; widening it granted the account behind a linked contact UPDATE/DELETE over the linker's bills. The widened read predicate is the separate `user_can_read_personal_bill`. |
 
 **Two write RPCs, one set of validators.** `kwenta_write` (066) is the mutation path: it applies the push and returns ONLY the rows it stored plus the recomputed payloads for the screens that were on display. `kwenta_sync` is the mirror-refresh and offline-replay path, and the fallback for a database without 066: it applies the push and returns the complete pull bundle for `p_since` (the client always passes the epoch — see "Reads are always fresh"). Both go through the same `kwenta_push_*` validators, which enforce the same RLS rules the client filters apply. **A validator must judge the STORED row in its `ON CONFLICT ... DO UPDATE ... WHERE`, not only the incoming one** — the incoming columns are the caller's to forge (075).
@@ -829,7 +940,9 @@ Migrations are numbered; there are two `021_` files. Core RPCs:
 | `src/db/operations.ts` | All write operations (create/update/delete/link) |
 | `src/sync/sync-service.ts` | `syncRoundTrip`, `fullSync`, push/pull logic |
 | `src/sync/sync-manager.ts` | Orchestration: debounce, backoff, backup timer |
-| `src/sync/cloud-first-mutations.ts` | `finalizeMutationSync`, pending mutation tracking |
+| `src/sync/cloud-first-mutations.ts` | Queue-entry and "not applied" record helpers |
+| `src/sync/write-queue.ts` | The ordered write queue: enqueue, drain, dismiss, retry |
+| `src/lib/device-owner.ts` | Whose mirror this device holds; the account-switch wipe |
 | `src/sync/realtime-events.ts` | Supabase Realtime subscription + event processing |
 | `src/api/balances.ts` | Every server-computed read (balances, lists, detail screens, history) |
 | `src/api/primed-reads.ts` | Which endpoints are on screen, and the payloads a write already answered |
@@ -958,7 +1071,7 @@ Each of these reflects a real past correction in this repo:
 2. **Deletion is server-authoritative.** A device is sent only its own profile plus its own
    local contacts, so it can never conclude that a person/bill/group does not exist. No
    client-side soft-delete driven by a missing row — ever.
-3. **Migrations are append-only.** Next number: **`076`**. Never edit a past migration.
+3. **Migrations are append-only.** Next number: **`079`**. Never edit a past migration.
    **Every migration carries its own explanatory header** — what broke, why the shape is
    what it is, and whether it must be applied before the code that uses it ships. That
    header is the canonical record; read it rather than trusting any summary. A signature or

@@ -6,6 +6,7 @@ import {
   SESSION_EXPIRED_MESSAGE_KEY,
 } from '@/lib/auth-session-flags'
 import { useAuth } from '@/hooks/useAuth'
+import { inactiveNoticeFromFlag } from '@/lib/account-gate-messages'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 
@@ -17,7 +18,7 @@ export function LoginPage() {
   const { signIn, signUp, resetPassword, loading: authLoading, user } = useAuth()
   const [mode, setMode] = useState<Mode>('login')
   const [sessionExpiredNotice, setSessionExpiredNotice] = useState(false)
-  const [inactiveAccountNotice, setInactiveAccountNotice] = useState(false)
+  const [inactiveAccountNotice, setInactiveAccountNotice] = useState<string | null>(null)
   const [email, setEmail] = useState('')
   const [nickname, setNickname] = useState('')
   const [password, setPassword] = useState('')
@@ -31,9 +32,10 @@ export function LoginPage() {
       sessionStorage.removeItem(SESSION_EXPIRED_MESSAGE_KEY)
       setSessionExpiredNotice(true)
     }
-    if (sessionStorage.getItem(INACTIVE_ACCOUNT_MESSAGE_KEY)) {
+    const inactiveFlag = sessionStorage.getItem(INACTIVE_ACCOUNT_MESSAGE_KEY)
+    if (inactiveFlag) {
       sessionStorage.removeItem(INACTIVE_ACCOUNT_MESSAGE_KEY)
-      setInactiveAccountNotice(true)
+      setInactiveAccountNotice(inactiveNoticeFromFlag(inactiveFlag))
     }
   }, [])
 
@@ -41,9 +43,10 @@ export function LoginPage() {
   useEffect(() => {
     if (authLoading) return
     if (user) return
-    if (sessionStorage.getItem(INACTIVE_ACCOUNT_MESSAGE_KEY)) {
+    const inactiveFlag = sessionStorage.getItem(INACTIVE_ACCOUNT_MESSAGE_KEY)
+    if (inactiveFlag) {
       sessionStorage.removeItem(INACTIVE_ACCOUNT_MESSAGE_KEY)
-      setInactiveAccountNotice(true)
+      setInactiveAccountNotice(inactiveNoticeFromFlag(inactiveFlag))
     }
   }, [authLoading, user])
 
@@ -84,7 +87,7 @@ export function LoginPage() {
     try {
       if (mode === 'login') {
         sessionStorage.removeItem(INACTIVE_ACCOUNT_MESSAGE_KEY)
-        setInactiveAccountNotice(false)
+        setInactiveAccountNotice(null)
         const { error } = await signIn(email, password)
         if (error) {
           setError(error.message)
@@ -153,7 +156,7 @@ export function LoginPage() {
               role="status"
               className="mt-4 rounded-xl border border-stone-200 bg-stone-100 px-4 py-3 text-sm text-stone-800"
             >
-              Your account is inactive. Contact the administrator to activate it before you can use the app.
+              {inactiveAccountNotice}
             </div>
           )}
 

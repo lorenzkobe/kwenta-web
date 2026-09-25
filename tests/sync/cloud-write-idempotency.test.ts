@@ -15,7 +15,7 @@ import { makeBill, resetDb } from '../helpers/db'
  */
 
 const cloud = vi.hoisted(() => ({
-  mode: 'ok' as 'ok' | 'error' | 'drop',
+  mode: 'ok' as 'ok' | 'error' | 'drop' | 'reject' | 'transport',
   calls: 0,
   submissionIds: [] as (string | undefined)[],
   rejectSubmissionId: false,
@@ -90,7 +90,7 @@ describe('cloud write idempotency', () => {
   })
 
   it('does not swallow a genuine failure that happens to carry a submission id', async () => {
-    cloud.mode = 'error'
+    cloud.mode = 'reject'
 
     await expect(
       submitCloudWrite({ actorUserId: 'ME', payload: payloadFor('B1'), submissionId: 'SUB-1' }),

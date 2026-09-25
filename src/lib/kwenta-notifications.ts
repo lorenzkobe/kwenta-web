@@ -46,6 +46,12 @@ type NotificationOutboxEntry = {
    * written before this field existed lack it and are treated as unconfirmed.
    */
   confirmed?: boolean
+  /**
+   * The queued write this notification describes (`pending_mutations.submission_id`). Held while
+   * that entry is still queued, sent once it has applied (applied entries are deleted), dropped
+   * when it is refused or discarded.
+   */
+  submissionId?: string
 }
 
 const NOTIFICATION_OUTBOX_KEY = 'kwenta_notification_outbox_v1'
@@ -83,7 +89,11 @@ function writeOutbox(next: NotificationOutboxEntry[]) {
   localStorage.setItem(NOTIFICATION_OUTBOX_KEY, JSON.stringify(next))
 }
 
-function enqueueNotificationRows(actorId: string, rows: NotificationInsertRow[], confirmed: boolean) {
+function enqueueNotificationRows(
+  actorId: string,
+  rows: NotificationInsertRow[],
+  params: { cloudConfirmed?: boolean; submissionId?: string },
+) {
   if (rows.length === 0) return
   const queue = readOutbox()
   queue.push({
@@ -93,14 +103,36 @@ function enqueueNotificationRows(actorId: string, rows: NotificationInsertRow[],
     createdAt: new Date().toISOString(),
     attempts: 0,
     lastError: null,
-    confirmed,
+    confirmed: params.cloudConfirmed === true,
+    ...(params.submissionId ? { submissionId: params.submissionId } : {}),
   })
   writeOutbox(queue)
 }
 
-export async function hasQueuedKwentaNotifications(actorId: string): Promise<boolean> {
+/** Forget the notifications of writes that will never land (refused, blocked or discarded). */
+export function dropQueuedKwentaNotifications(submissionIds: string[]): void {
+  if (submissionIds.length === 0) return
+  const dropped = new Set(submissionIds)
   const queue = readOutbox()
-  return queue.some((entry) => entry.actorId === actorId)
+  const next = queue.filter((entry) => !entry.submissionId || !dropped.has(entry.submissionId))
+  if (next.length !== queue.length) writeOutbox(next)
+}
+
+/**
+ * Whether this actor has a notification a sync or flush could send now. An entry HELD by its queued
+ * write (a `pending_mutations` row with its submission id — the flush's own rule) does not count:
+ * it goes out after the drain applies that write, and a full sync cannot release it. Counting it
+ * made every focus run the complete bundle while a queued write waited.
+ */
+export async function hasQueuedKwentaNotifications(actorId: string): Promise<boolean> {
+  const mine = readOutbox().filter((entry) => entry.actorId === actorId)
+  if (mine.some((entry) => !entry.submissionId)) return true
+  const tracked = mine.map((entry) => entry.submissionId as string)
+  if (tracked.length === 0) return false
+  const held = new Set(
+    (await db.pending_mutations.where('submission_id').anyOf(tracked).toArray()).map((m) => m.submission_id),
+  )
+  return tracked.some((id) => !held.has(id))
 }
 
 type FlushOptions = {
@@ -123,11 +155,22 @@ export async function flushQueuedKwentaNotifications(options?: FlushOptions): Pr
     const queue = readOutbox()
     if (queue.length === 0) return
 
+    // An entry tied to a queued write waits for that write: it is still queued (held) or it has
+    // applied — the queue deletes an entry once the server stores it — which confirms it.
+    const tracked = queue.flatMap((entry) =>
+      entry.actorId === actorId && entry.submissionId ? [entry.submissionId] : [],
+    )
+    const held = new Set(
+      tracked.length > 0
+        ? (await db.pending_mutations.where('submission_id').anyOf(tracked).toArray()).map((m) => m.submission_id)
+        : [],
+    )
+    const isConfirmed = (entry: NotificationOutboxEntry) => entry.confirmed === true || Boolean(entry.submissionId)
+
     // The sync exists so a notification never points at a row the server lacks. When every entry
     // this actor would send describes a write the server already accepted, that already holds and
-    // the full-bundle sync is pure cost. One unconfirmed entry (e.g. staged offline) still gates
-    // the whole flush.
-    const needsSync = queue.some((entry) => entry.actorId === actorId && entry.confirmed !== true)
+    // the full-bundle sync is pure cost. One unconfirmed legacy entry still gates the whole flush.
+    const needsSync = queue.some((entry) => entry.actorId === actorId && !isConfirmed(entry))
     if (!options?.assumeCloudAck && needsSync) {
       const syncResult = await syncRoundTrip(actorId)
       if (syncResult.errors.length > 0) {
@@ -137,7 +180,7 @@ export async function flushQueuedKwentaNotifications(options?: FlushOptions): Pr
 
     const nextQueue: NotificationOutboxEntry[] = []
     for (const entry of queue) {
-      if (entry.actorId !== actorId) {
+      if (entry.actorId !== actorId || (entry.submissionId && held.has(entry.submissionId))) {
         nextQueue.push(entry)
         continue
       }
@@ -160,7 +203,15 @@ export async function flushQueuedKwentaNotifications(options?: FlushOptions): Pr
       }
     }
 
-    writeOutbox(nextQueue)
+    // The inserts awaited; meanwhile a write may have queued a notification or the write queue
+    // dropped one. Keep both: a dropped entry must not come back, a new one must not be lost.
+    const latest = readOutbox()
+    const latestIds = new Set(latest.map((entry) => entry.id))
+    const flushedIds = new Set(queue.map((entry) => entry.id))
+    writeOutbox([
+      ...nextQueue.filter((entry) => latestIds.has(entry.id)),
+      ...latest.filter((entry) => !flushedIds.has(entry.id)),
+    ])
   })()
 
   try {
@@ -176,6 +227,7 @@ export async function notifyProfileLinked(params: {
   recipientId: string
   linkedAsName: string
   cloudConfirmed?: boolean
+  submissionId?: string
 }): Promise<void> {
   enqueueNotificationRows(params.actorId, [
     {
@@ -187,7 +239,7 @@ export async function notifyProfileLinked(params: {
       entity_id: null,
       group_id: null,
     },
-  ], params.cloudConfirmed === true)
+  ], params)
   void flushQueuedKwentaNotifications()
 }
 
@@ -200,6 +252,7 @@ export async function notifyBillParticipantsCreated(params: {
   groupId: string | null
   groupName: string | null
   cloudConfirmed?: boolean
+  submissionId?: string
 }): Promise<void> {
   if (params.recipientIds.length === 0) return
 
@@ -218,7 +271,7 @@ export async function notifyBillParticipantsCreated(params: {
     group_id: params.groupId,
   }))
 
-  enqueueNotificationRows(params.actorId, rows, params.cloudConfirmed === true)
+  enqueueNotificationRows(params.actorId, rows, params)
   void flushQueuedKwentaNotifications()
 }
 
@@ -234,6 +287,7 @@ export async function notifyPaymentRecorded(params: {
   groupName: string | null
   settlementId: string
   cloudConfirmed?: boolean
+  submissionId?: string
 }): Promise<void> {
   const scope =
     params.groupId && params.groupName
@@ -255,7 +309,7 @@ export async function notifyPaymentRecorded(params: {
       entity_id: params.settlementId,
       group_id: params.groupId,
     },
-  ], params.cloudConfirmed === true)
+  ], params)
   void flushQueuedKwentaNotifications()
 }
 
@@ -279,6 +333,7 @@ export async function notifyPaymentsRecorded(params: {
     settlementId: string
   }[]
   cloudConfirmed?: boolean
+  submissionId?: string
 }): Promise<void> {
   if (params.payments.length === 0) return
   const scope =
@@ -297,7 +352,7 @@ export async function notifyPaymentsRecorded(params: {
     entity_id: p.settlementId,
     group_id: params.groupId,
   }))
-  enqueueNotificationRows(params.actorId, rows, params.cloudConfirmed === true)
+  enqueueNotificationRows(params.actorId, rows, params)
   void flushQueuedKwentaNotifications()
 }
 
@@ -309,6 +364,7 @@ export async function notifyAddedToGroup(params: {
   groupId: string
   groupName: string
   cloudConfirmed?: boolean
+  submissionId?: string
 }): Promise<void> {
   if (params.recipientIds.length === 0) return
   const rows: NotificationInsertRow[] = params.recipientIds.map((recipient_id) => ({
@@ -320,7 +376,7 @@ export async function notifyAddedToGroup(params: {
     entity_id: params.groupId,
     group_id: params.groupId,
   }))
-  enqueueNotificationRows(params.actorId, rows, params.cloudConfirmed === true)
+  enqueueNotificationRows(params.actorId, rows, params)
   void flushQueuedKwentaNotifications()
 }
 

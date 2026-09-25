@@ -12,21 +12,17 @@ import { useAppStore } from '@/store/app-store'
 
 export function AppShell() {
   useOnlineStatus()
-  const { loading, user, authReady } = useAuth()
+  const { user, authReady } = useAuth()
   const initialCloudHydration = useAppStore((s) => s.initialCloudHydration)
   const isOnline = useAppStore((s) => s.isOnline)
   useSync(Boolean(user && authReady))
   useRealtime(Boolean(user && authReady), user?.id)
 
-  if (loading) {
-    return <InitialAppLoader phase="auth" />
-  }
-
   const blockForInitialHydration =
     Boolean(user) && initialCloudHydration === 'pending' && isOnline
 
   if (blockForInitialHydration) {
-    return <InitialAppLoader phase="hydration" />
+    return <InitialAppLoader />
   }
 
   return (

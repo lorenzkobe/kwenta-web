@@ -1,6 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { db } from '@/db/db'
-import { syncRoundTrip, KWENTA_LAST_REFRESH_STORAGE_KEY, PULL_SINCE_EPOCH } from '@/sync/sync-service'
+import {
+  syncRoundTrip,
+  KWENTA_LAST_REFRESH_STORAGE_KEY,
+  PULL_SINCE_EPOCH,
+  SESSION_ENDED_SYNC_ERROR,
+} from '@/sync/sync-service'
+import { bumpSessionEpoch } from '@/sync/session-epoch'
 import { makeProfile, makeSettlement, resetDb } from '../helpers/db'
 import { useAppStore } from '@/store/app-store'
 
@@ -333,6 +339,63 @@ describe('syncRoundTrip invalidates the screens only when the mirror moved', () 
     const result = await syncRoundTrip('me')
 
     expect(result.errors.length).toBeGreaterThan(0)
+    expect(useAppStore.getState().dataVersion).toBe(before)
+  })
+})
+
+/**
+ * sync-realign C27: a sign-out or account switch wipes the mirror while a round trip can still be
+ * in flight. Its response belongs to the ended session: mirroring it would put the previous
+ * account's rows into the next account's mirror, and stamping the refresh marker would let the
+ * next user skip their first hydration.
+ */
+describe('syncRoundTrip after the session ended', () => {
+  it('a response that lands after a wipe writes no row, stamps no push, and does not mark refreshed', async () => {
+    await db.profiles.add(
+      makeProfile({ id: 'me', display_name: 'Edited', updated_at: '2026-08-02T00:00:00.000Z', synced_at: null }),
+    )
+    const foreign = makeSettlement({ id: 'S', from_user_id: 'them', to_user_id: 'me', amount: 500 })
+    mocks.rpc.mockImplementation(async () => {
+      bumpSessionEpoch() // the wipe lands while the request is in flight
+      return {
+        data: { ...bundleWith({ settlements: [foreign] }), applied: { profiles: ['me'] } },
+        error: null,
+      }
+    })
+    const before = useAppStore.getState().dataVersion
+
+    const result = await syncRoundTrip('me')
+
+    expect(result.errors).toEqual([SESSION_ENDED_SYNC_ERROR])
+    expect(result.changed).toBe(0)
+    expect(await db.settlements.get('S')).toBeUndefined()
+    expect((await db.profiles.get('me'))?.synced_at).toBeNull()
+    expect(localStorage.getItem(KWENTA_LAST_REFRESH_STORAGE_KEY)).toBeNull()
+    expect(useAppStore.getState().dataVersion).toBe(before)
+  })
+
+  it('a round trip that starts after the wipe applies normally', async () => {
+    bumpSessionEpoch()
+    const row = makeSettlement({ id: 'S', from_user_id: 'them', to_user_id: 'me', amount: 500 })
+    mocks.rpc.mockResolvedValue({ data: bundleWith({ settlements: [row] }), error: null })
+
+    const result = await syncRoundTrip('me')
+
+    expect(result.errors).toEqual([])
+    expect(await db.settlements.get('S')).toBeDefined()
+    expect(localStorage.getItem(KWENTA_LAST_REFRESH_STORAGE_KEY)).not.toBeNull()
+  })
+})
+
+describe('syncRoundTrip { invalidate: false }', () => {
+  it('leaves the one bump to the caller even when rows changed', async () => {
+    const row = makeSettlement({ id: 'S', from_user_id: 'them', to_user_id: 'me', amount: 500 })
+    mocks.rpc.mockResolvedValue({ data: bundleWith({ settlements: [row] }), error: null })
+    const before = useAppStore.getState().dataVersion
+
+    const result = await syncRoundTrip('me', { invalidate: false })
+
+    expect(result.changed).toBe(1)
     expect(useAppStore.getState().dataVersion).toBe(before)
   })
 })

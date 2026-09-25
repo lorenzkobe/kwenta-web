@@ -6,6 +6,8 @@
  * from its absence here — that inference is what made the old local-mirror design unsafe once
  * reads became scoped.
  */
+import { isSessionEpochCurrent } from '@/sync/session-epoch'
+
 const PREFIX = 'kwenta_api_cache_v1:'
 
 export type CachedResponse<T> = {
@@ -86,8 +88,20 @@ function evictOldest(count: number): number {
   return victims.length
 }
 
-export function writeCache<T>(endpoint: string, userId: string, data: T, fetchedAt: string): void {
+/**
+ * `requestEpoch` is the session epoch captured when the request started. A response that lands after
+ * a sign-out or account switch wiped the device must not put the previous account's money back at
+ * rest in localStorage.
+ */
+export function writeCache<T>(
+  endpoint: string,
+  userId: string,
+  data: T,
+  fetchedAt: string,
+  requestEpoch?: number,
+): void {
   if (typeof localStorage === 'undefined') return
+  if (requestEpoch !== undefined && !isSessionEpochCurrent(requestEpoch)) return
   const k = key(endpoint, userId)
   try {
     localStorage.setItem(k, JSON.stringify({ data, fetchedAt }))

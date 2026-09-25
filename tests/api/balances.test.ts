@@ -597,3 +597,32 @@ describe('balance API wrappers', () => {
     })
   })
 })
+
+describe('review C2.4: fetchEndpoint and the session epoch', () => {
+  beforeEach(() => {
+    localStorage.clear()
+    rpc.mockReset()
+    setOnline(true)
+  })
+
+  it('a response that lands after a wipe is not written to the cache', async () => {
+    const { bumpSessionEpoch } = await import('@/sync/session-epoch')
+    let answer!: (v: unknown) => void
+    rpc.mockReturnValue(new Promise((r) => (answer = r)))
+
+    const pending = fetchContactsWithBalances('A')
+    bumpSessionEpoch()
+    answer({ data: [], error: null })
+    await pending
+
+    expect(readCache('contacts', 'A')).toBeNull()
+  })
+
+  it('a response within the session is cached as before', async () => {
+    rpc.mockResolvedValue({ data: [], error: null })
+
+    await fetchContactsWithBalances('A')
+
+    expect(readCache('contacts', 'A')).not.toBeNull()
+  })
+})

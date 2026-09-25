@@ -6,6 +6,7 @@ import {
   sameInstant,
   type UserEventRow,
 } from '@/sync/realtime-batch'
+import * as batchModule from '@/sync/realtime-batch'
 
 function ev(over: Partial<UserEventRow> & { id: string; created_at: string }): UserEventRow {
   return {
@@ -183,5 +184,122 @@ describe('eventRowVersion', () => {
     expect(eventRowVersion({ ...base, payload: { row: { ...row, id: '' } } })).toBeNull()
     expect(eventRowVersion({ ...base, payload: { row: { ...row, updated_at: null } } })).toBeNull()
     expect(eventRowVersion({ ...base, payload: { row: [row] } })).toBeNull()
+  })
+})
+
+/**
+ * sync-realign: a realtime burst is grouped by ENTITY, and each entity costs one targeted
+ * reconcile. One remote bill edit fires one event per row (the bill, each item, each split — all
+ * filed under the bill, 072), which used to collapse into a full-bundle round trip. Entity kinds
+ * come from `kwenta_reconcile_user_event` (028): bills, settlements, profiles, profile_peer_links,
+ * and groups (a `group_members` event names its group in `payload.group_id`, 012/072). Anything a
+ * targeted reconcile cannot serve — a profile-LINK payload, a DELETE, an unknown entity type —
+ * marks the batch for one full sync.
+ *
+ * Shape tolerated: `{ groups | entities: [{ entityType|entity_type, entityId|entity_id, events }],
+ * fullSync | needsFullSync | requiresFullSync }`.
+ */
+describe('groupByEntity', () => {
+  type Grouped = { keys: string[]; eventsByKey: Record<string, string[]>; fullSync: boolean }
+
+  function grouped(events: UserEventRow[]): Grouped {
+    const fn = (batchModule as unknown as Record<string, unknown>).groupByEntity
+    if (typeof fn !== 'function') throw new Error('groupByEntity is not exported from realtime-batch')
+    const r = (fn as (e: UserEventRow[]) => Record<string, unknown>)(events)
+    const list = (r.groups ?? r.entities) as Array<Record<string, unknown>>
+    const eventsByKey: Record<string, string[]> = {}
+    const keys = list.map((g) => {
+      const key = `${String(g.entityType ?? g.entity_type)}:${String(g.entityId ?? g.entity_id)}`
+      eventsByKey[key] = ((g.events as UserEventRow[]) ?? []).map((e) => e.id)
+      return key
+    })
+    return { keys: [...keys].sort(), eventsByKey, fullSync: Boolean(r.fullSync ?? r.needsFullSync ?? r.requiresFullSync) }
+  }
+
+  function e(id: string, over: Partial<UserEventRow> = {}): UserEventRow {
+    return {
+      id,
+      user_id: 'ME',
+      event_type: 'bill_changed',
+      entity_type: 'bills',
+      entity_id: 'B1',
+      op: 'UPDATE',
+      payload: {},
+      created_at: `2026-09-25T10:00:0${id.length % 10}.000Z`,
+      ...over,
+    }
+  }
+
+  const rowOf = (table: string, id: string, billId = 'B1') => ({
+    bill_id: billId,
+    group_id: null,
+    row: { table, id, updated_at: '2026-09-25T10:00:00+00:00' },
+  })
+
+  it('C5: a bill, its item and its splits are ONE entity (items and splits are filed under the bill)', () => {
+    const g = grouped([
+      e('b', { payload: rowOf('bills', 'B1') }),
+      e('i', { payload: rowOf('bill_items', 'I1') }),
+      e('s1', { payload: rowOf('item_splits', 'S1') }),
+      e('s2', { payload: rowOf('item_splits', 'S2') }),
+    ])
+    expect(g.keys).toEqual(['bills:B1'])
+    expect(g.eventsByKey['bills:B1']).toEqual(['b', 'i', 's1', 's2'])
+    expect(g.fullSync).toBe(false)
+  })
+
+  it('C6: two bills are two entities', () => {
+    const g = grouped([
+      e('a1', { entity_id: 'B1', payload: rowOf('bills', 'B1', 'B1') }),
+      e('b1', { entity_id: 'B2', payload: rowOf('bills', 'B2', 'B2') }),
+      e('a2', { entity_id: 'B1', payload: rowOf('item_splits', 'S1', 'B1') }),
+    ])
+    expect(g.keys).toEqual(['bills:B1', 'bills:B2'])
+    expect(g.fullSync).toBe(false)
+  })
+
+  it('C6: a membership change and its group refresh are one group entity, keyed by group_id', () => {
+    const g = grouped([
+      e('m', { event_type: 'group_member_changed', entity_type: 'group_members', entity_id: 'GM1', payload: { group_id: 'G1' } }),
+      e('g', { event_type: 'group_changed', entity_type: 'groups', entity_id: 'G1', payload: { group_id: 'G1' } }),
+    ])
+    expect(g.keys).toEqual(['groups:G1'])
+    expect(g.fullSync).toBe(false)
+  })
+
+  it('C6: settlements, profiles and peer links are each their own entity', () => {
+    const g = grouped([
+      e('st', { entity_type: 'settlements', entity_id: 'ST1', payload: {} }),
+      e('p', { entity_type: 'profiles', entity_id: 'P1', payload: { row: { table: 'profiles', id: 'P1', updated_at: '2026-09-25T10:00:00+00:00' } } }),
+      e('pl', { entity_type: 'profile_peer_links', entity_id: 'L1', payload: {} }),
+    ])
+    expect(g.keys).toEqual(['profile_peer_links:L1', 'profiles:P1', 'settlements:ST1'])
+    expect(g.fullSync).toBe(false)
+  })
+
+  it('C6: a profile LINK payload marks the batch for a full sync', () => {
+    const g = grouped([
+      e('b'),
+      e('link', { entity_type: 'profiles', entity_id: 'P1', payload: { linked_profile_id: 'ACC1' } }),
+    ])
+    expect(g.fullSync).toBe(true)
+  })
+
+  it('C6: a DELETE marks the batch for a full sync', () => {
+    expect(grouped([e('b'), e('d', { op: 'DELETE' })]).fullSync).toBe(true)
+  })
+
+  it('C6: an unknown entity type marks the batch for a full sync', () => {
+    expect(grouped([e('w', { entity_type: 'widgets', entity_id: 'W1' })]).fullSync).toBe(true)
+  })
+
+  it('C6: a group_members event with no group_id cannot be located, so it marks a full sync', () => {
+    expect(grouped([e('m', { entity_type: 'group_members', entity_id: 'GM1', payload: {} })]).fullSync).toBe(true)
+  })
+
+  it('an empty batch has no entities and needs no sync', () => {
+    const g = grouped([])
+    expect(g.keys).toEqual([])
+    expect(g.fullSync).toBe(false)
   })
 })

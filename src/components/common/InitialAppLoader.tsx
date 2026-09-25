@@ -1,23 +1,10 @@
 import { Sparkles } from 'lucide-react'
 
-type LoaderPhase = 'auth' | 'hydration'
-
-const copy: Record<LoaderPhase, { title: string; subtitle: string }> = {
-  auth: {
-    title: 'Welcome back',
-    subtitle: 'Checking your session…',
-  },
-  hydration: {
-    title: 'Kwenta',
-    subtitle: 'Syncing your bills and groups…',
-  },
-}
-
 /**
- * Full-viewport boot / sync splash. Uses motion only when the user has not requested reduced motion.
+ * Full-viewport splash for a first sign-in on this device, while the first full download runs.
+ * Uses motion only when the user has not requested reduced motion.
  */
-export function InitialAppLoader({ phase = 'hydration' }: { phase?: LoaderPhase }) {
-  const { title, subtitle } = copy[phase]
+export function InitialAppLoader() {
 
   return (
     <div
@@ -41,8 +28,8 @@ export function InitialAppLoader({ phase = 'hydration' }: { phase?: LoaderPhase 
         <Sparkles className="relative size-9 text-teal-800 motion-safe:animate-[kwentaBootPulse_2.4s_ease-in-out_infinite]" />
       </div>
       <div className="max-w-sm text-center">
-        <p className="font-display text-lg font-semibold tracking-tight text-stone-800">{title}</p>
-        <p className="mt-2 text-sm text-stone-600">{subtitle}</p>
+        <p className="font-display text-lg font-semibold tracking-tight text-stone-800">Kwenta</p>
+        <p className="mt-2 text-sm text-stone-600">Syncing your bills and groups…</p>
       </div>
     </div>
   )

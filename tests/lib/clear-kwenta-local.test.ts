@@ -4,12 +4,14 @@ import { clearKwentaLocalData, KWENTA_LOCAL_USER_KEY } from '@/lib/clear-kwenta-
 import {
   KWENTA_LAST_REFRESH_STORAGE_KEY,
   KWENTA_LEGACY_LAST_PULL_STORAGE_KEY,
+  realtimeCursorKey,
 } from '@/lib/kwenta-storage-keys'
 import { maybeAutoRepairData } from '@/lib/kwenta-data-repair'
 import { useAppStore } from '@/store/app-store'
 import { makeProfile, resetDb } from '../helpers/db'
 
 const mocks = vi.hoisted(() => ({
+  cancelScheduledDrainRetry: vi.fn(),
   rpc: vi.fn(async () => ({ data: { orphans: 0, duplicates: 0, canonicalized: 0, total: 0 }, error: null })),
 }))
 
@@ -21,6 +23,10 @@ vi.mock('@/lib/supabase', () => ({
   },
 }))
 
+vi.mock('@/sync/write-queue', () => ({
+  cancelScheduledDrainRetry: () => mocks.cancelScheduledDrainRetry(),
+}))
+
 vi.mock('@/sync/sync-service', () => ({
   fullSync: vi.fn(async () => ({ pushed: 0, pulled: 0, errors: [] as string[] })),
 }))
@@ -29,9 +35,16 @@ beforeEach(async () => {
   await resetDb()
   localStorage.clear()
   mocks.rpc.mockClear()
+  mocks.cancelScheduledDrainRetry.mockClear()
 })
 
 describe('clearKwentaLocalData', () => {
+  it('cancels the write queue retry timer of the ending session', async () => {
+    await clearKwentaLocalData()
+
+    expect(mocks.cancelScheduledDrainRetry).toHaveBeenCalledTimes(1)
+  })
+
   it('wipes Dexie rows but leaves the DB usable', async () => {
     await db.profiles.add(makeProfile({ id: 'A' }))
     expect(await db.profiles.count()).toBe(1)
@@ -112,5 +125,56 @@ describe('clearKwentaLocalData', () => {
 
     await maybeAutoRepairData('user-2')
     expect(mocks.rpc).toHaveBeenCalledTimes(2)
+  })
+
+  // C24: the realtime cursor is per user, and a stale one on a shared device makes the next
+  // account's probe compare against someone else's server timestamp (or skip catch-up entirely).
+  it('removes every per-user realtime cursor', async () => {
+    localStorage.setItem(realtimeCursorKey('user-1'), '2026-09-20T00:00:00.000000+00:00')
+    localStorage.setItem(realtimeCursorKey('user-2'), '2026-09-21T00:00:00.000000+00:00')
+    localStorage.setItem('unrelated_key', 'keep-me')
+
+    await clearKwentaLocalData()
+
+    expect(localStorage.getItem('kwenta_last_seen_user_event:user-1')).toBeNull()
+    expect(localStorage.getItem('kwenta_last_seen_user_event:user-2')).toBeNull()
+    expect(localStorage.getItem('unrelated_key')).toBe('keep-me')
+  })
+
+  // C24: `kwenta_auto_repair_at:<userId>` (kwenta-data-repair.ts) is per user; the wipe drops all.
+  it('removes every per-user auto-repair stamp', async () => {
+    localStorage.setItem('kwenta_auto_repair_at:user-1', '2026-09-20T00:00:00.000Z')
+    localStorage.setItem('kwenta_auto_repair_at:user-2', '2026-09-21T00:00:00.000Z')
+
+    await clearKwentaLocalData()
+
+    expect(localStorage.getItem('kwenta_auto_repair_at:user-1')).toBeNull()
+    expect(localStorage.getItem('kwenta_auto_repair_at:user-2')).toBeNull()
+  })
+
+  it('drops queued writes along with the mirror', async () => {
+    await db.pending_mutations.add({
+      id: 'pm-1',
+      actor_user_id: 'user-1',
+      operation: 'createBill',
+      entity_type: 'bill',
+      entity_id: 'b-1',
+      payload_json: '{}',
+      status: 'pending',
+      retry_count: 0,
+      last_error: null,
+      submission_id: 'sub-1',
+      seq: 1,
+      push: { bills: [] },
+      row_keys: ['bills:b-1'],
+      next_attempt_at: null,
+      last_error_kind: null,
+      created_at: '2026-09-20T00:00:00.000Z',
+      updated_at: '2026-09-20T00:00:00.000Z',
+    } as never)
+
+    await clearKwentaLocalData()
+
+    expect(await db.pending_mutations.count()).toBe(0)
   })
 })

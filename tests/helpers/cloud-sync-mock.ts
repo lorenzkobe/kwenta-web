@@ -30,9 +30,44 @@ export const SYNC_TABLES = [
   'profile_peer_links',
 ] as const
 
+export type CloudMockMode =
+  | 'ok'
+  /** Legacy: an error with a message and no code or status. Reads as a doubtful failure. */
+  | 'error'
+  /** Accepts the call but stores nothing, so the client's `applied` check reports NOT_STORED. */
+  | 'drop'
+  /** A real server refusal: a Postgres error code (`errorCode`, default P0001), nothing stored. */
+  | 'reject'
+  /** The request never reached the server: supabase-js's fetch-failure shape, `status` 0 by default. */
+  | 'transport'
+  /** The server APPLIES the push, then the client sees a transport failure (response lost). */
+  | 'lost'
+  /** 076's refusal for a caller whose account is not active: 42501 + `kwenta_account_inactive:<status>`. */
+  | 'inactive'
+
 export type CloudMockState = {
-  /** 'ok' stores the push; 'error' is a transport failure; 'drop' accepts the call but stores nothing. */
-  mode?: 'ok' | 'error' | 'drop'
+  mode?: CloudMockMode
+  /** HTTP status for 'transport' / 'lost' (0 = no response, 502/503/504 = gateway). */
+  status?: number
+  /** Postgres error code for 'reject'. */
+  errorCode?: string
+  /**
+   * HTTP status for 'reject' (default 400). With a PostgREST server-state code (PGRST000-003) and a
+   * 5xx this is the answer of a server that never ran the call — which the client must replay.
+   */
+  errorStatus?: number
+  /** Account status carried by 'inactive'. */
+  inactiveStatus?: string
+  /** Any push carrying a row with one of these ids is refused as 'reject' would, whatever the mode. */
+  rejectIds?: Set<string>
+  /** The fake server's stored rows per table, keyed by id, when a test needs to count them. */
+  server?: Map<string, Map<string, unknown>>
+  /** What `kwenta_reconcile_user_event` answers (a pull-bundle-shaped object). */
+  reconcilePayload?: Record<string, unknown> | null
+  /** Every `kwenta_reconcile_user_event` argument object, in order. */
+  reconcileCalls?: Record<string, unknown>[]
+  /** Rows inserted through `from(table).insert(...)`, per call. */
+  inserts?: { table: string; rows: unknown }[]
   /** Tables the fake server refuses to store, to simulate a partial server-side drop. */
   refuse?: Set<string>
   /** Incremented per kwenta_sync round trip, so tests can assert one submission per mutation. */
@@ -58,9 +93,58 @@ export type CloudMockState = {
   rpcNames?: string[]
   /** While set, `kwenta_write` does not answer until it resolves (a write still in flight). */
   hold?: Promise<void> | null
+  /** When set, `hold` applies only to a push carrying a row with one of these ids. */
+  holdIds?: Set<string> | null
 }
 
 const MISSING_FUNCTION = { code: 'PGRST202', message: 'Could not find the function' }
+
+/** supabase-js/postgrest-js answer to a fetch that threw: empty code, status 0. */
+function transportFailure(status: number | undefined) {
+  const s = status ?? 0
+  if (s === 0) {
+    return {
+      data: null,
+      error: { message: 'TypeError: Failed to fetch', details: '', hint: '', code: '' },
+      status: 0,
+      statusText: '',
+    }
+  }
+  return {
+    data: null,
+    error: { message: 'Service Unavailable', details: '', hint: '', code: '' },
+    status: s,
+    statusText: 'Service Unavailable',
+  }
+}
+
+function rejection(code: string | undefined, status?: number) {
+  return {
+    data: null,
+    error: {
+      message: 'kwenta_write refused rows: bills:x',
+      details: '',
+      hint: '',
+      code: code ?? 'P0001',
+    },
+    status: status ?? 400,
+    statusText: status && status >= 500 ? 'Service Unavailable' : 'Bad Request',
+  }
+}
+
+function inactive(status: string | undefined) {
+  return {
+    data: null,
+    error: {
+      message: `kwenta_account_inactive:${status ?? 'inactive'}`,
+      details: '',
+      hint: '',
+      code: '42501',
+    },
+    status: 403,
+    statusText: 'Forbidden',
+  }
+}
 
 export function makeSupabaseCloudMock(state: CloudMockState) {
   /** Shared by both RPCs: what the fake server stores, and what it says it stored. */
@@ -77,10 +161,31 @@ export function makeSupabaseCloudMock(state: CloudMockState) {
         const rows = push[t] ?? []
         storedRows[t] = rows
         if (rows.length > 0) applied[t] = rows.map((r) => r.id)
+        if (state.server) {
+          let byId = state.server.get(t)
+          if (!byId) {
+            byId = new Map()
+            state.server.set(t, byId)
+          }
+          for (const r of rows) byId.set(r.id, r)
+        }
       }
     }
     if (submissionId !== undefined && state.mode !== 'drop') state.seen?.set(submissionId, applied)
     return { applied, storedRows }
+  }
+
+  /** The non-'ok' answers shared by both write RPCs; null means "proceed normally". */
+  function failureFor(push: Record<string, { id: string }[]>) {
+    if (state.rejectIds && state.rejectIds.size > 0) {
+      for (const t of SYNC_TABLES) {
+        if ((push[t] ?? []).some((r) => state.rejectIds!.has(r.id))) return rejection(state.errorCode, state.errorStatus)
+      }
+    }
+    if (state.mode === 'reject') return rejection(state.errorCode, state.errorStatus)
+    if (state.mode === 'inactive') return inactive(state.inactiveStatus)
+    if (state.mode === 'transport') return transportFailure(state.status)
+    return null
   }
 
   function emptyTables(): Record<string, unknown> {
@@ -91,9 +196,30 @@ export function makeSupabaseCloudMock(state: CloudMockState) {
 
   return {
     auth: { getSession: async () => ({ data: { session: { user: { id: 'ME' } } } }) },
-    from: () => ({ select: () => ({ eq: () => ({ data: [], error: null }) }) }),
+    from: (table: string) => {
+      const b: Record<string, unknown> = {
+        select: () => b,
+        eq: () => b,
+        gt: () => b,
+        order: () => b,
+        limit: () => Promise.resolve({ data: [], error: null }),
+        insert: (rows: unknown) => {
+          state.inserts?.push({ table, rows })
+          return Promise.resolve({ data: rows, error: null })
+        },
+        then: (resolve: (v: unknown) => unknown) => resolve({ data: [], error: null }),
+        data: [],
+        error: null,
+      }
+      return b
+    },
     rpc: async (fn: string, args?: Record<string, unknown>) => {
       state.rpcNames?.push(fn)
+
+      if (fn === 'kwenta_reconcile_user_event') {
+        state.reconcileCalls?.push(args ?? {})
+        return { data: state.reconcilePayload ?? null, error: null }
+      }
 
       if (fn === 'kwenta_write') {
         // A server predating 066 has no such function at all.
@@ -111,9 +237,16 @@ export function makeSupabaseCloudMock(state: CloudMockState) {
         const push = (args?.p_push ?? {}) as Record<string, { id: string }[]>
         state.pushes?.push(push)
         state.submissionIds?.push(submissionId)
-        if (state.hold) await state.hold
+        if (
+          state.hold &&
+          (!state.holdIds || SYNC_TABLES.some((t) => (push[t] ?? []).some((r) => state.holdIds!.has(r.id))))
+        ) {
+          await state.hold
+        }
 
         if (state.mode === 'error') return { data: null, error: { message: 'network unreachable' } }
+        const refusal = failureFor(push)
+        if (refusal) return refusal
 
         const answered: Record<string, unknown> = {}
         for (const spec of reads) {
@@ -136,6 +269,7 @@ export function makeSupabaseCloudMock(state: CloudMockState) {
         }
 
         const { applied, storedRows } = applyPush(push, submissionId)
+        if (state.mode === 'lost') return transportFailure(state.status)
         return { data: { ...emptyTables(), ...storedRows, applied, reads: answered }, error: null }
       }
 
@@ -154,6 +288,8 @@ export function makeSupabaseCloudMock(state: CloudMockState) {
       state.submissionIds?.push(submissionId)
 
       if (state.mode === 'error') return { data: null, error: { message: 'network unreachable' } }
+      const refusal = failureFor(push)
+      if (refusal) return refusal
 
       // Replay: return the original outcome without applying anything again.
       if (submissionId !== undefined && state.seen?.has(submissionId)) {
@@ -164,6 +300,7 @@ export function makeSupabaseCloudMock(state: CloudMockState) {
       }
 
       const { applied, storedRows } = applyPush(push, submissionId)
+      if (state.mode === 'lost') return transportFailure(state.status)
       return { data: { ...emptyTables(), ...storedRows, applied }, error: null }
     },
   }

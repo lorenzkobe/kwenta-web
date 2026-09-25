@@ -4,8 +4,7 @@
 // `kwenta_user_events` row per settlement leg per group member, so the live
 // subscription receives N events for one action. Processing each individually
 // fires N `kwenta_reconcile_user_event` RPCs. This planner lets the caller drain
-// the whole queue at once and decide: a lone event keeps the lightweight
-// targeted reconcile, while a burst collapses into a single syncRoundTrip.
+// the whole queue at once, group it by entity, and reconcile each entity once.
 //
 // Kept dependency-free so it is trivially unit-testable (no supabase/Dexie).
 
@@ -65,12 +64,88 @@ export function planRealtimeBatch(
   return { fresh, latestCreatedAt: latestEventCreatedAt(batch) }
 }
 
+/** What a targeted `kwenta_reconcile_user_event` (028) can serve, one entity at a time. */
+export type ReconcileEntityType = 'bills' | 'groups' | 'settlements' | 'profiles' | 'profile_peer_links'
+
+export interface EntityEvents {
+  entityType: ReconcileEntityType
+  entityId: string
+  /** The events filed under this entity, in arrival order. */
+  events: UserEventRow[]
+}
+
+export interface EntityGrouping {
+  /** One entry per entity, in order of first appearance. */
+  groups: EntityEvents[]
+  /** An event a per-entity reconcile cannot serve is in the batch: take the complete bundle instead. */
+  fullSync: boolean
+}
+
+function payloadString(ev: UserEventRow, key: string): string | null {
+  const payload = ev.payload
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return null
+  const value = (payload as Record<string, unknown>)[key]
+  return typeof value === 'string' && value !== '' ? value : null
+}
+
+/** The entity an event belongs to, or null when only a full sync can serve it. */
+function entityOf(ev: UserEventRow): { entityType: ReconcileEntityType; entityId: string } | null {
+  // A hard delete has no row left to reconcile.
+  if (ev.op === 'DELETE') return null
+  switch (ev.entity_type) {
+    case 'bills':
+    case 'settlements':
+    case 'profile_peer_links':
+      return { entityType: ev.entity_type, entityId: ev.entity_id }
+    case 'profiles':
+      // A link hands this user a contact's whole history (old `updated_at`s), which no
+      // single-entity reconcile returns.
+      return payloadString(ev, 'linked_profile_id') ? null : { entityType: 'profiles', entityId: ev.entity_id }
+    case 'groups': {
+      return { entityType: 'groups', entityId: payloadString(ev, 'group_id') ?? ev.entity_id }
+    }
+    case 'group_members': {
+      const groupId = payloadString(ev, 'group_id')
+      return groupId ? { entityType: 'groups', entityId: groupId } : null
+    }
+    default:
+      return null
+  }
+}
+
+/**
+ * Groups a burst by the entity a targeted reconcile fetches. One remote bill edit fires one event
+ * per row — the bill, each item, each split, all filed under the bill (072) — and a membership
+ * change also refreshes its group, so the burst is usually ONE entity. Callers dedupe first
+ * (`planRealtimeBatch`).
+ */
+export function groupByEntity(events: readonly UserEventRow[]): EntityGrouping {
+  const byKey = new Map<string, EntityEvents>()
+  let fullSync = false
+  for (const ev of events) {
+    const entity = entityOf(ev)
+    if (!entity) {
+      fullSync = true
+      continue
+    }
+    const key = `${entity.entityType}:${entity.entityId}`
+    const group = byKey.get(key)
+    if (group) group.events.push(ev)
+    else byKey.set(key, { ...entity, events: [ev] })
+  }
+  return { groups: [...byKey.values()], fullSync }
+}
+
 /** Tables whose rows an event can name as the one that fired it (migration 072). */
 const MIRRORED_EVENT_TABLES = ['bills', 'bill_items', 'item_splits', 'settlements', 'groups', 'group_members'] as const
 export type MirroredEventTable = (typeof MIRRORED_EVENT_TABLES)[number]
 
-export interface EventRowVersion {
-  table: MirroredEventTable
+/** 072's tables plus the profile and peer-link rows 077 names: every row realtime can echo-skip. */
+export const ECHO_EVENT_TABLES = [...MIRRORED_EVENT_TABLES, 'profiles', 'profile_peer_links'] as const
+export type EchoEventTable = (typeof ECHO_EVENT_TABLES)[number]
+
+export interface EventRowVersion<T extends string = MirroredEventTable> {
+  table: T
   id: string
   updatedAt: string
 }
@@ -82,16 +157,24 @@ export interface EventRowVersion {
  * (filed under their bill) and for the groups refresh that a membership change emits. A DELETE
  * never qualifies: a row that is gone has no version to hold.
  */
-export function eventRowVersion(ev: Pick<UserEventRow, 'op' | 'payload'>): EventRowVersion | null {
+export function eventRowVersion(ev: Pick<UserEventRow, 'op' | 'payload'>): EventRowVersion | null
+export function eventRowVersion<T extends string>(
+  ev: Pick<UserEventRow, 'op' | 'payload'>,
+  tables: readonly T[],
+): EventRowVersion<T> | null
+export function eventRowVersion(
+  ev: Pick<UserEventRow, 'op' | 'payload'>,
+  tables: readonly string[] = MIRRORED_EVENT_TABLES,
+): EventRowVersion<string> | null {
   if (ev.op === 'DELETE') return null
   const payload = ev.payload
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return null
   const row = (payload as Record<string, unknown>).row
   if (!row || typeof row !== 'object' || Array.isArray(row)) return null
   const { table, id, updated_at: updatedAt } = row as Record<string, unknown>
-  if (typeof table !== 'string' || !(MIRRORED_EVENT_TABLES as readonly string[]).includes(table)) return null
+  if (typeof table !== 'string' || !tables.includes(table)) return null
   if (typeof id !== 'string' || id === '' || typeof updatedAt !== 'string' || updatedAt === '') return null
-  return { table: table as MirroredEventTable, id, updatedAt }
+  return { table, id, updatedAt }
 }
 
 const TIMESTAMP_RE = /^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})(?:\.(\d{1,9}))?(Z|[+-]\d{2}(?::?\d{2})?)$/

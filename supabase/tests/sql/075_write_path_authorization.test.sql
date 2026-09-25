@@ -50,14 +50,26 @@ BEGIN
 END;
 $$;
 
-/** Push ONE row and report whether the server stored it. */
+/** Push ONE row and report whether the server stored it.
+
+    Since 078 `kwenta_write` raises (P0001, naming the row) instead of returning a partial
+    `applied` when a non-activity_log row is refused. That raise, naming THIS row, is reported as
+    "not stored"; any other error still propagates and fails the suite. */
 CREATE OR REPLACE FUNCTION test.w1(p_table text, p_row jsonb)
 RETURNS boolean
 LANGUAGE plpgsql
 AS $$
-DECLARE res jsonb;
+DECLARE res jsonb; st text; msg text;
 BEGIN
-  res := test.w(jsonb_build_object(p_table, jsonb_build_array(p_row)));
+  BEGIN
+    res := test.w(jsonb_build_object(p_table, jsonb_build_array(p_row)));
+  EXCEPTION WHEN raise_exception THEN
+    GET STACKED DIAGNOSTICS st = RETURNED_SQLSTATE, msg = MESSAGE_TEXT;
+    IF msg LIKE 'kwenta_write refused rows:%' || p_table || ':' || (p_row ->> 'id') || '%' THEN
+      RETURN false;
+    END IF;
+    RAISE;
+  END;
   RETURN coalesce(res -> 'applied' -> p_table ? (p_row ->> 'id'), false);
 END;
 $$;

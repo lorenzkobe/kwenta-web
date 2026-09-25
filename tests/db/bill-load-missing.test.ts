@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { db } from '@/db/db'
 import { deleteBill, updateBill } from '@/db/operations'
 import { BillUnavailableError, loadBillIntoMirror } from '@/sync/bill-mirror'
+import { bumpSessionEpoch } from '@/sync/session-epoch'
 import type { Bill, BillItem, ItemSplit } from '@/types'
 import { makeBill, makeItem, makeSplit, resetDb } from '../helpers/db'
 
@@ -21,6 +22,8 @@ const server = vi.hoisted(() => ({
   bundles: new Map<string, unknown>(),
   fetchCalls: [] as string[],
   fetchError: null as { message: string } | null,
+  /** Runs while the fetch is in flight (e.g. a wipe landing mid-request). */
+  onFetch: null as null | (() => void),
   cloud: { mode: 'ok' as const, calls: 0, pushes: [] as Record<string, { id: string }[]>[] },
 }))
 
@@ -34,6 +37,7 @@ vi.mock('@/lib/supabase', async () => {
         if (fn === 'kwenta_fetch_bill_bundle') {
           const id = String(args?.p_bill_id)
           server.fetchCalls.push(id)
+          server.onFetch?.()
           if (server.fetchError) return { data: null, error: server.fetchError }
           return { data: server.bundles.get(id) ?? null, error: null }
         }
@@ -82,11 +86,23 @@ beforeEach(async () => {
   server.bundles.clear()
   server.fetchCalls.length = 0
   server.fetchError = null
+  server.onFetch = null
   server.cloud.calls = 0
   server.cloud.pushes.length = 0
 })
 
 describe('loadBillIntoMirror', () => {
+  it('C27: a bundle that lands after a wipe (sign-out, account switch) writes nothing', async () => {
+    server.bundles.set('B1', serverBill('B1'))
+    server.onFetch = () => bumpSessionEpoch()
+
+    await loadBillIntoMirror('B1')
+
+    expect(server.fetchCalls).toEqual(['B1'])
+    expect(await db.bills.get('B1')).toBeUndefined()
+    expect(await db.bill_items.count()).toBe(0)
+  })
+
   it('fetches a bill missing from this device and mirrors the bill, items and splits', async () => {
     const b = serverBill('B1')
     server.bundles.set('B1', b)

@@ -4,6 +4,9 @@ import { generateId } from '@/lib/utils'
 import { useAppStore } from '@/store/app-store'
 import { mountedReadSpecs, primeReads, type ReadSpec } from '@/api/primed-reads'
 import { trackCloudWrite } from '@/sync/in-flight-writes'
+import { SessionEndedError, assertSessionEpoch, currentSessionEpoch } from '@/sync/session-epoch'
+import { CloudWriteFailedError, WriteSessionMismatchError, classifyWriteFailure } from '@/sync/write-errors'
+import { drainWriteQueue, enqueueWrite, hasPendingQueuedWrites, type QueuedWriteMeta } from '@/sync/write-queue'
 import {
   PULL_SINCE_EPOCH,
   TABLE_NAMES,
@@ -14,6 +17,7 @@ import {
   isRowApplied,
   markRefreshed,
   resolvePaidByForPush,
+  rowKey,
   resolveSettlementPartyIdForPush,
   resolveSplitUserIdForPush,
   shouldApplyPulledRow,
@@ -30,6 +34,7 @@ import type {
   ProfilePeerLink,
   Settlement,
   SyncFields,
+  WriteFailureKind,
 } from '@/types'
 
 /** Rows a single mutation implies, grouped by table. Built in memory, never staged in Dexie first. */
@@ -50,14 +55,54 @@ function rowsFor(payload: CloudWritePayload, table: TableName): SyncFields[] {
   return (payload[table] ?? []) as SyncFields[]
 }
 
+/** The server answered and stored nothing. Never replayed: the same rows would be refused again. */
 export class CloudWriteRejectedError extends Error {
   code: string
+  readonly kind: WriteFailureKind = 'rejected'
 
   constructor(message: string, code = 'CLOUD_WRITE_REJECTED') {
     super(message)
     this.name = 'CloudWriteRejectedError'
     this.code = code
   }
+}
+
+/** A write RPC that has not answered in this long is treated as a transport failure and replayed. */
+const WRITE_TIMEOUT_MS = 20_000
+
+type AbortableQuery<T> = PromiseLike<T> & { abortSignal?: (signal: AbortSignal) => PromiseLike<T> }
+
+function withWriteTimeout<T>(query: AbortableQuery<T>): PromiseLike<T> {
+  if (typeof query.abortSignal !== 'function' || typeof AbortSignal.timeout !== 'function') return query
+  return query.abortSignal(AbortSignal.timeout(WRITE_TIMEOUT_MS))
+}
+
+type RpcAnswer = { data: unknown; error: unknown; status?: number }
+type MetricFields = Parameters<typeof withMetric>[2]
+
+/**
+ * One write RPC. A fetch that throws (or times out) is reported in postgrest's own error shape so
+ * one classifier sees every failure; the HTTP status rides on the error for the same reason.
+ */
+async function callWriteRpc(fn: string, args: Record<string, unknown>, fields: MetricFields): Promise<RpcAnswer> {
+  try {
+    const answer = (await withMetric(
+      'sync.cloudWriteRpc',
+      () => withWriteTimeout(supabase.rpc(fn, args) as AbortableQuery<RpcAnswer>),
+      fields,
+    )) as RpcAnswer
+    return answer
+  } catch (err) {
+    return { data: null, error: err, status: 0 }
+  }
+}
+
+function errorWithStatus(answer: RpcAnswer): unknown {
+  const { error, status } = answer
+  if (error && typeof error === 'object' && status !== undefined && !('status' in error)) {
+    return { ...(error as object), message: (error as { message?: unknown }).message, status }
+  }
+  return error
 }
 
 export function isCloudWritePayloadEmpty(payload: CloudWritePayload): boolean {
@@ -185,17 +230,26 @@ export async function submitCloudWrite(input: {
    * success from failure and retries.
    */
   submissionId?: string
+  /**
+   * `table:id` of rows a LATER queued write still owns. Their local copy is that later edit, not
+   * yet sent, so this write's echo must not overwrite it (the edit would visibly revert until the
+   * later entry drains).
+   */
+  preserveLocalKeys?: ReadonlySet<string>
 }): Promise<{ stored: number }> {
   if (isCloudWritePayloadEmpty(input.payload)) {
     throw new CloudWriteRejectedError('Nothing to save.', 'EMPTY_PAYLOAD')
   }
+  const epoch = currentSessionEpoch()
 
   const {
     data: { session },
   } = await supabase.auth.getSession()
   if (!session?.user?.id) {
-    throw new CloudWriteRejectedError('You are signed out. Sign in and try again.', 'NOT_SIGNED_IN')
+    // Nothing was sent, so nothing was refused: the rows wait for a session.
+    throw new CloudWriteFailedError('You are signed out. Sign in and try again.', 'transport')
   }
+  if (session.user.id !== input.actorUserId) throw new WriteSessionMismatchError()
 
   const payload = await normalizeForPush(input.payload)
 
@@ -207,14 +261,13 @@ export async function submitCloudWrite(input: {
   let usedWriteRpc = false
 
   if (writeRpcSupported !== false) {
-    const attempt = await withMetric(
-      'sync.cloudWriteRpc',
-      () =>
-        supabase.rpc('kwenta_write', {
-          p_push: payload,
-          p_submission_id: input.submissionId ?? null,
-          p_reads: reads.map(toReadArg),
-        }),
+    const attempt = await callWriteRpc(
+      'kwenta_write',
+      {
+        p_push: payload,
+        p_submission_id: input.submissionId ?? null,
+        p_reads: reads.map(toReadArg),
+      },
       { rows: countRows(payload), reads: reads.length, rpc: 'kwenta_write' },
     )
     if (attempt.error && isMissingOverloadError(attempt.error)) {
@@ -222,10 +275,11 @@ export async function submitCloudWrite(input: {
       // later write in this session goes straight there.
       writeRpcSupported = false
     } else {
-      writeRpcSupported = true
+      // A request that never got an answer says nothing about which RPCs the server has.
+      if (!attempt.error || classifyWriteFailure(errorWithStatus(attempt)) !== 'transport') writeRpcSupported = true
       usedWriteRpc = true
       bundle = attempt.data
-      rpcError = attempt.error
+      rpcError = attempt.error ? errorWithStatus(attempt) : null
     }
   }
 
@@ -234,19 +288,19 @@ export async function submitCloudWrite(input: {
     const useSubmissionId = input.submissionId !== undefined && submissionIdSupported !== false
     if (useSubmissionId) args.p_submission_id = input.submissionId
 
-    let legacy = await withMetric(
-      'sync.cloudWriteRpc',
-      () => supabase.rpc('kwenta_sync', args),
-      { rows: countRows(payload), idempotent: useSubmissionId, rpc: 'kwenta_sync' },
-    )
+    let legacy = await callWriteRpc('kwenta_sync', args, {
+      rows: countRows(payload),
+      idempotent: useSubmissionId,
+      rpc: 'kwenta_sync',
+    })
 
     // Older database without migration 050: retry without the submission id. The write still
     // succeeds, it just loses replay protection — which is strictly better than refusing to save.
     if (legacy.error && useSubmissionId && isMissingOverloadError(legacy.error)) {
       submissionIdSupported = false
-      legacy = await withMetric(
-        'sync.cloudWriteRpc',
-        () => supabase.rpc('kwenta_sync', { p_since: PULL_SINCE_EPOCH, p_push: payload }),
+      legacy = await callWriteRpc(
+        'kwenta_sync',
+        { p_since: PULL_SINCE_EPOCH, p_push: payload },
         { rows: countRows(payload), idempotent: false, rpc: 'kwenta_sync' },
       )
     } else if (!legacy.error && useSubmissionId) {
@@ -254,17 +308,18 @@ export async function submitCloudWrite(input: {
     }
 
     bundle = legacy.data
-    rpcError = legacy.error
+    rpcError = legacy.error ? errorWithStatus(legacy) : null
   }
 
   if (rpcError) {
-    throw new CloudWriteRejectedError(
-      `Could not save to cloud: ${syncErrMessage(rpcError)}`,
-      'RPC_ERROR',
-    )
+    const kind = classifyWriteFailure(rpcError)
+    const message = `Could not save to cloud: ${syncErrMessage(rpcError)}`
+    if (kind === 'rejected') throw new CloudWriteRejectedError(message, 'RPC_ERROR')
+    throw new CloudWriteFailedError(message, kind)
   }
   if (!isPullBundle(bundle)) {
-    throw new CloudWriteRejectedError('Cloud returned an unexpected response.', 'BAD_RESPONSE')
+    // Doubtful — a proxy or a truncated body, not a refusal — so it is replayed, not dropped.
+    throw new CloudWriteFailedError('Cloud returned an unexpected response.', 'transport')
   }
 
   const bundleRowsById = new Map<TableName, Map<string, SyncFields>>()
@@ -305,9 +360,19 @@ export async function submitCloudWrite(input: {
     submittedIds.set(table, new Set(rowsFor(payload, table).map((r) => r.id)))
   }
 
+  // The server stored it, but a wipe (sign-out, account switch) ran while the request was out: the
+  // mirror now belongs to the next session, and this response must not be written into it.
+  assertSessionEpoch(epoch)
   let stored = 0
   for (const table of TABLE_NAMES) {
-    const rows = (bundle[table] as SyncFields[]) ?? []
+    // A replayed submission (050) answers with its original `applied` map and no rows: the server
+    // stored exactly what was submitted, so the submitted rows stand in for the missing echo.
+    const echoed = (bundle[table] as SyncFields[]) ?? []
+    const echoedIds = new Set(echoed.map((r) => r.id))
+    const unechoed = rowsFor(payload, table).filter(
+      (r) => !echoedIds.has(r.id) && applied !== undefined && isRowApplied(applied, table, r.id),
+    )
+    const rows = unechoed.length > 0 ? [...echoed, ...unechoed] : echoed
     stored += rows.length
     if (rows.length === 0) continue
     const localTable = getLocalTable(table)
@@ -324,11 +389,15 @@ export async function submitCloudWrite(input: {
       // to protect concurrent *local* edits, and would otherwise drop our own confirmed write
       // whenever the device clock runs ahead of the server clock — the row would be saved in
       // the cloud but never appear on the device that saved it.
+      if (input.preserveLocalKeys?.has(rowKey(table, row.id))) continue
       if (!mine.has(row.id) && !shouldApplyPulledRow(existing, row.updated_at)) continue
       toPut.push({ ...(existing ?? {}), ...row, synced_at: row.updated_at })
     }
-    if (toPut.length > 0) await localTable.bulkPut(toPut)
+    if (toPut.length === 0) continue
+    assertSessionEpoch(epoch)
+    await localTable.bulkPut(toPut)
   }
+  assertSessionEpoch(epoch)
 
   if (usedWriteRpc) {
     // The payloads for the screens that were on display, recomputed by the server after this
@@ -344,48 +413,75 @@ export async function submitCloudWrite(input: {
   return { stored }
 }
 
+/** How long a save may wait on older queued writes before it queues behind them instead. */
+const SAVE_DRAIN_BUDGET_MS = 10_000
+
 /**
  * Land a mutation's rows, cloud-first.
  *
- * Online: the server decides. On success its returned rows become the local mirror; on
- * rejection this throws and Dexie is untouched, so there is nothing on screen to retry
- * against and nothing for a later background sync to push.
+ * Online: the server decides. On success its returned rows become the local mirror; on a refusal
+ * (or an inactive account) this throws and Dexie is untouched, so there is nothing on screen to
+ * retry against and nothing for a later background sync to push.
  *
- * Offline: the rows are staged locally (`synced_at = null`) and queued, which is what keeps
- * the app usable without a connection. The existing sync manager replays them on reconnect.
+ * Staged and queued instead (`mode: 'queued'`, never a throw):
+ *  - offline;
+ *  - a transport failure — the request may or may not have landed, so the SAME submission id is
+ *    replayed and a lost response cannot become a second bill;
+ *  - older writes still pending in the queue that do not drain within the save's budget: sending
+ *    this one ahead of them would reorder edits to the same rows. Only `pending` entries count; a
+ *    refused entry waits for the user and never holds a new save back.
  */
 export async function commitCloudFirstWrite(input: {
   actorUserId: string
   payload: CloudWritePayload
-  /** Stage the same rows in Dexie for the offline path. Only called when offline. */
-  stageOffline: () => Promise<void>
-  /** Queue the mutation for replay. Only called when offline. */
-  queueOffline: () => Promise<void>
+  /** What the Settings "not applied" list shows if this write is later refused. */
+  pending: QueuedWriteMeta
   /** Stable id for this logical write; see submitCloudWrite. Generated when omitted. */
   submissionId?: string
-}): Promise<{ mode: 'cloud' | 'queued' }> {
-  const isOnline = typeof navigator === 'undefined' || navigator.onLine
-
-  if (!isOnline) {
-    await input.stageOffline()
-    await input.queueOffline()
+}): Promise<{ mode: 'cloud' | 'queued'; submissionId: string }> {
+  const submissionId = input.submissionId ?? generateId()
+  const epoch = currentSessionEpoch()
+  const queue = async (failure?: { kind: WriteFailureKind; message: string }) => {
+    assertSessionEpoch(epoch)
+    await enqueueWrite({
+      actorUserId: input.actorUserId,
+      payload: input.payload,
+      pending: input.pending,
+      submissionId,
+      failure,
+    })
     // A queued write changes what the user should see (pending count, staged rows), and
     // server-backed screens have no Dexie subscription to notice it.
     useAppStore.getState().bumpDataVersion()
-    return { mode: 'queued' }
+    return { mode: 'queued' as const, submissionId }
   }
 
-  // Tracked so the realtime path can wait for this write's rows to be mirrored before it
-  // decides whether their events are this write's own echoes.
-  await trackCloudWrite(
-    submitCloudWrite({
-      actorUserId: input.actorUserId,
-      payload: input.payload,
-      submissionId: input.submissionId ?? generateId(),
-    }),
-  )
+  const isOnline = typeof navigator === 'undefined' || navigator.onLine
+  if (!isOnline) return queue()
+
+  if (await hasPendingQueuedWrites(input.actorUserId)) {
+    await drainWriteQueue(input.actorUserId, { budgetMs: SAVE_DRAIN_BUDGET_MS })
+    if (await hasPendingQueuedWrites(input.actorUserId)) return queue()
+  }
+
+  try {
+    // Tracked so the realtime path can wait for this write's rows to be mirrored before it
+    // decides whether their events are this write's own echoes.
+    await trackCloudWrite(
+      submitCloudWrite({ actorUserId: input.actorUserId, payload: input.payload, submissionId }),
+    )
+  } catch (err) {
+    if (
+      err instanceof SessionEndedError ||
+      err instanceof WriteSessionMismatchError ||
+      classifyWriteFailure(err) !== 'transport'
+    ) {
+      throw err
+    }
+    return queue({ kind: 'transport', message: err instanceof Error ? err.message : String(err) })
+  }
   // Balances are computed on the server now, so a saved bill only reaches the screen when the
   // server-backed reads run again. Without this the user saves and nothing visibly changes.
   useAppStore.getState().bumpDataVersion()
-  return { mode: 'cloud' }
+  return { mode: 'cloud', submissionId }
 }

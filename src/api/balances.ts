@@ -1,6 +1,7 @@
 import { supabase } from '@/lib/supabase'
 import { now } from '@/lib/utils'
 import { readCache, writeCache } from '@/api/cache'
+import { currentSessionEpoch } from '@/sync/session-epoch'
 import { consumePrimedRead, rememberReadSpec, rpcArgs, type ReadSpec } from '@/api/primed-reads'
 import type { SettlementMovementLeg } from '@/lib/settlement'
 
@@ -177,6 +178,7 @@ async function fetchEndpoint<T>(
   map: (raw: unknown) => T,
 ): Promise<{ data: T; fromCache: boolean; fetchedAt: string }> {
   rememberReadSpec({ ...spec, key: endpoint })
+  const epoch = currentSessionEpoch()
 
   // A write that carried this endpoint already asked the server for it, after applying the
   // mutation and in the same transaction. Serving that is not a cache hit — it is a server answer
@@ -186,7 +188,7 @@ async function fetchEndpoint<T>(
     try {
       const data = map(primedHit.raw)
       const at = now()
-      writeCache(endpoint, userId, data, at)
+      writeCache(endpoint, userId, data, at, epoch)
       return { data, fromCache: false, fetchedAt: at }
     } catch {
       // An unexpected shape must not break the screen; fall through and fetch it properly.
@@ -200,7 +202,7 @@ async function fetchEndpoint<T>(
       if (error) throw error
       const data = map(raw)
       const at = now()
-      writeCache(endpoint, userId, data, at)
+      writeCache(endpoint, userId, data, at, epoch)
       return { data, fromCache: false, fetchedAt: at }
     } catch (err) {
       // A refusal is the server's ANSWER, not a transport failure; falling back to a cached copy

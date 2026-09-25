@@ -1,17 +1,7 @@
 import { db } from '@/db/db'
-import type { MutationEntityType, NotAppliedChange, PendingMutation } from '@/types'
+import type { MutationEntityType, NotAppliedChange, PendingMutation, WriteFailureKind } from '@/types'
 import { generateId, now } from '@/lib/utils'
 import { hasUnsyncedLocalDataForUser, isEntityUnsyncedForActor, syncRoundTrip } from '@/sync/sync-service'
-
-export class CloudFirstMutationError extends Error {
-  code: string
-
-  constructor(message: string, code = 'CLOUD_WRITE_FAILED') {
-    super(message)
-    this.name = 'CloudFirstMutationError'
-    this.code = code
-  }
-}
 
 type TrackMutationInput = {
   actorUserId: string
@@ -20,10 +10,11 @@ type TrackMutationInput = {
   entityId?: string | null
   payload?: unknown
   routeHint?: string | null
-}
-
-type FinalizeMutationInput = TrackMutationInput & {
-  pendingMutationId?: string
+  /** The exact rows to replay. Omitted = a legacy entry, which only the row-scan sync replays. */
+  push?: PendingMutation['push']
+  rowKeys?: string[]
+  submissionId?: string
+  failure?: { kind: WriteFailureKind; message: string }
 }
 
 function serializePayload(payload: unknown): string {
@@ -34,9 +25,11 @@ function serializePayload(payload: unknown): string {
   }
 }
 
+/** Appends an entry at the end of the queue (`seq` = last + 1; call inside the staging transaction). */
 export async function enqueuePendingMutation(input: TrackMutationInput): Promise<string> {
   const timestamp = now()
   const pendingId = generateId()
+  const last = await db.pending_mutations.orderBy('seq').last()
   const row: PendingMutation = {
     id: pendingId,
     actor_user_id: input.actorUserId,
@@ -46,8 +39,14 @@ export async function enqueuePendingMutation(input: TrackMutationInput): Promise
     payload_json: serializePayload(input.payload),
     status: 'pending',
     retry_count: 0,
-    last_error: null,
-    idempotency_key: generateId(),
+    last_error: input.failure?.message ?? null,
+    seq: (last?.seq ?? 0) + 1,
+    submission_id: input.submissionId ?? generateId(),
+    push: input.push ?? null,
+    row_keys: input.rowKeys ?? [],
+    next_attempt_at: null,
+    last_error_kind: input.failure?.kind ?? null,
+    route_hint: input.routeHint ?? null,
     created_at: timestamp,
     updated_at: timestamp,
   }
@@ -55,6 +54,19 @@ export async function enqueuePendingMutation(input: TrackMutationInput): Promise
   return pendingId
 }
 
+/** Legacy (`push = null`) entries only: the write queue settles its own entries one by one. */
+async function pendingLegacyEntries(actorUserId: string): Promise<PendingMutation[]> {
+  return db.pending_mutations
+    .where('actor_user_id')
+    .equals(actorUserId)
+    .filter((m) => m.status === 'pending' && m.push == null)
+    .toArray()
+}
+
+/**
+ * After a clean row-scan sync, marks this actor's LEGACY entries applied. Queue entries (with a
+ * `push`) are never settled here: their rows are not part of the row scan.
+ */
 export async function markPendingMutationsApplied(actorUserId: string): Promise<void> {
   // Don't report success while anything for this actor is still unsynced. A row dropped
   // by push RLS filtering stays synced_at=null even though the sync returned no errors;
@@ -63,54 +75,12 @@ export async function markPendingMutationsApplied(actorUserId: string): Promise<
   if (await hasUnsyncedLocalDataForUser(actorUserId)) return
 
   const timestamp = now()
-  const pending = await db.pending_mutations
-    .where('actor_user_id')
-    .equals(actorUserId)
-    .filter((m) => m.status === 'pending')
-    .toArray()
+  const pending = await pendingLegacyEntries(actorUserId)
   for (const row of pending) {
     await db.pending_mutations.update(row.id, {
       status: 'applied',
       updated_at: timestamp,
       last_error: null,
-    })
-  }
-}
-
-export async function markPendingMutationsConflict(
-  actorUserId: string,
-  reasonCode: string,
-  reasonMessage: string,
-): Promise<void> {
-  const timestamp = now()
-  const pending = await db.pending_mutations
-    .where('actor_user_id')
-    .equals(actorUserId)
-    .filter((m) => m.status === 'pending')
-    .toArray()
-  for (const row of pending) {
-    await db.pending_mutations.update(row.id, {
-      status: 'conflict',
-      updated_at: timestamp,
-      retry_count: row.retry_count + 1,
-      last_error: reasonMessage,
-    })
-    const existing = await db.not_applied_changes
-      .where('pending_mutation_id')
-      .equals(row.id)
-      .filter((c) => c.resolution === 'pending')
-      .first()
-    if (existing) continue
-    await recordNotAppliedChange({
-      actorUserId,
-      pendingMutationId: row.id,
-      operation: row.operation,
-      entityType: row.entity_type,
-      entityId: row.entity_id,
-      reasonCode,
-      reasonMessage,
-      payload: row.payload_json,
-      routeHint: null,
     })
   }
 }
@@ -137,26 +107,6 @@ export async function listPendingConflictsForActor(actorUserId: string): Promise
     .toArray()
   rows.sort((a, b) => b.created_at.localeCompare(a.created_at))
   return rows
-}
-
-export async function resolveConflictsForEntity(
-  entityType: MutationEntityType,
-  entityId: string | null | undefined,
-  resolution: NotAppliedChange['resolution'],
-): Promise<void> {
-  if (!entityId) return
-  const rows = await db.not_applied_changes
-    .where('[entity_type+entity_id]')
-    .equals([entityType, entityId])
-    .filter((r) => r.resolution === 'pending')
-    .toArray()
-  const timestamp = now()
-  for (const row of rows) {
-    await db.not_applied_changes.update(row.id, {
-      resolution,
-      resolved_at: timestamp,
-    })
-  }
 }
 
 export async function recordNotAppliedChange(input: {
@@ -195,9 +145,8 @@ export async function retryNotAppliedChange(change: NotAppliedChange): Promise<b
   const result = await syncRoundTrip(change.actor_user_id)
   if (result.errors.length === 0 && !(await isEntityUnsyncedForActor(change.entity_type, change.entity_id, change.actor_user_id))) {
     await markNotAppliedChangeReapplied(change.id)
-    // Also resolve the originating pending_mutation. Left as 'pending', the next sync-error path
-    // (markPendingMutationsConflict) would re-escalate this already-saved change to 'conflict'
-    // and spawn a fresh not_applied_change — a spurious "could not be saved" notice.
+    // Also resolve the originating pending_mutation: left as 'pending', it would keep counting as
+    // an unsent change after the server stored it.
     if (change.pending_mutation_id) {
       await db.pending_mutations.update(change.pending_mutation_id, {
         status: 'applied',
@@ -209,90 +158,3 @@ export async function retryNotAppliedChange(change: NotAppliedChange): Promise<b
   }
   return false
 }
-
-/**
- * @deprecated Superseded by `commitCloudFirstWrite` (`src/sync/cloud-write.ts`) and no longer
- * called by any operation.
- *
- * This is the OLD write-then-sync shape: the caller committed to Dexie first and called this
- * afterwards, so a rejected write stayed local, still moved balances, and was pushed by a later
- * background sync — the duplicate-bill bug. Do not wire new operations to it. Kept only so the
- * pending-mutation/conflict behaviour it exercises stays covered while the offline replay path
- * (sync-manager) continues to rely on the same helpers; safe to delete with its tests.
- */
-export async function finalizeMutationSync(input: FinalizeMutationInput): Promise<void> {
-  const isOnline = typeof navigator !== 'undefined' && navigator.onLine
-  if (!isOnline) {
-    if (!input.pendingMutationId) {
-      await enqueuePendingMutation(input)
-    }
-    return
-  }
-
-  const pendingId = input.pendingMutationId ?? (await enqueuePendingMutation(input))
-  const result = await syncRoundTrip(input.actorUserId)
-  if (result.errors.length > 0) {
-    const timestamp = now()
-    await db.pending_mutations.update(pendingId, {
-      status: 'conflict',
-      updated_at: timestamp,
-      retry_count: ((await db.pending_mutations.get(pendingId))?.retry_count ?? 0) + 1,
-      last_error: result.errors.join(' | '),
-    })
-    await recordNotAppliedChange({
-      actorUserId: input.actorUserId,
-      pendingMutationId: pendingId,
-      operation: input.operation,
-      entityType: input.entityType,
-      entityId: input.entityId ?? null,
-      reasonCode: 'sync_error',
-      reasonMessage: result.errors.join(' | '),
-      payload: input.payload,
-      routeHint: input.routeHint ?? null,
-    })
-    throw new CloudFirstMutationError('Could not save to cloud. Your change was not applied.', 'SYNC_ERROR')
-  }
-
-  // Sync returned no transport error — but a row silently dropped by server RLS stays
-  // unsynced (synced_at=null). Do not declare success while the actor still has unsynced
-  // data; leave the mutation pending so the next sync retries, and once retries exceed the
-  // threshold, surface it as a not_applied_change instead of a silent forever-pending row.
-  const STUCK_RETRY_THRESHOLD = 3
-  if (await isEntityUnsyncedForActor(input.entityType, input.entityId ?? null, input.actorUserId)) {
-    const current = await db.pending_mutations.get(pendingId)
-    const retryCount = (current?.retry_count ?? 0) + 1
-    await db.pending_mutations.update(pendingId, {
-      status: 'pending',
-      updated_at: now(),
-      retry_count: retryCount,
-      last_error: 'Cloud accepted the sync but did not store this change (possibly filtered).',
-    })
-    if (retryCount >= STUCK_RETRY_THRESHOLD) {
-      const existing = await db.not_applied_changes
-        .where('pending_mutation_id').equals(pendingId)
-        .filter((c) => c.resolution === 'pending').first()
-      if (!existing) {
-        await recordNotAppliedChange({
-          actorUserId: input.actorUserId,
-          pendingMutationId: pendingId,
-          operation: input.operation,
-          entityType: input.entityType,
-          entityId: input.entityId ?? null,
-          reasonCode: 'silently_dropped',
-          reasonMessage: 'This change could not be saved to the cloud after several attempts.',
-          payload: input.payload,
-          routeHint: input.routeHint ?? null,
-        })
-      }
-    }
-    return
-  }
-
-  await db.pending_mutations.update(pendingId, {
-    status: 'applied',
-    updated_at: now(),
-    last_error: null,
-  })
-  await resolveConflictsForEntity(input.entityType, input.entityId ?? null, 'auto_resolved')
-}
-

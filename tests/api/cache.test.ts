@@ -174,3 +174,27 @@ describe('api cache eviction', () => {
     )
   })
 })
+
+describe('review C2.4: a response from an ended session is never cached', () => {
+  beforeEach(() => {
+    localStorage.clear()
+  })
+
+  it('writeCache skips a write whose request started before the wipe', async () => {
+    const { bumpSessionEpoch, currentSessionEpoch } = await import('@/sync/session-epoch')
+    const started = currentSessionEpoch()
+    bumpSessionEpoch()
+
+    writeCache('overview', 'A', { total: 100 }, '2026-09-25T00:00:00.000Z', started)
+
+    expect(readCache('overview', 'A')).toBeNull()
+  })
+
+  it('writeCache still writes within the same session', async () => {
+    const { currentSessionEpoch } = await import('@/sync/session-epoch')
+
+    writeCache('overview', 'A', { total: 100 }, '2026-09-25T00:00:00.000Z', currentSessionEpoch())
+
+    expect(readCache('overview', 'A')?.data).toEqual({ total: 100 })
+  })
+})

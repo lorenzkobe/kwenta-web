@@ -104,7 +104,15 @@ export interface ProfilePeerLink extends SyncFields {
   peer_profile_id: string
 }
 
-export type PendingMutationStatus = 'pending' | 'applied' | 'conflict' | 'dismissed'
+/**
+ * `pending` waits to be sent; `conflict` was refused by the server; `blocked_by_earlier` shares a
+ * row with a refused entry, so sending it would build on a change the server never stored.
+ * `applied` / `dismissed` survive only on legacy (pre-v15, `push = null`) entries: a queued write
+ * with a `push` is deleted once it applies or is dismissed.
+ */
+export type PendingMutationStatus = 'pending' | 'applied' | 'conflict' | 'dismissed' | 'blocked_by_earlier'
+
+export type WriteFailureKind = 'transport' | 'rejected' | 'inactive'
 
 export type MutationEntityType =
   | 'bill'
@@ -126,7 +134,19 @@ export interface PendingMutation {
   status: PendingMutationStatus
   retry_count: number
   last_error: string | null
-  idempotency_key: string
+  /** Device-local replay order. */
+  seq: number
+  /** Sent with every attempt, so a replay after a lost response cannot apply twice (050). */
+  submission_id: string
+  /** The exact rows to submit, by table. `null` = a legacy entry, replayed by the row-scan sync. */
+  push: Record<string, SyncFields[] | undefined> | null
+  /** `table:id` of every row in `push`; a full sync never pushes a row an entry owns. */
+  row_keys: string[]
+  /** Epoch ms before which a transport failure backs this entry (and everything after it) off. */
+  next_attempt_at: number | null
+  last_error_kind: WriteFailureKind | null
+  /** Where the "not applied" notice sends the user if this write is refused. */
+  route_hint?: string | null
   created_at: string
   updated_at: string
 }

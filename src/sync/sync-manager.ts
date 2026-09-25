@@ -1,15 +1,18 @@
 import { hydrateLinkedRemoteProfilesForActor } from '@/lib/people'
 import { maybeAutoRepairData } from '@/lib/kwenta-data-repair'
 import { flushQueuedKwentaNotifications, hasQueuedKwentaNotifications } from '@/lib/kwenta-notifications'
-import { markPendingMutationsApplied, markPendingMutationsConflict } from '@/sync/cloud-first-mutations'
+import { markPendingMutationsApplied } from '@/sync/cloud-first-mutations'
 import { supabase } from '@/lib/supabase'
 import { useAppStore } from '@/store/app-store'
-import { readLastRefreshAt, readRealtimeCursor, realtimeCursorKey } from '@/lib/kwenta-storage-keys'
+import { readLastRefreshAt, readRealtimeCursor } from '@/lib/kwenta-storage-keys'
+import { requestRealtimeCatchUp } from '@/sync/realtime-events'
 import {
   clearRealtimeProcessingFailed,
   realtimeHealthToken,
   realtimeProcessingFailed,
 } from '@/sync/realtime-health'
+import { currentSessionEpoch, isSessionEpochCurrent } from '@/sync/session-epoch'
+import { drainWriteQueue } from '@/sync/write-queue'
 import {
   fullSync,
   getMillisecondsSinceLastRefresh,
@@ -20,19 +23,27 @@ import {
   syncRoundTrip,
 } from './sync-service'
 
-/** Slow backup in case a CRUD-triggered sync was missed */
+/** How often the backup tick asks whether the mirror needs a refresh. */
 const SYNC_BACKUP_INTERVAL_MS = 5 * 60 * 1000
-/** When there is nothing to upload, still refresh at most this often from the backup timer (avoids empty RPCs every tick). */
-const BACKUP_REFRESH_STALE_AFTER_MS = 15 * 60 * 1000
+/**
+ * The bound on changes that emit no event. Contacts, renames and peer links emit events since 077,
+ * so what is left is rare enough for an hourly safety refresh (it was 5 minutes on focus and 15 on
+ * the backup tick).
+ */
+const MIRROR_SAFETY_REFRESH_MS = 60 * 60 * 1000
 
 /**
- * 'user' is the Refresh button. It is the one reason that ALWAYS re-reads the screens, even when
- * the sync moved no local row: pressing Refresh is an explicit request for fresh data, and a
- * server-side change that alters no row this device holds — a counterparty renaming their own
- * account, whose profile is outside this user's pull scope by design — would otherwise never
- * reach the screen at all.
+ * 'start', 'activation' and 'backup' go through the `refreshIfNeeded` gate and never queue a re-run
+ * behind a sync already in flight: that sync IS the refresh they asked for (a focus during the
+ * startup sync used to cost a second complete bundle).
+ *
+ * 'explicit' (a retry, a local change) and 'user' (the Refresh button) always sync. 'user' is also
+ * the one reason that ALWAYS re-reads the screens, even when the sync moved no local row: pressing
+ * Refresh is an explicit request for fresh data, and a server-side change that alters no row this
+ * device holds would otherwise never reach the screen at all.
  */
-type SyncRunReason = 'initial' | 'explicit' | 'user' | 'backup' | 'online'
+type RefreshReason = 'start' | 'activation' | 'backup'
+type SyncRunReason = RefreshReason | 'explicit' | 'user'
 const BACKOFF_INITIAL_MS = 30_000
 const BACKOFF_MAX_MS = 5 * 60 * 1000
 const TRIGGER_DEBOUNCE_MS = 400
@@ -41,8 +52,8 @@ let backupTimer: ReturnType<typeof setInterval> | null = null
 let retryTimer: ReturnType<typeof setTimeout> | null = null
 let debounceTimer: ReturnType<typeof setTimeout> | null = null
 let isSyncing = false
-// Set when a new explicit/online sync is requested while one is already running, so
-// the in-flight sync (which already snapshotted Dexie) doesn't drop the newer mutation.
+// Set when an explicit or user sync is requested while one is already running, so the in-flight
+// sync (which already snapshotted Dexie) doesn't drop the newer mutation.
 let rerunRequested = false
 let backoffMs = BACKOFF_INITIAL_MS
 
@@ -79,17 +90,11 @@ function resetBackoff() {
   useAppStore.getState().setSyncRetryAt(null)
 }
 
-function onBrowserOnline() {
-  resetBackoff()
-  void runSync('online')
-}
-
 /**
  * Minimum gap between refreshes triggered by the tab becoming active.
  *
- * `focus` and `visibilitychange` BOTH fire when a user returns to the tab, and each pull is the
- * caller's complete row set. Without this, one tab switch cost two full round trips: the second
- * call landed while the first was in flight, set `rerunRequested`, and ran again after it.
+ * `focus` and `visibilitychange` BOTH fire when a user returns to the tab. Without this, one tab
+ * switch cost two gate runs (and, before the gate, two complete round trips).
  */
 const ACTIVATION_REFRESH_MIN_INTERVAL_MS = 5_000
 let lastActivationRefreshAt = Number.NEGATIVE_INFINITY
@@ -107,66 +112,77 @@ function monotonicNow(): number {
 }
 
 /**
- * Whether a tab activation needs the full sync, cheapest question first. It used to always run
- * one: the complete bundle plus a scan of every Dexie table, on every focus. Now it does only when
- * something says the mirror may be behind:
- *   - no completed refresh yet, or the last one is at least the backup interval old — the bound on
- *     changes that emit no event (a contact or merge made on another device, a rename);
+ * Whether the mirror needs the complete bundle, cheapest question first:
+ *   - no completed refresh yet (first sign-in: the hydration splash waits on it), or the last one
+ *     is at least MIRROR_SAFETY_REFRESH_MS old;
  *   - a realtime event failed to apply (its cursor moved on anyway);
- *   - a queued notification or a staged write — the sync is what sends them (index counts first,
- *     so a quiet focus reads no table in full);
- *   - no server cursor to ask from, or the server has an event newer than it.
- * `newest` is set when the probe found newer events: the cursor may move there once the sync
- * that follows has succeeded.
+ *   - a queued notification, or an unsynced row no queue entry owns (a legacy staged write) — the
+ *     sync is what sends them (index counts first, so a quiet check reads no table in full);
+ *   - no server cursor to ask from.
+ * Otherwise one `LIMIT 1` probe; events newer than the cursor go to realtime's per-entity
+ * catch-up, which moves the cursor itself, instead of the complete bundle.
  */
-async function activationNeedsSync(userId: string): Promise<{ sync: boolean; newest: string | null }> {
-  const yes = { sync: true, newest: null }
-  if (!readLastRefreshAt()) return yes
-  if (getMillisecondsSinceLastRefresh() >= SYNC_BACKUP_INTERVAL_MS) return yes
-  if (realtimeProcessingFailed()) return yes
-  if (await hasQueuedKwentaNotifications(userId)) return yes
-  // Gated for focus only. The backup tick must keep calling hasUnsyncedLocalDataForUser ungated:
-  // it is what bounds the rows this gate can miss (see mayHaveStagedRows).
-  if ((await mayHaveStagedRows()) && (await hasUnsyncedLocalDataForUser(userId))) return yes
+async function needsFullSync(userId: string): Promise<boolean> {
+  if (!readLastRefreshAt()) return true
+  if (getMillisecondsSinceLastRefresh() >= MIRROR_SAFETY_REFRESH_MS) return true
+  if (realtimeProcessingFailed()) return true
+  if (await hasQueuedKwentaNotifications(userId)) return true
+  if ((await mayHaveStagedRows()) && (await hasUnsyncedLocalDataForUser(userId))) return true
   const cursor = readRealtimeCursor(userId)
-  if (!cursor) return yes
+  if (!cursor) return true
   const probe = await newestUserEventSince(userId, cursor)
-  return { sync: probe.newer, newest: probe.newest }
+  if (probe.newer) requestRealtimeCatchUp()
+  return false
 }
 
-/** @returns whether the activation was handled (probed, or synced) — false gives the window back. */
-async function refreshOnActivation(): Promise<boolean> {
+/**
+ * Replays the write queue in the background. It runs alongside the gate and any full sync rather
+ * than ahead of them: a full sync never pushes a row a queue entry owns (sync-service excludes
+ * them), so the two cannot reorder a write, and a slow head entry must not hold the refresh.
+ * Notifications its entries were holding go out once it settles.
+ */
+function drainQueueInBackground(userId: string): void {
+  void drainWriteQueue(userId)
+    .then((drained) => {
+      if (drained && drained.applied > 0) return flushQueuedKwentaNotifications()
+    })
+    .catch((err) => {
+      if (!isDatabaseClosedError(err)) console.warn('[sync] write queue drain failed:', err)
+    })
+}
+
+/** Refresh: send the queue now, ignoring its backoff, and release the notifications it held. */
+async function drainQueueNow(userId: string): Promise<void> {
+  try {
+    const drained = await drainWriteQueue(userId, { ignoreBackoff: true })
+    if (drained && drained.applied > 0) await flushQueuedKwentaNotifications()
+  } catch (err) {
+    // The sync still runs; an entry that did not go out stays queued for the next drain.
+    if (!isDatabaseClosedError(err)) console.warn('[sync] write queue drain failed:', err)
+  }
+}
+
+/**
+ * App start, tab activation and the backup tick: drain the write queue, then run the full sync only
+ * when `needsFullSync` says the mirror may be behind.
+ * @returns whether the refresh was handled (checked, or synced) — false gives an activation's
+ * throttle window back.
+ */
+async function refreshIfNeeded(reason: RefreshReason): Promise<boolean> {
   if (!useAppStore.getState().isOnline) return false
   const session = await resolveSessionWithRetry()
   if (!session?.user) return false
   const userId = session.user.id
-  let decision: { sync: boolean; newest: string | null }
+  drainQueueInBackground(userId)
+  let sync: boolean
   try {
-    decision = await activationNeedsSync(userId)
+    sync = await needsFullSync(userId)
   } catch {
-    // Unsure (a closed database, a failed read): do what every focus used to do.
-    decision = { sync: true, newest: null }
+    // Unsure (a closed database, a failed read): sync, as every refresh used to.
+    sync = true
   }
-  if (!decision.sync) return true
-  // A sync already running may have read the server before the event the probe found.
-  const coversProbe = !isFullSyncInFlight(userId)
-  const ran = await runSync('online')
-  if (ran && coversProbe && decision.newest && useAppStore.getState().syncStatus === 'idle') {
-    advanceRealtimeCursor(userId, decision.newest)
-  }
-  return ran
-}
-
-/** Moves the realtime cursor forward to a SERVER timestamp; never backwards. */
-function advanceRealtimeCursor(userId: string, serverCreatedAt: string) {
-  try {
-    const current = readRealtimeCursor(userId)
-    if (!current || Date.parse(serverCreatedAt) > Date.parse(current)) {
-      localStorage.setItem(realtimeCursorKey(userId), serverCreatedAt)
-    }
-  } catch {
-    // Storage unavailable: the next focus just probes (and syncs) again.
-  }
+  if (!sync) return true
+  return runSync(reason, userId)
 }
 
 function onTabActivated() {
@@ -175,10 +191,10 @@ function onTabActivated() {
   if (nowMs - lastActivationRefreshAt < ACTIVATION_REFRESH_MIN_INTERVAL_MS) return
   const previous = lastActivationRefreshAt
   lastActivationRefreshAt = nowMs
-  void refreshOnActivation().then((ran) => {
+  void refreshIfNeeded('activation').then((handled) => {
     // runSync bails out before doing any work when offline, without a session yet, or with one
     // already in flight. Claiming the window anyway would swallow the next real activation.
-    if (!ran && lastActivationRefreshAt === nowMs) lastActivationRefreshAt = previous
+    if (!handled && lastActivationRefreshAt === nowMs) lastActivationRefreshAt = previous
   })
 }
 
@@ -197,45 +213,62 @@ async function resolveSessionWithRetry() {
 }
 
 /**
+ * @param knownUserId the caller already resolved the session (the refresh gate); skips a second read.
  * @returns whether a sync was actually attempted. False means it bailed out before doing any work
- * (offline, no session yet, one already in flight, backup tick with nothing to do).
+ * (offline, no session yet, one already in flight).
  */
-async function runSync(reason: SyncRunReason): Promise<boolean> {
+async function runSync(reason: SyncRunReason, knownUserId?: string): Promise<boolean> {
   if (isSyncing) {
-    // A sync is already in flight. If this is a new request driven by a local mutation
-    // or coming back online, remember to run once more afterwards so the newer write
-    // (not in the in-flight snapshot) still gets pushed.
-    if (reason === 'explicit' || reason === 'user' || reason === 'online') rerunRequested = true
+    // A sync is already in flight. A local change or Refresh must run once more afterwards so the
+    // newer write (not in the in-flight snapshot) still goes out; a refresh is covered by it.
+    if (reason === 'explicit' || reason === 'user') rerunRequested = true
     return false
   }
 
   const { isOnline } = useAppStore.getState()
   if (!isOnline) return false
 
-  const session = await resolveSessionWithRetry()
-  if (!session?.user) return false
-
-  const userId = session.user.id
-
-  if (reason === 'backup') {
-    const needsPush = await hasUnsyncedLocalDataForUser(userId)
-    const needsPull = getMillisecondsSinceLastRefresh() >= BACKUP_REFRESH_STALE_AFTER_MS
-    const needsNotificationFlush = await hasQueuedKwentaNotifications(userId)
-    if (!needsPush && !needsPull && !needsNotificationFlush) return false
+  let userId = knownUserId
+  if (!userId) {
+    const session = await resolveSessionWithRetry()
+    if (!session?.user) return false
+    userId = session.user.id
+  }
+  // Re-checked after the await above: two callers may both have passed the first check.
+  if (isSyncing) {
+    if (reason === 'explicit' || reason === 'user') rerunRequested = true
+    return false
   }
 
   isSyncing = true
+  const epoch = currentSessionEpoch()
   const healthToken = realtimeHealthToken()
+  // The mirror was wiped (sign-out, account switch) while this sync ran; sync-service wrote nothing
+  // from it. Its outcome belongs to no session, so it sets no error, retry or hydration state — and
+  // since it held `isSyncing`, the next session's own sync may have been turned away: run again.
+  const abandon = () => {
+    rerunRequested = true
+    useAppStore.getState().setSyncStatus('idle')
+    return true
+  }
   useAppStore.getState().setSyncStatus('syncing')
   useAppStore.getState().setSyncRetryAt(null)
 
   try {
+    // A full sync never sends a row the write queue owns (sync-service excludes them), so every
+    // path that exists to get changes out drains the queue too. Refresh waits for it and sends a
+    // backed-off head now — the user asked for it — before its sync; a retry or a local change
+    // drains in the background (the queue keeps its own backoff and retry timer).
+    if (reason === 'user') await drainQueueNow(userId)
+    else if (reason === 'explicit') drainQueueInBackground(userId)
+
     // After sign-out we clear IndexedDB + the refresh marker; on the next sign-in use one kwenta_sync round-trip
     // (syncRoundTrip) instead of many pullChanges HTTP calls. Auth gates sync until Dexie has the profile row.
     // If something is still unsynced after that (e.g. offline edits), fullSync runs next.
     const needsInitialPull = !readLastRefreshAt()
     if (needsInitialPull) {
       const initialResult = await syncRoundTrip(userId)
+      if (!isSessionEpochCurrent(epoch)) return abandon()
       if (initialResult.errors.length > 0) {
         console.warn('[sync] initial sync round-trip failed:', initialResult.errors)
         useAppStore.getState().setSyncStatus('error')
@@ -264,9 +297,11 @@ async function runSync(reason: SyncRunReason): Promise<boolean> {
     // not clear it (realtime-health).
     const joinedRunningSync = isFullSyncInFlight(userId)
     const result = await fullSync(userId)
+    if (!isSessionEpochCurrent(epoch)) return abandon()
     if (result.errors.length > 0) {
+      // Queue entries are not touched: a failed sync (often a network blip) says nothing about
+      // whether the server would refuse them — only the drain's own answer marks one refused.
       console.warn('[sync] errors:', result.errors)
-      await markPendingMutationsConflict(userId, 'replay_sync_error', result.errors.join(' | '))
       useAppStore.getState().setSyncStatus('error')
       useAppStore.getState().setPullStale(true)
       if (!readLastRefreshAt()) {
@@ -274,6 +309,7 @@ async function runSync(reason: SyncRunReason): Promise<boolean> {
       }
       scheduleRetry()
     } else {
+      // Legacy (pre-queue) entries ride this row-scan push; a clean sync confirms them.
       await markPendingMutationsApplied(userId)
       if (!joinedRunningSync) clearRealtimeProcessingFailed(healthToken)
       resetBackoff()
@@ -297,6 +333,7 @@ async function runSync(reason: SyncRunReason): Promise<boolean> {
       void maybeAutoRepairData(userId)
     }
   } catch (err) {
+    if (!isSessionEpochCurrent(epoch)) return abandon()
     if (isDatabaseClosedError(err)) {
       // Expected during sign-out/local wipe races; don't escalate/retry.
       useAppStore.getState().setSyncStatus('idle')
@@ -320,12 +357,13 @@ async function runSync(reason: SyncRunReason): Promise<boolean> {
 }
 
 export function startSyncManager() {
-  void runSync('initial')
+  void refreshIfNeeded('start')
 
   if (backupTimer) clearInterval(backupTimer)
-  backupTimer = setInterval(() => void runSync('backup'), SYNC_BACKUP_INTERVAL_MS)
+  backupTimer = setInterval(() => void refreshIfNeeded('backup'), SYNC_BACKUP_INTERVAL_MS)
 
-  window.addEventListener('online', onBrowserOnline)
+  // No 'online' listener: `useSync` stops this manager while offline and starts it again on
+  // reconnect, so the start refresh above is the reconnect refresh.
   window.addEventListener('visibilitychange', onTabActivated)
   window.addEventListener('focus', onTabActivated)
 
@@ -339,7 +377,6 @@ export function startSyncManager() {
       clearTimeout(debounceTimer)
       debounceTimer = null
     }
-    window.removeEventListener('online', onBrowserOnline)
     window.removeEventListener('visibilitychange', onTabActivated)
     window.removeEventListener('focus', onTabActivated)
   }
@@ -357,7 +394,7 @@ export function triggerSync() {
   }, TRIGGER_DEBOUNCE_MS)
 }
 
-/** User-triggered sync from the UI (e.g. header). Runs immediately, no debounce. */
+/** User-triggered sync from the UI (e.g. header). Runs immediately, no debounce, never gated. */
 export function requestSyncNow() {
   resetBackoff()
   void runSync('user')

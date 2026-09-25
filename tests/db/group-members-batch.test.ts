@@ -15,7 +15,7 @@ import { makeGroup, makeMember, makeProfile, resetDb } from '../helpers/db'
  */
 
 const cloud = vi.hoisted(() => ({
-  mode: 'ok' as 'ok' | 'error' | 'drop',
+  mode: 'ok' as 'ok' | 'error' | 'drop' | 'reject',
   refuse: new Set<string>(),
   pushes: [] as Record<string, { id: string }[]>[],
 }))
@@ -91,7 +91,8 @@ describe('addExistingGroupMembers', () => {
 
   it('C14: a rejected submit leaves Dexie untouched', async () => {
     await seedGroup()
-    cloud.mode = 'error'
+    // A server refusal. 'error' (no code, no status) is a doubtful failure, which now queues.
+    cloud.mode = 'reject'
 
     await expect(addExistingGroupMembers('G', ['ANN', 'BEN', 'CHA'], 'ME')).rejects.toThrow()
 
@@ -218,7 +219,7 @@ describe('createGroup with members', () => {
   })
 
   it('C16: a rejected submit leaves no group and no members', async () => {
-    cloud.mode = 'error'
+    cloud.mode = 'reject'
 
     await expect(createGroup('Trip', 'PHP', 'ME', ['ANN', 'BEN'])).rejects.toThrow()
 

@@ -5,6 +5,7 @@ import { captureMetric, withMetric } from '@/lib/client-metrics'
 import { isRuntimeFlagEnabled } from '@/lib/runtime-flags'
 import { KWENTA_LAST_REFRESH_STORAGE_KEY, readLastRefreshAt } from '@/lib/kwenta-storage-keys'
 import { useAppStore } from '@/store/app-store'
+import { currentSessionEpoch, isSessionEpochCurrent } from '@/sync/session-epoch'
 import { describeError, now } from '@/lib/utils'
 import type {
   ActivityLog,
@@ -375,35 +376,71 @@ export async function isEntityUnsyncedForActor(
   }
 }
 
+/** The key a write-queue entry uses to claim a row (`pending_mutations.row_keys`). */
+export function rowKey(table: TableName, id: string): string {
+  return `${table}:${id}`
+}
+
 /**
- * Whether this device may hold a write the server has not stored, answered without reading a row:
- * a pending mutation (by the indexed `status`), or a row that was never pushed — IndexedDB leaves
- * null keys out of an index, so the rows missing from the `synced_at` index are exactly those.
- * Each table's two counts share one read transaction so an insert between them cannot hide one.
+ * Every row a write-queue entry owns, whatever its status (pending, refused, blocked). Those rows
+ * travel only through the queue — in order, with their submission id — so the row-scan sync must
+ * neither push them nor count them as staged. Read from the multi-entry index, not the entries.
+ */
+export async function queueOwnedRowKeys(): Promise<Set<string>> {
+  const keys = await db.pending_mutations.orderBy('row_keys').uniqueKeys()
+  return new Set(keys as string[])
+}
+
+function withoutQueueOwned<T extends SyncFields>(tableName: TableName, rows: T[], owned: Set<string>): T[] {
+  if (owned.size === 0) return rows
+  return rows.filter((r) => !owned.has(rowKey(tableName, r.id)))
+}
+
+/**
+ * Whether this device may hold a write that only a full sync would send, answered without reading
+ * a synced table: a LEGACY pending mutation (no `push`, so the row scan is its only replay), or a
+ * row that was never pushed and is not owned by a write-queue entry — IndexedDB leaves null keys
+ * out of an index, so the rows missing from the `synced_at` index are exactly the never-pushed
+ * ones. Each table's two counts share one read transaction so an insert between them cannot hide
+ * one. A queue entry with a `push` is a drain, never a full sync, so it does not count.
  *
- * Only the cheap gate a tab focus puts in front of {@link hasUnsyncedLocalDataForUser}. It can
- * miss a row edited after its last push that carries no pending mutation (a partially applied
- * soft-delete); the 5-minute backup tick runs the full check ungated, which bounds that.
+ * Only the cheap gate the refresh checks (start, focus, backup tick) put in front of
+ * {@link hasUnsyncedLocalDataForUser}. It can miss a row edited after its last push that carries
+ * no pending mutation (a partially applied soft-delete); only the 60-minute safety refresh, which
+ * runs a full sync regardless, bounds that.
  */
 export async function mayHaveStagedRows(): Promise<boolean> {
-  if ((await db.pending_mutations.where('status').equals('pending').count()) > 0) return true
+  const pending = await db.pending_mutations.where('status').equals('pending').toArray()
+  if (pending.some((m) => m.push == null)) return true
+  let owned: Set<string> | null = null
   for (const tableName of TABLE_NAMES) {
     const table = getLocalTable(tableName)
     const [all, pushed] = await db.transaction('r', table, () =>
       Promise.all([table.count(), table.where('synced_at').above('').count()]),
     )
-    if (all > pushed) return true
+    if (all === pushed) continue
+    owned ??= await queueOwnedRowKeys()
+    const prefix = rowKey(tableName, '')
+    const ownedIds = [...owned].filter((k) => k.startsWith(prefix)).map((k) => k.slice(prefix.length))
+    if (ownedIds.length === 0) return true
+    const ownedRows = (await table.bulkGet(ownedIds)) as (SyncFields | undefined)[]
+    const ownedNeverPushed = ownedRows.filter((r) => r && r.synced_at === null).length
+    if (all - pushed > ownedNeverPushed) return true
   }
   return false
 }
 
-/** True if this user has local rows that still need a successful cloud push. */
+/**
+ * True if this user has local rows that only a full sync would push. Rows owned by a write-queue
+ * entry are excluded: the queue sends them, and a refused one waits for the user.
+ */
 export async function hasUnsyncedLocalDataForUser(userId: string): Promise<boolean> {
   const ctx = await buildPushFilterContext(userId)
+  const owned = await queueOwnedRowKeys()
   for (const tableName of TABLE_NAMES) {
     const table = getLocalTable(tableName)
     const allRecords = await table.toArray()
-    const unsyncedRaw = allRecords.filter((r: SyncFields) => isUnsyncedRow(r))
+    const unsyncedRaw = withoutQueueOwned(tableName, allRecords.filter((r: SyncFields) => isUnsyncedRow(r)), owned)
     const unsynced = filterUnsyncedForPush(tableName, unsyncedRaw, userId, ctx)
     if (unsynced.length > 0) return true
   }
@@ -426,8 +463,16 @@ export function isUnsyncedRow(
 /**
  * Push locally unsynced records the current user may write under RLS.
  */
+/**
+ * Reported when a sign-out or account switch wiped the mirror while this request was in flight:
+ * nothing from its response was written, so the next session's mirror holds none of the ended
+ * session's rows (and no refresh marker that would skip its first hydration).
+ */
+export const SESSION_ENDED_SYNC_ERROR = 'Sync abandoned: the session ended'
+
 export async function pushChanges(): Promise<{ pushed: number; errors: string[] }> {
   const startedAt = performance.now()
+  const epoch = currentSessionEpoch()
   let pushed = 0
   const errors: string[] = []
 
@@ -440,15 +485,13 @@ export async function pushChanges(): Promise<{ pushed: number; errors: string[] 
   }
 
   const ctx = await buildPushFilterContext(userId)
+  const owned = await queueOwnedRowKeys()
 
   for (const tableName of TABLE_NAMES) {
     const table = getLocalTable(tableName)
     const allRecords = await table.toArray()
 
-    const unsyncedRaw = allRecords.filter((r: SyncFields) => {
-      if (r.synced_at === null) return true
-      return r.updated_at > r.synced_at
-    })
+    const unsyncedRaw = withoutQueueOwned(tableName, allRecords.filter((r: SyncFields) => isUnsyncedRow(r)), owned)
 
     const unsynced = filterUnsyncedForPush(tableName, unsyncedRaw, userId, ctx)
 
@@ -504,6 +547,7 @@ export async function pushChanges(): Promise<{ pushed: number; errors: string[] 
       continue
     }
 
+    if (!isSessionEpochCurrent(epoch)) return { pushed, errors: [SESSION_ENDED_SYNC_ERROR] }
     const timestamp = now()
     if (tableName === 'item_splits') {
       for (let i = 0; i < unsynced.length; i++) {
@@ -581,6 +625,7 @@ export async function prefetchPullContext(userId: string): Promise<PullPrefetchC
  */
 export async function pullChanges(userId: string): Promise<{ pulled: number; errors: string[] }> {
   const startedAt = performance.now()
+  const epoch = currentSessionEpoch()
   let pulled = 0
   const errors: string[] = []
 
@@ -603,6 +648,7 @@ export async function pullChanges(userId: string): Promise<{ pulled: number; err
       const rows = await fetchRemoteRows(tableName, userId, prefetch)
       if (rows.length === 0) continue
 
+      if (!isSessionEpochCurrent(epoch)) return { pulled, errors: [SESSION_ENDED_SYNC_ERROR] }
       const table = getLocalTable(tableName)
 
       // Same guard as syncRoundTrip's pull-apply: never clobber a newer unsynced local edit with
@@ -617,6 +663,7 @@ export async function pullChanges(userId: string): Promise<{ pulled: number; err
         if (!shouldApplyPulledRow(existing, row.updated_at)) continue
         toPut.push({ ...(existing ?? {}), ...row, synced_at: row.updated_at })
       }
+      if (!isSessionEpochCurrent(epoch)) return { pulled, errors: [SESSION_ENDED_SYNC_ERROR] }
       if (toPut.length > 0) await table.bulkPut(toPut)
 
       pulled += rows.length
@@ -629,6 +676,7 @@ export async function pullChanges(userId: string): Promise<{ pulled: number; err
     }
   }
 
+  if (!isSessionEpochCurrent(epoch)) return { pulled, errors: [SESSION_ENDED_SYNC_ERROR] }
   if (errors.length === 0) {
     markRefreshed()
   }
@@ -819,13 +867,13 @@ export function isFullSyncInFlight(userId: string): boolean {
   return isRuntimeFlagEnabled('dedupeSyncEnabled') && fullSyncInFlight.has(userId)
 }
 
-export async function fullSync(userId: string): Promise<SyncRoundTripResult> {
+export async function fullSync(userId: string, options?: SyncRoundTripOptions): Promise<SyncRoundTripResult> {
   if (isRuntimeFlagEnabled('dedupeSyncEnabled')) {
     const running = fullSyncInFlight.get(userId)
     if (running) return running
   }
 
-  const job = withMetric('sync.fullSync', () => syncRoundTrip(userId))
+  const job = withMetric('sync.fullSync', () => syncRoundTrip(userId, options))
 
   if (!isRuntimeFlagEnabled('dedupeSyncEnabled')) {
     return job
@@ -854,9 +902,16 @@ export function isPullBundle(x: unknown): x is KwentaSyncPullBundle {
  * screens stale — which the realtime path then could not repair, since it only bumps when an
  * event finds a row that differs from the mirror.
  */
-function invalidateIfMirrorMoved(changed: number): void {
-  if (changed > 0) useAppStore.getState().bumpDataVersion()
+function invalidateIfMirrorMoved(changed: number, options: SyncRoundTripOptions | undefined): void {
+  if (changed > 0 && options?.invalidate !== false) useAppStore.getState().bumpDataVersion()
 }
+
+/**
+ * `invalidate: false` is for a caller that bumps `dataVersion` itself exactly once for a larger
+ * unit of work (a realtime batch that reconciles entities AND falls back to a sync). Whoever passes
+ * it owns that bump; a caller that JOINS a deduplicated `fullSync` gets the starter's option.
+ */
+export type SyncRoundTripOptions = { invalidate?: boolean }
 
 /**
  * One RPC: apply the push payload on the server, then return the caller's COMPLETE visible row
@@ -864,13 +919,15 @@ function invalidateIfMirrorMoved(changed: number): void {
  * mirror moved (`changed > 0`).
  * Falls back to pushChanges + pullChanges if the RPC is missing (older DB).
  */
-export async function syncRoundTrip(userId: string): Promise<SyncRoundTripResult> {
+export async function syncRoundTrip(userId: string, options?: SyncRoundTripOptions): Promise<SyncRoundTripResult> {
+  const epoch = currentSessionEpoch()
   const nothingHappened = (errors: string[] = []): SyncRoundTripResult => ({
     pushed: 0,
     pulled: 0,
     changed: 0,
     errors,
   })
+  const sessionEnded = () => nothingHappened([SESSION_ENDED_SYNC_ERROR])
 
   const {
     data: { session },
@@ -880,8 +937,10 @@ export async function syncRoundTrip(userId: string): Promise<SyncRoundTripResult
   }
 
   let ctx: PushFilterContext
+  let owned: Set<string>
   try {
     ctx = await buildPushFilterContext(userId)
+    owned = await queueOwnedRowKeys()
   } catch (err) {
     if (isDatabaseClosedError(err)) return nothingHappened()
     return nothingHappened([syncErrMessage(err)])
@@ -897,10 +956,7 @@ export async function syncRoundTrip(userId: string): Promise<SyncRoundTripResult
       if (isDatabaseClosedError(err)) return nothingHappened()
       return nothingHappened([syncErrMessage(err)])
     }
-    const unsyncedRaw = allRecords.filter((r: SyncFields) => {
-      if (r.synced_at === null) return true
-      return r.updated_at > r.synced_at
-    })
+    const unsyncedRaw = withoutQueueOwned(tableName, allRecords.filter((r: SyncFields) => isUnsyncedRow(r)), owned)
     let unsynced = filterUnsyncedForPush(tableName, unsyncedRaw, userId, ctx)
     if (tableName === 'item_splits') {
       unsynced = await Promise.all(
@@ -960,7 +1016,7 @@ export async function syncRoundTrip(userId: string): Promise<SyncRoundTripResult
     if (code === 'PGRST202' || /does not exist/i.test(msg)) {
       const pushResult = await pushChanges()
       const pullResult = await pullChanges(userId)
-      invalidateIfMirrorMoved(pullResult.pulled)
+      invalidateIfMirrorMoved(pullResult.pulled, options)
       return {
         pushed: pushResult.pushed,
         pulled: pullResult.pulled,
@@ -998,12 +1054,14 @@ export async function syncRoundTrip(userId: string): Promise<SyncRoundTripResult
   // the server's older copy: the user's edit disappears one sync later. Under the old incremental
   // cursor that stale copy was never sent, which is why this only surfaces now.
   const applied = (bundle as { applied?: Record<string, string[]> }).applied
+  if (!isSessionEpochCurrent(epoch)) return sessionEnded()
   for (const tableName of TABLE_NAMES) {
     const pushedRows = pPush[tableName]
     if (!pushedRows?.length) continue
     const table = getLocalTable(tableName)
     const echoedRows = bundleRowsById.get(tableName)
     for (const r of pushedRows) {
+      if (!isSessionEpochCurrent(epoch)) return sessionEnded()
       const rowId = (r as SyncFields).id
       const syncedAt = (r as SyncFields).updated_at
       const echo = echoedRows?.get(rowId)
@@ -1076,9 +1134,11 @@ export async function syncRoundTrip(userId: string): Promise<SyncRoundTripResult
       if (contentMoved) changed++
       toPut.push({ ...(existing ?? {}), ...row, synced_at: row.updated_at })
     }
+    if (!isSessionEpochCurrent(epoch)) return sessionEnded()
     if (toPut.length > 0) await table.bulkPut(toPut)
   }
 
+  if (!isSessionEpochCurrent(epoch)) return sessionEnded()
   markRefreshed()
 
   let pushedCount = 0
@@ -1086,7 +1146,7 @@ export async function syncRoundTrip(userId: string): Promise<SyncRoundTripResult
     pushedCount += rows.length
   }
 
-  invalidateIfMirrorMoved(changed)
+  invalidateIfMirrorMoved(changed, options)
   return { pushed: pushedCount, pulled, changed, errors: [] }
 }
 

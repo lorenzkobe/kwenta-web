@@ -72,21 +72,25 @@ BEGIN
     'bills_for_sync', 'caller_can_read_personal_bill', 'caller_is_group_member',
     'caller_is_participant_on_personal_bill', 'is_admin',
     'kwenta_balances_overview', 'kwenta_bill_detail', 'kwenta_bill_settled_for_me',
-    'kwenta_bill_settlement_history', 'kwenta_contacts_with_balances',
+    'kwenta_bill_settlement_history', 'kwenta_caller_is_active', 'kwenta_contacts_with_balances',
     'kwenta_fetch_bill_bundle', 'kwenta_fetch_group_bundle', 'kwenta_fetch_profile_for_linking',
     'kwenta_fetch_settlement', 'kwenta_group_detail', 'kwenta_group_member_breakdown',
     'kwenta_group_settlement_history', 'kwenta_group_spending', 'kwenta_groups_with_balances',
-    'kwenta_lookup_profile_id_by_email', 'kwenta_owed_in_group', 'kwenta_person_settlement_history',
-    'kwenta_person_statement', 'kwenta_person_summary', 'kwenta_personal_bills', 'kwenta_read',
+    'kwenta_lookup_profile_id_by_email', 'kwenta_my_account_status', 'kwenta_owed_in_group',
+    'kwenta_person_settlement_history', 'kwenta_person_statement', 'kwenta_person_summary',
+    'kwenta_personal_bills', 'kwenta_pre_request', 'kwenta_read',
     'kwenta_read_is_allowed', 'kwenta_recent_bills', 'kwenta_reconcile_user_event',
     'kwenta_repair_settlements', 'kwenta_round_money',
     'kwenta_search', 'kwenta_sync', 'kwenta_write', 'relevant_bill_ids_for_user'
   ]::text[], 'authenticated executes exactly the client allowlist');
 
+  -- kwenta_pre_request (076) is PostgREST's db_pre_request hook: PostgREST runs it as the request
+  -- role before EVERY call, anonymous ones included, so without EXECUTE every anon request fails.
+  -- It answers only for auth.uid() (NULL for anon: a no-op) and adds no authority.
   PERFORM test.assert_eq(test.executable_by('anon'), ARRAY[
     'caller_can_read_personal_bill', 'caller_is_group_member', 'caller_is_participant_on_personal_bill',
-    'is_admin'
-  ]::text[], 'anon executes only the helpers RLS policies call');
+    'is_admin', 'kwenta_pre_request'
+  ]::text[], 'anon executes only the helpers RLS policies call, plus the pre-request hook');
 END;
 $$;
 

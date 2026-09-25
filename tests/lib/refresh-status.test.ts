@@ -16,6 +16,7 @@ function input(overrides: Partial<RefreshStateInput> = {}): RefreshStateInput {
     isOnline: true,
     syncStatus: 'idle',
     hasPendingUpload: false,
+    hasNotApplied: false,
     pullStale: false,
     msSinceLastRefresh: 0,
     screenLoading: false,
@@ -89,6 +90,44 @@ describe('resolveRefreshState', () => {
     expect(resolveRefreshState(input({ msSinceLastRefresh: Number.POSITIVE_INFINITY }))).toBe(
       'stale',
     )
+  })
+})
+
+/**
+ * sync-realign C32: a queued write the server refused reads "Changes not applied" — never as
+ * pending forever. It sits below error (a failing sync may be why nothing drains) and above
+ * pending-upload and stale (it will not resolve on its own).
+ */
+describe('resolveRefreshState — not applied (a refused queued write)', () => {
+  it('C32: reports not-applied when a refused write is queued and nothing else is going on', () => {
+    expect(resolveRefreshState(input({ hasNotApplied: true }))).toBe('not-applied')
+  })
+
+  it('C32: not-applied outranks pending upload and staleness at once', () => {
+    expect(
+      resolveRefreshState(
+        input({
+          hasNotApplied: true,
+          hasPendingUpload: true,
+          pullStale: true,
+          msSinceLastRefresh: Number.POSITIVE_INFINITY,
+        }),
+      ),
+    ).toBe('not-applied')
+  })
+
+  it('C32: offline, syncing, updating and error outrank not-applied', () => {
+    expect(resolveRefreshState(input({ hasNotApplied: true, isOnline: false }))).toBe('offline')
+    expect(resolveRefreshState(input({ hasNotApplied: true, syncStatus: 'syncing' }))).toBe('syncing')
+    expect(resolveRefreshState(input({ hasNotApplied: true, screenLoading: true }))).toBe('updating')
+    expect(resolveRefreshState(input({ hasNotApplied: true, syncStatus: 'error' }))).toBe('error')
+  })
+
+  it('C32: stays pressable, and labels, titles and names the state', () => {
+    expect(isRefreshDisabled('not-applied')).toBe(false)
+    expect(refreshStatusLabel('not-applied', null)).toBe('Changes not applied')
+    expect(refreshTitle('not-applied', null)).toContain('Settings')
+    expect(refreshAriaLabel('not-applied', 'Updated 4m ago')).toBe('Changes not applied. Updated 4m ago')
   })
 })
 

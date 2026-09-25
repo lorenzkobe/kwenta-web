@@ -2,6 +2,7 @@ import { db } from '@/db/db'
 import type { Bill, BillItem, ItemSplit, Profile, Settlement } from '@/types'
 import { supabase } from '@/lib/supabase'
 import { formatCurrency, MONEY_EPSILON } from '@/lib/utils'
+import { currentSessionEpoch, isSessionEpochCurrent } from '@/sync/session-epoch'
 
 /**
  * Identity and display helpers over the local mirror.
@@ -103,9 +104,12 @@ export async function fetchRemoteProfileIntoDexie(profileId: string): Promise<bo
   const existing = await db.profiles.get(profileId)
   if (existing && !existing.is_deleted) return true
 
+  const epoch = currentSessionEpoch()
   const { data, error } = await supabase.rpc('kwenta_fetch_profile_for_linking', {
     p_id: profileId,
   })
+  // The mirror was wiped (sign-out, account switch) meanwhile: this profile was the ended session's.
+  if (!isSessionEpochCurrent(epoch)) return false
   if (error || !data) {
     console.warn('[linkLookup] Failed to fetch profile for local cache:', error?.message)
     return false

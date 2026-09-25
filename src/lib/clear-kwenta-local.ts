@@ -6,7 +6,10 @@ import { resetAutoRepairGuard } from '@/lib/kwenta-data-repair'
 import {
   KWENTA_LAST_REFRESH_STORAGE_KEY,
   KWENTA_LEGACY_LAST_PULL_STORAGE_KEY,
+  realtimeCursorKey,
 } from '@/lib/kwenta-storage-keys'
+import { bumpSessionEpoch } from '@/sync/session-epoch'
+import { cancelScheduledDrainRetry } from '@/sync/write-queue'
 
 export const KWENTA_LOCAL_USER_KEY = 'kwenta_local_user_id'
 
@@ -17,11 +20,22 @@ const EXTRA_KEYS = [
   'kwenta_notification_outbox_v1',
 ] as const
 
-// Per-user unread-count caches: kwenta_notifications_unread:<userId>
-const UNREAD_CACHE_PREFIX = 'kwenta_notifications_unread:'
+// Per-user keys, removed for EVERY user: unread-count caches, realtime cursors (a stale one makes
+// the next account's probe compare against someone else's server timestamp) and auto-repair stamps.
+const PER_USER_PREFIXES = [
+  'kwenta_notifications_unread:',
+  realtimeCursorKey(''),
+  'kwenta_auto_repair_at:',
+] as const
 
 /** Wipes IndexedDB and Kwenta-specific localStorage keys (after sign-out). */
 export async function clearKwentaLocalData(): Promise<void> {
+  // First, before anything is deleted: a response of the ending session that resolves from here on
+  // must not write into the mirror the next account will use.
+  bumpSessionEpoch()
+  // The queue's retry timer belongs to the ending session (its callback also checks the epoch, so
+  // this only stops a timer that would do nothing).
+  cancelScheduledDrainRetry()
   await db.delete()
   // Re-open a fresh empty DB so post-sign-out hooks don't hit DatabaseClosedError.
   await db.open().catch(() => {
@@ -45,10 +59,9 @@ export async function clearKwentaLocalData(): Promise<void> {
   for (const k of EXTRA_KEYS) {
     localStorage.removeItem(k)
   }
-  // Remove every per-user unread cache so stale counts don't leak to the next account.
   for (let i = localStorage.length - 1; i >= 0; i--) {
     const key = localStorage.key(i)
-    if (key && key.startsWith(UNREAD_CACHE_PREFIX)) {
+    if (key && PER_USER_PREFIXES.some((prefix) => key.startsWith(prefix))) {
       localStorage.removeItem(key)
     }
   }

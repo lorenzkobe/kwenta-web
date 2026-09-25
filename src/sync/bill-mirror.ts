@@ -1,5 +1,6 @@
 import { db } from '@/db/db'
 import { supabase } from '@/lib/supabase'
+import { currentSessionEpoch, isSessionEpochCurrent } from '@/sync/session-epoch'
 import type { Bill, BillItem, ItemSplit, SyncFields } from '@/types'
 
 export type BillUnavailableKind = 'not_found' | 'unreachable'
@@ -56,6 +57,7 @@ export async function loadBillIntoMirror(billId: string): Promise<void> {
   const offline = typeof navigator !== 'undefined' && !navigator.onLine
   if (offline) throw new BillUnavailableError('unreachable')
 
+  const epoch = currentSessionEpoch()
   let bundle: BillBundle | null
   try {
     const { data, error } = await supabase.rpc('kwenta_fetch_bill_bundle', { p_bill_id: billId })
@@ -65,6 +67,10 @@ export async function loadBillIntoMirror(billId: string): Promise<void> {
     throw new BillUnavailableError('unreachable')
   }
   if (!bundle?.bill) throw new BillUnavailableError('not_found')
+  // The mirror was wiped (sign-out, account switch) while this was in flight: the bill belongs to
+  // the ended session. The action that asked for it dies with that session (its write is refused
+  // by the same check in cloud-write), so nothing is written and nothing is reported.
+  if (!isSessionEpochCurrent(epoch)) return
 
   await db.transaction('rw', [db.bills, db.bill_items, db.item_splits], async () => {
     await addMissingRows(db.bills, [bundle.bill as Bill])

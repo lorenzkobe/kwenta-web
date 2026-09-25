@@ -1,5 +1,6 @@
 import { RotateCw } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
+import Dexie from 'dexie'
 import { useLiveQuery } from 'dexie-react-hooks'
 import { Button } from '@/components/ui/button'
 import { useCurrentUser } from '@/hooks/useCurrentUser'
@@ -15,11 +16,39 @@ import {
 } from '@/lib/refresh-status'
 import { cn } from '@/lib/utils'
 import { useAppStore } from '@/store/app-store'
+import { db } from '@/db/db'
 import { requestSyncNow } from '@/sync/sync-manager'
-import { getMillisecondsSinceLastRefresh, hasUnsyncedLocalDataForUser } from '@/sync/sync-service'
+import { getMillisecondsSinceLastRefresh, mayHaveStagedRows } from '@/sync/sync-service'
+import type { PendingMutationStatus } from '@/types'
 
 /** How often the "Updated 4m ago" label re-renders to age itself. */
 const FRESHNESS_TICK_MS = 30_000
+
+type UploadState = { unsent: boolean; notApplied: boolean }
+const NOTHING_QUEUED: UploadState = { unsent: false, notApplied: false }
+
+function countQueued(userId: string, status: PendingMutationStatus): Promise<number> {
+  return db.pending_mutations
+    .where('[actor_user_id+status+seq]')
+    .between([userId, status, Dexie.minKey], [userId, status, Dexie.maxKey])
+    .count()
+}
+
+/**
+ * From index counts only: this live query re-runs after every Dexie write on every screen, so a
+ * table scan here cost a full read of each synced table per write. A pending queue entry (or a
+ * never-pushed row outside the queue) is unsent; a refused one, and the entries blocked behind
+ * it, are "not applied" — they wait for the user and must not read as pending forever.
+ */
+async function readUploadState(userId: string): Promise<UploadState> {
+  const [pending, conflict, blocked, staged] = await Promise.all([
+    countQueued(userId, 'pending'),
+    countQueued(userId, 'conflict'),
+    countQueued(userId, 'blocked_by_earlier'),
+    mayHaveStagedRows(),
+  ])
+  return { unsent: pending > 0 || staged, notApplied: conflict + blocked > 0 }
+}
 
 export interface RefreshButtonProps {
   /** Render the freshness line under the label (hidden below `sm`, always in the aria-label). */
@@ -46,10 +75,10 @@ export function RefreshButton({ showLastUpdated = false, className }: RefreshBut
   const screenLoading = useScreenLoading()
   const { userId } = useCurrentUser()
 
-  const hasPendingUpload = useLiveQuery(
-    async () => (userId ? hasUnsyncedLocalDataForUser(userId) : false),
+  const upload = useLiveQuery(
+    async () => (userId ? readUploadState(userId) : NOTHING_QUEUED),
     [userId],
-    false,
+    NOTHING_QUEUED,
   )
 
   // `kwenta_last_refresh` is localStorage, so nothing re-renders when it changes. Tick slowly so
@@ -77,7 +106,8 @@ export function RefreshButton({ showLastUpdated = false, className }: RefreshBut
   const stateInput = {
     isOnline,
     syncStatus,
-    hasPendingUpload: hasPendingUpload === true,
+    hasPendingUpload: upload.unsent,
+    hasNotApplied: upload.notApplied,
     pullStale,
     msSinceLastRefresh: getMillisecondsSinceLastRefresh(),
   }
@@ -89,7 +119,8 @@ export function RefreshButton({ showLastUpdated = false, className }: RefreshBut
 
   const label = refreshStatusLabel(state, retrySeconds)
   const updated = lastUpdatedLabel(lastRefreshAt)
-  const attention = state === 'error' || state === 'stale' || state === 'pending-upload'
+  const attention =
+    state === 'error' || state === 'not-applied' || state === 'stale' || state === 'pending-upload'
   const busy = state === 'syncing' || state === 'updating'
 
   return (
