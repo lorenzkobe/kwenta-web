@@ -51,7 +51,8 @@ describe('GroupSelectionExportCard', () => {
     const text = container.textContent ?? ''
     expect(text).toContain('Balances for 2 people')
     expect(text).toContain('Pay Cha')
-    expect(text).toContain('Ana owes Ben and Ben owes Cha, so Ana pays Cha directly')
+    expect(text).toContain('of it goes Ana → Ben → Cha')
+    expect(text).not.toContain('owes')
     expect(text).toContain('Settled')
     expect(text).not.toContain('Saved copy')
   })

@@ -176,7 +176,7 @@ describe('describeGroupShareRow', () => {
     const [ana] = buildGroupShareRows({ ...g, selectedIds: new Set(['a']) })
     expect(describeGroupShareRow(ana, 'PHP')).toEqual([
       `Ana is down ${php(100)} in the group, so that is what Ana pays`,
-      `${php(100)} of it goes Ana → Ben → Cha: Ana owes Ben and Ben owes Cha, so Ana pays Cha directly`,
+      `${php(100)} of it goes Ana → Ben → Cha`,
     ])
   })
 

@@ -1065,7 +1065,7 @@ export function GroupDetailPage() {
                 className="ml-auto rounded-full"
                 onClick={selection.active ? selection.stop : selection.start}
               >
-                {selection.active ? 'Cancel' : 'Select'}
+                {selection.active ? 'Cancel' : 'Export balances'}
               </Button>
             )}
           </div>

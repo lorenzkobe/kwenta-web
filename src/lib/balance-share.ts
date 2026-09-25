@@ -124,12 +124,7 @@ export function describeGroupShareRow(row: GroupShareRow, currency: string): str
 }
 
 function describePath(path: GroupSharePath, currency: string): string {
-  const { names } = path
-  const owes = names.slice(0, -1).map((n, i) => `${n} owes ${names[i + 1]}`)
-  const chain = owes.length > 1 ? `${owes.slice(0, -1).join(', ')} and ${owes[owes.length - 1]}` : owes[0]
-  const first = names[0]
-  const last = names[names.length - 1]
-  return `${formatCurrency(path.amount, currency)} of it goes ${names.join(' → ')}: ${chain}, so ${first} pays ${last} directly`
+  return `${formatCurrency(path.amount, currency)} of it goes ${path.names.join(' → ')}`
 }
 
 export interface PeerShareRow {
