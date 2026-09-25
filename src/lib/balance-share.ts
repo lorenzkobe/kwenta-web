@@ -1,4 +1,5 @@
 import { buildMovementChains, type SuggestedPayerGroup } from '@/lib/settlement'
+import { suggestionPartyName } from '@/lib/settlement-suggestions'
 import { formatCurrency, isEffectivelyZero, roundMoney } from '@/lib/utils'
 
 /**
@@ -81,16 +82,13 @@ function paysOf(
   payer: SuggestedPayerGroup,
   rosterName: ReadonlyMap<string, string>,
 ): GroupShareRow['pays'] {
-  // The middle person is on neither end of the transfer, so only the roster can name them.
-  const nameById = new Map(rosterName)
-  nameById.set(payer.fromUserId, payer.fromName)
-  for (const r of payer.recipients) nameById.set(r.toUserId, r.toName)
+  const nameOf = suggestionPartyName(payer, rosterName)
   const chains = buildMovementChains(
     payer.legs.map((l) => ({
       fromUserId: l.fromUserId,
-      fromName: nameById.get(l.fromUserId) ?? 'Someone',
+      fromName: nameOf(l.fromUserId),
       toUserId: l.toUserId,
-      toName: nameById.get(l.toUserId) ?? 'Someone',
+      toName: nameOf(l.toUserId),
       amount: l.amount,
     })),
   )

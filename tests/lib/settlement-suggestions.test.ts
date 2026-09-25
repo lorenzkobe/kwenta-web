@@ -2,10 +2,14 @@ import { describe, expect, it } from 'vitest'
 import {
   buildDebtGraph,
   buildSuggestedPayers,
+  coveredByOtherSettleUps,
   decomposeDebtGraph,
   groupTransfersByPayer,
+  joinNames,
+  suggestionPartyName,
   type SuggestedTransfer,
 } from '@/lib/settlement-suggestions'
+import type { SuggestedPayerGroup } from '@/lib/settlement'
 
 // Sum of a member's signed position implied by a set of legs:
 // +amount when they are the payer (they pay out), -amount when they receive.
@@ -223,5 +227,161 @@ describe('buildSuggestedPayers', () => {
   it('falls back to Unknown rather than rendering a raw uuid', () => {
     const payers = buildSuggestedPayers([{ from: 'ghost', to: 'u1', amount: 5 }], () => 'Unknown')
     expect(payers[0].fromName).toBe('Unknown')
+  })
+})
+
+function payer(
+  from: string,
+  legs: [string, string, number][],
+): SuggestedPayerGroup {
+  return {
+    fromUserId: from,
+    fromName: from,
+    total: 0,
+    recipients: [],
+    legs: legs.map(([f, t, amount]) => ({ fromUserId: f, toUserId: t, amount })),
+  }
+}
+
+describe('coveredByOtherSettleUps', () => {
+  // Nek, Rince and Levi owe Vince; the suggestions route that money straight to the viewer, so
+  // their settle-ups (not Vince's) record the Vince -> Me legs for it.
+  it('attributes a member\'s leg to the viewer to the other payers that carry it', () => {
+    const covered = coveredByOtherSettleUps(
+      [
+        payer('Levi', [['Levi', 'Vince', 300], ['Vince', 'Me', 300]]),
+        payer('Nek', [['Nek', 'Vince', 600], ['Vince', 'Me', 600]]),
+        payer('Rince', [['Rince', 'Vince', 444.1], ['Vince', 'Me', 444.1]]),
+        payer('Vince', [['Vince', 'Me', 14984.05]]),
+      ],
+      'Me',
+    )
+    expect(covered.get('Vince')).toEqual({ amount: 1344.1, payerNames: ['Levi', 'Nek', 'Rince'] })
+  })
+
+  it('never counts the member\'s own settle-up or the viewer\'s', () => {
+    const covered = coveredByOtherSettleUps(
+      [
+        payer('Vince', [['Vince', 'Me', 100]]),
+        payer('Me', [['Me', 'Ana', 50], ['Ana', 'Vince', 50]]),
+      ],
+      'Me',
+    )
+    expect(covered.has('Vince')).toBe(false)
+    expect(covered.has('Ana')).toBe(false)
+  })
+
+  it('signs a viewer -> member leg carried by a third payer as negative', () => {
+    const covered = coveredByOtherSettleUps(
+      [payer('Bo', [['Bo', 'Me', 40], ['Me', 'Cy', 40]])],
+      'Me',
+    )
+    expect(covered.get('Cy')).toEqual({ amount: -40, payerNames: ['Bo'] })
+    // Bo is the payer of those legs, so Bo's own leg is not "covered by someone else".
+    expect(covered.has('Bo')).toBe(false)
+  })
+
+  it('leaves out a member whose carried legs net to zero', () => {
+    const covered = coveredByOtherSettleUps(
+      [
+        payer('Bo', [['Bo', 'Vi', 10], ['Vi', 'Me', 10]]),
+        payer('Cy', [['Cy', 'Me', 10], ['Me', 'Vi', 10]]),
+      ],
+      'Me',
+    )
+    expect(covered.has('Vi')).toBe(false)
+  })
+
+  it('returns an empty map when nobody pays', () => {
+    expect(coveredByOtherSettleUps([], 'Me').size).toBe(0)
+  })
+
+  // A cycle through the viewer is cancelled before any path is extracted, so that part of the
+  // pairwise balance rides on nobody's legs. The helper reports only what legs carry; the page
+  // phrases it as "of this", never as the whole remainder.
+  it('reports only the carried amount when a cycle through the viewer was cancelled', () => {
+    const payers = buildSuggestedPayers(
+      [
+        { from: 'Vi', to: 'Me', amount: 100 },
+        { from: 'Me', to: 'Ro', amount: 30 },
+        { from: 'Ro', to: 'Vi', amount: 30 },
+      ],
+      (id) => id,
+    )
+    const covered = coveredByOtherSettleUps(payers, 'Me')
+    expect(covered.has('Vi')).toBe(false)
+    const own = payers.find((p) => p.fromUserId === 'Vi')!
+    const ownToMe = own.legs
+      .filter((l) => l.fromUserId === 'Vi' && l.toUserId === 'Me')
+      .reduce((s, l) => s + l.amount, 0)
+    expect(ownToMe).toBe(70)
+  })
+
+  // The Manila Sept pair nets from the live database, 2026-09-25 (viewer = Kobz). Kobz has no
+  // outgoing edge, so no cycle runs through the viewer and Vince's own leg plus what other
+  // settle-ups carry must add up to his whole pairwise balance.
+  it('adds up to the member\'s pairwise balance on the Manila Sept numbers', () => {
+    const payers = buildSuggestedPayers(
+      [
+        { from: 'Eman', to: 'Kobz', amount: 3636.91 },
+        { from: 'Levi', to: 'Kobz', amount: 5677.4 },
+        { from: 'Rince', to: 'Kobz', amount: 18492.4 },
+        { from: 'Yumi', to: 'Kobz', amount: 6176.37 },
+        { from: 'Longlong', to: 'Kobz', amount: 1535.82 },
+        { from: 'Nek', to: 'Kobz', amount: 15755.07 },
+        { from: 'Nek', to: 'Rince', amount: 481.4 },
+        { from: 'Nek', to: 'Vince', amount: 600 },
+        { from: 'Vince', to: 'Kobz', amount: 16328.15 },
+        { from: 'Levi', to: 'Vince', amount: 300 },
+        { from: 'Rince', to: 'Vince', amount: 444.1 },
+        { from: 'Vince', to: 'Yumi', amount: 210 },
+      ],
+      (id) => id,
+    )
+    const covered = coveredByOtherSettleUps(payers, 'Kobz').get('Vince')
+    const vince = payers.find((p) => p.fromUserId === 'Vince')!
+    const ownToKobz = vince.legs
+      .filter((l) => l.fromUserId === 'Vince' && l.toUserId === 'Kobz')
+      .reduce((s, l) => s + Math.round(l.amount * 100), 0)
+    // How much of Nek/Rince/Levi's 1344.10 is routed on to Kobz (rather than to Yumi via Vince)
+    // depends on edge order, so the covered amount itself is not pinned here. What does not
+    // depend on routing: Vince's own payments total his net against the group (16328.15 + 210
+    // owed, 1344.10 owed to him), others' settle-ups do carry part of his balance, and the two
+    // parts add up to the pairwise figure on his row.
+    expect(vince.total).toBe(15194.05)
+    expect(covered).toBeDefined()
+    expect(covered!.amount).toBeGreaterThan(0)
+    for (const name of covered!.payerNames) expect(['Nek', 'Rince', 'Levi']).toContain(name)
+    expect(ownToKobz + Math.round(covered!.amount * 100)).toBe(1632815)
+  })
+})
+
+describe('suggestionPartyName', () => {
+  it('names the payer, recipients and a middle person, and never returns an id', () => {
+    const p: SuggestedPayerGroup = {
+      fromUserId: 'v',
+      fromName: 'Vince',
+      total: 210,
+      recipients: [{ toUserId: 'k', toName: 'Kobz', amount: 210 }],
+      legs: [
+        { fromUserId: 'v', toUserId: 'y', amount: 210 },
+        { fromUserId: 'y', toUserId: 'k', amount: 210 },
+      ],
+    }
+    const nameOf = suggestionPartyName(p, new Map([['y', 'Yumi']]))
+    expect(nameOf('v')).toBe('Vince')
+    expect(nameOf('k')).toBe('Kobz')
+    expect(nameOf('y')).toBe('Yumi')
+    expect(nameOf('ghost')).toBe('Someone')
+  })
+})
+
+describe('joinNames', () => {
+  it('joins with commas and an ampersand, and caps a long list', () => {
+    expect(joinNames([])).toBe('')
+    expect(joinNames(['Nek'])).toBe('Nek')
+    expect(joinNames(['Nek', 'Levi'])).toBe('Nek & Levi')
+    expect(joinNames(['Nek', 'Levi', 'Rince'])).toBe('Nek, Levi & Rince')
+    expect(joinNames(['A', 'B', 'C', 'D', 'E'])).toBe('A, B, C & 2 more')
   })
 })

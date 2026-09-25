@@ -48,7 +48,7 @@ import {
   type GroupSuggestionsSummary,
   type SuggestedPayerGroup,
 } from '@/lib/settlement'
-import { buildSuggestedPayers } from '@/lib/settlement-suggestions'
+import { buildSuggestedPayers, coveredByOtherSettleUps, joinNames } from '@/lib/settlement-suggestions'
 import { useCurrentUser } from '@/hooks/useCurrentUser'
 import { cn, describeError, formatCurrency } from '@/lib/utils'
 import {
@@ -839,6 +839,19 @@ export function GroupDetailPage() {
       selectedIds: selection.selected,
     })
   }, [detail.data, suggestions, selection.selected])
+  // Same precedence as the suggestions' nameOf, so one person never shows under two names.
+  const rosterName = useMemo(() => {
+    const d = detail.data
+    const names = new Map((d?.members ?? []).map((m) => [m.userId, m.profileName]))
+    for (const m of d?.memberBalances ?? []) if (m.displayName) names.set(m.userId, m.displayName)
+    return names
+  }, [detail.data])
+  // A settle-up that cuts out a middle person leaves part of that person's "owes you" to be
+  // recorded by OTHER members' settle-ups; the row and the Settle dialog say so.
+  const coveredByOthers = useMemo(
+    () => (suggestions && userId ? coveredByOtherSettleUps(suggestions.payers, userId) : null),
+    [suggestions, userId],
+  )
   const poolByUser = useMemo(
     () => new Map((detail.data?.memberBalances ?? []).map((m) => [m.userId, m.amount])),
     [detail.data],
@@ -1170,6 +1183,7 @@ export function GroupDetailPage() {
               const raw = balanceByUser.get(m.userId) ?? 0
               const rounded = Math.round(raw * 100) / 100
               const amount = Math.abs(rounded) <= 0.01 ? 0 : rounded
+              const covered = coveredByOthers?.get(m.userId)
               const amountClass =
                 amount === 0
                   ? 'text-stone-500'
@@ -1203,6 +1217,12 @@ export function GroupDetailPage() {
                           <Badge className="ml-1.5 px-2 py-0.5 text-[0.65rem] leading-none">You</Badge>
                         )}
                       </p>
+                      {amount !== 0 && covered && (
+                        <p className="text-xs text-stone-500">
+                          {formatCurrency(Math.abs(covered.amount), group.currency)} of this settles
+                          through {joinNames(covered.payerNames)}
+                        </p>
+                      )}
                     </div>
                   </button>
                   <div className="flex shrink-0 items-center gap-2">
@@ -1503,6 +1523,8 @@ export function GroupDetailPage() {
           currency={group.currency}
           markedBy={userId}
           payer={settleUpPayer}
+          rosterName={rosterName}
+          coveredByOthers={settleUpPayer ? coveredByOthers?.get(settleUpPayer.fromUserId) : undefined}
           onUsePayInto={() => { setSettleUpPayer(null); setPayIntoGroupOpen(true) }}
         />
       )}

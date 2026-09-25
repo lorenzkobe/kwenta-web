@@ -1,3 +1,5 @@
+import type { SuggestedPayerGroup } from '@/lib/settlement'
+
 export interface DebtEdge {
   from: string
   to: string
@@ -274,4 +276,70 @@ export function buildSuggestedPayers(
       legs: g.legs,
     }))
     .sort((a, b) => a.fromName.localeCompare(b.fromName))
+}
+
+/**
+ * Names every party on a suggestion's legs. A middle person is on neither end of the transfer,
+ * so only the roster can name them; an id nothing names reads as "Someone", never as the id.
+ */
+export function suggestionPartyName(
+  payer: SuggestedPayerGroup,
+  rosterName: ReadonlyMap<string, string>,
+): (userId: string) => string {
+  const nameById = new Map(rosterName)
+  nameById.set(payer.fromUserId, payer.fromName)
+  for (const r of payer.recipients) nameById.set(r.toUserId, r.toName)
+  return (userId) => nameById.get(userId) ?? 'Someone'
+}
+
+/**
+ * The part of each member's balance with the viewer that OTHER members' settle-ups record.
+ * Cutting out a middle person moves that part onto someone else's suggestion (Nek pays you
+ * directly for what Nek owes Vince, recording Vince -> you as a leg), so after the member settles
+ * their own suggestion the row still shows it until those payers settle.
+ *
+ * Signed from the viewer's side (+ the member owes the viewer). Only what legs carry: a cycle
+ * through the viewer is cancelled before paths are extracted and rides on nobody's legs, so this
+ * can explain less than the whole remainder — callers phrase it as "of this".
+ */
+export function coveredByOtherSettleUps(
+  payers: SuggestedPayerGroup[],
+  viewerId: string,
+): Map<string, { amount: number; payerNames: string[] }> {
+  const cents = new Map<string, number>()
+  const names = new Map<string, string[]>()
+  for (const p of payers) {
+    if (p.fromUserId === viewerId) continue
+    for (const leg of p.legs) {
+      let member: string
+      let signed: number
+      if (leg.toUserId === viewerId) {
+        member = leg.fromUserId
+        signed = Math.round(leg.amount * 100)
+      } else if (leg.fromUserId === viewerId) {
+        member = leg.toUserId
+        signed = -Math.round(leg.amount * 100)
+      } else {
+        continue
+      }
+      if (member === p.fromUserId) continue
+      cents.set(member, (cents.get(member) ?? 0) + signed)
+      const list = names.get(member) ?? []
+      if (!list.includes(p.fromName)) list.push(p.fromName)
+      names.set(member, list)
+    }
+  }
+  const out = new Map<string, { amount: number; payerNames: string[] }>()
+  for (const [member, c] of cents) {
+    if (c === 0) continue
+    out.set(member, { amount: c / 100, payerNames: names.get(member) ?? [] })
+  }
+  return out
+}
+
+/** "Nek", "Nek & Levi", "Nek, Levi & Rince", "Nek, Levi, Rince & 2 more". */
+export function joinNames(names: string[]): string {
+  if (names.length <= 1) return names[0] ?? ''
+  if (names.length <= 3) return `${names.slice(0, -1).join(', ')} & ${names[names.length - 1]}`
+  return `${names.slice(0, 3).join(', ')} & ${names.length - 3} more`
 }

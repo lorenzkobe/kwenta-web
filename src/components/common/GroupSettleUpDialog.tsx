@@ -5,6 +5,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { recordDecomposedSettlement } from '@/db/operations'
 import type { SuggestedPayerGroup } from '@/lib/settlement'
+import { joinNames, suggestionPartyName } from '@/lib/settlement-suggestions'
 import { formatCurrency } from '@/lib/utils'
 
 export function GroupSettleUpDialog({
@@ -14,6 +15,8 @@ export function GroupSettleUpDialog({
   currency,
   markedBy,
   payer,
+  rosterName,
+  coveredByOthers,
   onUsePayInto,
 }: {
   open: boolean
@@ -23,6 +26,10 @@ export function GroupSettleUpDialog({
   /** Signed-in user; recorded as markedBy. */
   markedBy: string
   payer: SuggestedPayerGroup | null
+  /** Group roster names: a middle person on a leg is neither the payer nor a recipient. */
+  rosterName: ReadonlyMap<string, string>
+  /** What other members' settle-ups record between this payer and the viewer (`coveredByOtherSettleUps`). */
+  coveredByOthers?: { amount: number; payerNames: string[] }
   onUsePayInto: () => void
 }) {
   const [note, setNote] = useState('')
@@ -33,6 +40,7 @@ export function GroupSettleUpDialog({
 
   // A leg whose payer isn't the physical payer means the physical payer is covering it.
   const hasOnBehalf = payer.legs.some((l) => l.fromUserId !== payer.fromUserId)
+  const nameOf = suggestionPartyName(payer, rosterName)
 
   async function handleRecord() {
     if (!payer) return
@@ -111,19 +119,21 @@ export function GroupSettleUpDialog({
                 <ul className="mt-2 space-y-1">
                   {payer.legs.map((l) => (
                     <li key={`${l.fromUserId}-${l.toUserId}`}>
-                      •{' '}
-                      {l.fromUserId === payer.fromUserId
-                        ? payer.fromName
-                        : (payer.recipients.find((r) => r.toUserId === l.fromUserId)?.toName ??
-                          l.fromUserId)}{' '}
-                      pays{' '}
-                      {payer.recipients.find((r) => r.toUserId === l.toUserId)?.toName ?? l.toUserId}{' '}
+                      • {nameOf(l.fromUserId)} pays {nameOf(l.toUserId)}{' '}
                       {formatCurrency(l.amount, currency)}
                     </li>
                   ))}
                 </ul>
               )}
             </div>
+          )}
+
+          {coveredByOthers && (
+            <p className="rounded-xl bg-stone-100/60 px-3 py-2 text-xs text-stone-500">
+              {formatCurrency(Math.abs(coveredByOthers.amount), currency)} of {payer.fromName}'s
+              balance with you stays on their row until {joinNames(coveredByOthers.payerNames)}{' '}
+              {coveredByOthers.payerNames.length === 1 ? 'settles' : 'settle'}.
+            </p>
           )}
 
           <Input
