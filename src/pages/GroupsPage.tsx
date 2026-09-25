@@ -6,7 +6,7 @@ import { useCurrentUser } from '@/hooks/useCurrentUser'
 import { createGroup } from '@/db/operations'
 import { fetchGroupsWithBalances, type GroupBalanceRow } from '@/api/balances'
 import { useServerData } from '@/hooks/useServerData'
-import { RefreshingChip, SavedCopyNotice } from '@/components/common/SavedCopyNotice'
+import { SavedCopyNotice } from '@/components/common/SavedCopyNotice'
 import { loadPhonebookRows } from '@/lib/people'
 import { formatCurrency, cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
@@ -245,7 +245,6 @@ export function GroupsPage() {
       {groupsQuery.fromCache && !groupsQuery.revalidating && groupsQuery.data && (
         <SavedCopyNotice fetchedAt={groupsQuery.fetchedAt} />
       )}
-      <RefreshingChip show={groupsQuery.revalidating} />
 
       {groupsLoading ? (
         <div className="space-y-3">

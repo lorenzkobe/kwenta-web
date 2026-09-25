@@ -11,6 +11,7 @@ import { timeAgo } from '@/lib/utils'
 export type RefreshState =
   | 'offline'
   | 'syncing'
+  | 'updating'
   | 'error'
   | 'pending-upload'
   | 'stale'
@@ -34,16 +35,20 @@ export type RefreshStateInput = {
   pullStale: boolean
   /** `Number.POSITIVE_INFINITY` when this device has never completed a refresh, or its marker is dated in the future (the clock moved back). */
   msSinceLastRefresh: number
+  /** A screen fetch has been in flight past the debounce delay (`useScreenLoading`). */
+  screenLoading: boolean
 }
 
 /**
  * Precedence matters more than any individual state: offline outranks everything (nothing can
- * be done), a sync in flight outranks a past error (it may be the recovery), and an unsent
- * write outranks mere staleness (the user's own data is the more urgent fact).
+ * be done), a sync or a screen fetch in flight outranks a past error (either may be the
+ * recovery), and an unsent write outranks mere staleness (the user's own data is the more urgent
+ * fact).
  */
 export function resolveRefreshState(input: RefreshStateInput): RefreshState {
   if (!input.isOnline) return 'offline'
   if (input.syncStatus === 'syncing') return 'syncing'
+  if (input.screenLoading) return 'updating'
   if (input.syncStatus === 'error') return 'error'
   if (input.hasPendingUpload) return 'pending-upload'
   if (input.pullStale || input.msSinceLastRefresh >= STALE_AFTER_MS) return 'stale'
@@ -51,7 +56,8 @@ export function resolveRefreshState(input: RefreshStateInput): RefreshState {
 }
 
 /**
- * Only offline and in-flight block a press.
+ * Only offline and a sync in flight block a press. A screen fetch (`updating`) does not: a press
+ * then asks for a full refresh, which is a different thing from one screen re-reading.
  *
  * In particular `error` and `stale` must stay pressable — those are exactly the states where
  * the user wants to retry, and disabling them would leave the only recovery path being to wait
@@ -67,6 +73,8 @@ export function refreshStatusLabel(state: RefreshState, retrySeconds: number | n
       return 'Offline'
     case 'syncing':
       return 'Refreshing…'
+    case 'updating':
+      return 'Updating…'
     case 'error':
       return retrySeconds !== null ? `Retry in ~${retrySeconds}s` : "Couldn't sync"
     case 'pending-upload':
@@ -93,6 +101,8 @@ export function refreshTitle(state: RefreshState, retrySeconds: number | null): 
       return "You're offline — connect to refresh your data"
     case 'syncing':
       return 'Refreshing…'
+    case 'updating':
+      return 'Updating…'
     case 'error':
       return retrySeconds !== null
         ? `Sync failed — retry in ~${retrySeconds}s (tap to retry now)`
@@ -116,6 +126,8 @@ export function refreshAriaLabel(state: RefreshState, lastUpdated: string): stri
       return 'Offline — cannot refresh'
     case 'syncing':
       return 'Refreshing'
+    case 'updating':
+      return 'Updating'
     case 'error':
       return 'Refresh data. Last sync failed'
     default:

@@ -11,7 +11,7 @@ import { ExportImageDialog } from '@/components/export/ExportImageDialog'
 import { PeopleSelectionExportCard } from '@/components/export/PeopleSelectionExportCard'
 import { loadStagedContactRows } from '@/lib/staged-rows'
 import { formatPairwiseSummary } from '@/lib/people'
-import { RefreshingChip, SavedCopyNotice } from '@/components/common/SavedCopyNotice'
+import { SavedCopyNotice } from '@/components/common/SavedCopyNotice'
 import { createLocalProfile } from '@/db/operations'
 import { useCurrentUser } from '@/hooks/useCurrentUser'
 import { cn } from '@/lib/utils'
@@ -240,7 +240,6 @@ export function PeoplePage() {
         </div>
       )}
 
-      <RefreshingChip show={contacts.revalidating} />
       {contacts.fromCache && !contacts.revalidating && contacts.data && (
         <SavedCopyNotice fetchedAt={contacts.fetchedAt} />
       )}

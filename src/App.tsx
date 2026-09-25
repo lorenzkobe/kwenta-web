@@ -101,8 +101,8 @@ function App() {
         />
         <Suspense fallback={<PageLoader />}>
           <Routes>
-            <Route path="/" element={<LandingPage />} />
             <Route element={<RequireGuest />}>
+              <Route path="/" element={<LandingPage />} />
               <Route path="/login" element={<LoginPage />} />
             </Route>
             <Route element={<RequireAuth />}>

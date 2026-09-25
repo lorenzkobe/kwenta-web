@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { useLiveQuery } from 'dexie-react-hooks'
 import { Button } from '@/components/ui/button'
 import { useCurrentUser } from '@/hooks/useCurrentUser'
+import { useScreenLoading } from '@/hooks/useScreenLoading'
 import { readLastRefreshAt } from '@/lib/kwenta-storage-keys'
 import {
   isRefreshDisabled,
@@ -42,6 +43,7 @@ export function RefreshButton({ showLastUpdated = false, className }: RefreshBut
   const syncStatus = useAppStore((s) => s.syncStatus)
   const syncRetryAt = useAppStore((s) => s.syncRetryAt)
   const pullStale = useAppStore((s) => s.pullStale)
+  const screenLoading = useScreenLoading()
   const { userId } = useCurrentUser()
 
   const hasPendingUpload = useLiveQuery(
@@ -72,17 +74,23 @@ export function RefreshButton({ showLastUpdated = false, className }: RefreshBut
 
   const retrySeconds = syncRetryAt ? Math.max(0, Math.ceil((syncRetryAt - nowMs) / 1000)) : null
 
-  const state = resolveRefreshState({
+  const stateInput = {
     isOnline,
     syncStatus,
     hasPendingUpload: hasPendingUpload === true,
     pullStale,
     msSinceLastRefresh: getMillisecondsSinceLastRefresh(),
-  })
+  }
+  const state = resolveRefreshState({ ...stateInput, screenLoading })
+  // Every screen fetch past the delay reads "Updating…", which would make a screen reader
+  // announce each navigation. The live region reports the state beneath it instead.
+  const announcedState =
+    state === 'updating' ? resolveRefreshState({ ...stateInput, screenLoading: false }) : state
 
   const label = refreshStatusLabel(state, retrySeconds)
   const updated = lastUpdatedLabel(lastRefreshAt)
   const attention = state === 'error' || state === 'stale' || state === 'pending-upload'
+  const busy = state === 'syncing' || state === 'updating'
 
   return (
     <Button
@@ -93,7 +101,7 @@ export function RefreshButton({ showLastUpdated = false, className }: RefreshBut
       onClick={() => requestSyncNow()}
       title={refreshTitle(state, retrySeconds)}
       aria-label={refreshAriaLabel(state, updated)}
-      aria-busy={state === 'syncing'}
+      aria-busy={busy}
       className={cn(
         'h-auto max-w-44 gap-2 rounded-full border-stone-200/80 bg-stone-50 px-3 py-2 text-xs font-medium text-stone-600 hover:bg-stone-100 disabled:opacity-90 sm:max-w-none',
         className,
@@ -108,14 +116,19 @@ export function RefreshButton({ showLastUpdated = false, className }: RefreshBut
         aria-hidden
         className={cn(
           'size-3 shrink-0',
-          state === 'syncing' && 'animate-spin motion-reduce:animate-none',
+          busy && 'animate-spin motion-reduce:animate-none',
           attention && 'text-amber-600',
         )}
       />
       <span className="flex min-w-0 flex-col items-start leading-tight">
-        {/* Fixed min-width: "Refreshing…" → "Refresh" must not shift the controls beside it. */}
-        <span aria-live="polite" className="min-w-[4.5rem] truncate text-left">
-          {label}
+        {/*
+          Min-width from `sm` up only: there "Refreshing…" → "Refresh" must not shift the nav
+          beside it. On a phone the reserved width left an empty gap after the short resting label,
+          so there the label takes its own width.
+        */}
+        <span className="truncate text-left sm:min-w-[4.5rem]">{label}</span>
+        <span aria-live="polite" className="sr-only">
+          {refreshStatusLabel(announcedState, retrySeconds)}
         </span>
         {showLastUpdated ? (
           <span className="hidden truncate text-[10px] font-normal text-stone-400 sm:block">

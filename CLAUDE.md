@@ -55,6 +55,8 @@ Tests are **mandatory** for this project — we create tests and run testing as 
   - `tests/lib/local-search`: the offline fallback for global search (substring/case, email match, deletions and the viewer excluded, per-kind cap keeping the newest). Authoritative search is `kwenta_search`; this can only ever be NARROWER.
   - `tests/hooks/useServerData.test.tsx`: a hook test driven by React's own `act` + `react-dom/client` (no testing-library dependency; `vitest.config.ts` sets `esbuild.jsx: 'automatic'` for it). It pins what a pure function cannot express: a subject change (`/app/people/alice` → `/bob`) clears `data`, `error` and `fromCache` so one person's balance never renders under another's name, while an invalidation TICK keeps the current data so a mutation does not blank the screen.
   - `useServerData.test.tsx` also pins the cache seed: saved copy on the first render with `revalidating`, replaced by the fetch; no seed without a cache or signed-in user, never another user's entry; access loss clears the seed while a transport failure keeps it.
+  - `useServerData.test.tsx` also pins the screen-load counter: one pair per in-flight ONLINE fetch, released on resolve, reject, access loss, unmount and going offline; a subject change or invalidation tick mid-fetch keeps ONE pair; offline fetches never count; a page does not re-render when the counter moves. `tests/store/app-store.test.ts` pins the counter's floor at 0; `tests/hooks/useScreenLoading.test.tsx` the 200 ms continuous-load debounce and the immediate drop; `tests/components/TopLoadingBar.test.tsx` the bar (screen load past the delay, or a sync); `tests/components/RefreshButton.test.tsx` "Updating…" on the same signal — spinning, `aria-busy`, still pressable, kept out of the live region, outranked by offline and syncing — and no reserved label width below `sm`; `tests/lib/refresh-status.test.ts` the `updating` rung; `tests/components/SavedCopyNotice.test.tsx` that the per-page chip is gone.
+  - `tests/app/root-route.test.tsx`: a signed-in visitor to `/` lands on `/app`; a signed-out one still sees the landing page, and neither shows while auth bootstraps.
   - `tests/components/ConfirmDialog.test.tsx`: the pending state — spinner plus `pendingLabel` (default `${confirmLabel}…`), no double fire.
   - `tests/sync/realtime-echo.test.ts`: `processEvent` reports whether it moved a row; an echo of rows Dexie already holds does not bump `dataVersion` (cursor still advances); a batch/catch-up bumps only when the round trip pushed or changed something; fallback pulls still bump.
   - `tests/db/group-members-batch.test.ts`: `addExistingGroupMembers` is ONE submit for N members (skips active members by local or account id, dedupes picks resolving to one account, nothing to add → no submit, rejection → Dexie untouched) and `createGroup(..., memberUserIds)` lands group + creator + members atomically.
@@ -503,8 +505,12 @@ NOT served from cache at all — losing access must not read as staleness.
 
 **Screens paint their saved copy first (stale-while-revalidate).** `useServerData` seeds its first
 render — and every subject change — from `readCache(endpointKey, currentUserId)` and fetches
-behind it; `revalidating` is true meanwhile and screens show `RefreshingChip` ("Updating…"), with
-`SavedCopyNotice` reserved for `fromCache && !revalidating` (the FINAL answer was the saved copy).
+behind it; `revalidating` is true meanwhile. The revalidation is marked in the header, not on the
+page: every online `useServerData` fetch holds one pair on the store's `screenLoadCount`, and
+`useScreenLoading` (true after 200 ms of continuous load, false the moment it ends) drives both
+`TopLoadingBar` and the Refresh button's "Updating…" — a per-page chip pushed each list down on
+every revisit. `SavedCopyNotice` stays reserved for `fromCache && !revalidating` (the FINAL answer
+was the saved copy).
 An access-lost `ApiError` or `ServerDeclinedError` clears the seeded copy. The seed is chosen
 during render, so a subject change never paints the previous subject for a frame.
 
@@ -780,6 +786,7 @@ Migrations are numbered; there are two `021_` files. Core RPCs:
   syncRetryAt: number | null  // unix ms for next retry
   currentUserId: string | null
   realtimeNotice: { message: string; at: number } | null
+  screenLoadCount: number     // online useServerData fetches in flight (beginScreenLoad/endScreenLoad, floored at 0)
   runtimeFlags: {
     dedupeSyncEnabled: boolean         // default true — prevent concurrent fullSync
     realtimeCatchupSingleRun: boolean  // default true — dedupe catch-up RPC
@@ -796,7 +803,7 @@ Migrations are numbered; there are two `021_` files. Core RPCs:
 
 ## Routing
 
-- `/` — Public landing page (`src/landing/`)
+- `/` — Public landing page (`src/landing/`), guest-only: a signed-in visitor is redirected to `/app` (`RequireGuest`)
 - `/login` — Auth page
 - `/app/*` — Authenticated shell (lazy routes):
   - `/app` — Home (dashboard stats, **to receive / to pay** rollups with personal vs group breakdown, quick actions, recent bills)

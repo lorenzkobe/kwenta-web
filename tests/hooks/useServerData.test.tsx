@@ -528,3 +528,230 @@ describe('useServerData cache seed (stale-while-revalidate)', () => {
     expect(seen[0].revalidating).toBe(false)
   })
 })
+
+/**
+ * loading-bar-refresh-landing. The per-page "Updating…" chip is replaced by ONE header bar driven
+ * by the store's `screenLoadCount`: every useServerData fetch that is in flight while ONLINE holds
+ * exactly one begin/end pair on it. The count has to come back to 0 on every exit path — resolve,
+ * reject, unmount, subject change, going offline — or the bar is stuck on for the session.
+ * Offline, a fetch is only the cache answering again, so it must not light the bar at all.
+ */
+const loadCount = () => useAppStore.getState().screenLoadCount
+
+function LoadProbe({
+  subject,
+  fetcher,
+  renders,
+}: {
+  subject: string
+  fetcher: (() => Promise<Payload>) | null
+  renders?: null[]
+}) {
+  useServerData(fetcher, [subject])
+  renders?.push(null)
+  return null
+}
+
+describe('useServerData screen-load counter', () => {
+  beforeEach(() => {
+    useAppStore.setState({ screenLoadCount: 0, isOnline: true })
+  })
+  afterEach(() => {
+    useAppStore.setState({ screenLoadCount: 0, isOnline: true })
+  })
+
+  it('C2: holds one load on the counter while an online fetch is in flight, released on resolve', async () => {
+    const fresh = deferred<Payload>()
+    await act(async () => {
+      root.render(<LoadProbe subject="groups" fetcher={() => fresh.promise} />)
+    })
+    expect(loadCount()).toBe(1)
+
+    await act(async () => {
+      fresh.resolve(payload([{ id: 'g1' }]))
+    })
+    expect(loadCount()).toBe(0)
+  })
+
+  it('C4: a rejected fetch releases its load', async () => {
+    const fresh = deferred<Payload>()
+    await act(async () => {
+      root.render(<LoadProbe subject="groups" fetcher={() => fresh.promise} />)
+    })
+    expect(loadCount()).toBe(1)
+
+    await act(async () => {
+      fresh.reject(new Error('Failed to fetch'))
+    })
+    expect(loadCount()).toBe(0)
+  })
+
+  it('C4: an access-lost rejection releases its load too', async () => {
+    const fresh = deferred<Payload>()
+    await act(async () => {
+      root.render(<LoadProbe subject="g1" fetcher={() => fresh.promise} />)
+    })
+    await act(async () => {
+      fresh.reject(new ApiError('You no longer have access to this group.'))
+    })
+    expect(loadCount()).toBe(0)
+  })
+
+  it('C4: unmounting mid-fetch releases its load, and the late answer does not touch the count', async () => {
+    const fresh = deferred<Payload>()
+    await act(async () => {
+      root.render(<LoadProbe subject="groups" fetcher={() => fresh.promise} />)
+    })
+    expect(loadCount()).toBe(1)
+
+    await act(async () => {
+      root.render(null)
+    })
+    expect(loadCount()).toBe(0)
+
+    await act(async () => {
+      fresh.resolve(payload([]))
+    })
+    expect(loadCount()).toBe(0)
+  })
+
+  it('C4: a subject change mid-fetch hands the load over instead of leaking one', async () => {
+    const alice = deferred<Payload>()
+    const bob = deferred<Payload>()
+    await act(async () => {
+      root.render(<LoadProbe subject="alice" fetcher={() => alice.promise} />)
+    })
+    await act(async () => {
+      root.render(<LoadProbe subject="bob" fetcher={() => bob.promise} />)
+    })
+    expect(loadCount()).toBe(1)
+
+    // Alice's superseded answer arrives: Bob is still loading, so the bar must stay.
+    await act(async () => {
+      alice.resolve(payload({ owed: 1 }))
+    })
+    expect(loadCount()).toBe(1)
+
+    await act(async () => {
+      bob.resolve(payload({ owed: 2 }))
+    })
+    expect(loadCount()).toBe(0)
+  })
+
+  it('C4: an invalidation tick during a fetch still counts ONE load, not two', async () => {
+    const first = deferred<Payload>()
+    const second = deferred<Payload>()
+    let call = 0
+    const fetcher = () => (++call === 1 ? first.promise : second.promise)
+    await act(async () => {
+      root.render(<LoadProbe subject="groups" fetcher={fetcher} />)
+    })
+    expect(loadCount()).toBe(1)
+
+    await act(async () => {
+      useAppStore.getState().bumpDataVersion()
+    })
+    expect(loadCount()).toBe(1)
+
+    await act(async () => {
+      first.resolve(payload({ n: 1 }))
+    })
+    expect(loadCount()).toBe(1)
+
+    await act(async () => {
+      second.resolve(payload({ n: 2 }))
+    })
+    expect(loadCount()).toBe(0)
+  })
+
+  it('C5: offline, a fetch (the cache answering) never touches the counter', async () => {
+    useAppStore.setState({ isOnline: false })
+    const fresh = deferred<Payload>()
+    let calls = 0
+    await act(async () => {
+      root.render(
+        <LoadProbe
+          subject="groups"
+          fetcher={() => {
+            calls++
+            return fresh.promise
+          }}
+        />,
+      )
+    })
+    // The fetch still runs — offline screens are served from cache through it.
+    expect(calls).toBe(1)
+    expect(loadCount()).toBe(0)
+
+    await act(async () => {
+      fresh.resolve({ data: [{ id: 'g1' }], fromCache: true, fetchedAt: CACHED_AT })
+    })
+    expect(loadCount()).toBe(0)
+  })
+
+  it('C5: going offline while a fetch is in flight releases its load', async () => {
+    const pending = deferred<Payload>()
+    await act(async () => {
+      root.render(<LoadProbe subject="groups" fetcher={() => pending.promise} />)
+    })
+    expect(loadCount()).toBe(1)
+
+    await act(async () => {
+      useAppStore.getState().setOnline(false)
+    })
+    expect(loadCount()).toBe(0)
+  })
+
+  it('refused: a hook with no fetcher (signed out) holds nothing', async () => {
+    await act(async () => {
+      root.render(<LoadProbe subject="" fetcher={null} />)
+    })
+    expect(loadCount()).toBe(0)
+  })
+
+  it('C10: two screens loading at once hold two loads until both finish', async () => {
+    const a = deferred<Payload>()
+    const b = deferred<Payload>()
+    await act(async () => {
+      root.render(
+        <>
+          <LoadProbe subject="overview" fetcher={() => a.promise} />
+          <LoadProbe subject="recent" fetcher={() => b.promise} />
+        </>,
+      )
+    })
+    expect(loadCount()).toBe(2)
+
+    await act(async () => {
+      a.resolve(payload({ owed: 1 }))
+    })
+    expect(loadCount()).toBe(1)
+
+    await act(async () => {
+      b.resolve(payload([]))
+    })
+    expect(loadCount()).toBe(0)
+  })
+
+  it('C11: a page using the hook does not re-render when the counter moves', async () => {
+    const renders: null[] = []
+    await act(async () => {
+      root.render(
+        <LoadProbe subject="groups" fetcher={() => Promise.resolve(payload([]))} renders={renders} />,
+      )
+    })
+    expect(loadCount()).toBe(0)
+    const settled = renders.length
+
+    // Another screen's fetches move the counter; this page must not pay a render for it.
+    await act(async () => {
+      useAppStore.getState().beginScreenLoad()
+      useAppStore.getState().beginScreenLoad()
+    })
+    await act(async () => {
+      useAppStore.getState().endScreenLoad()
+      useAppStore.getState().endScreenLoad()
+    })
+    expect(renders.length).toBe(settled)
+  })
+})

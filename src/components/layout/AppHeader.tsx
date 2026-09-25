@@ -16,6 +16,7 @@ import { cn } from '@/lib/utils'
 import { NotificationsBell } from '@/components/notifications/NotificationsBell'
 import { GlobalSearchSheet } from '@/components/common/GlobalSearchSheet'
 import { RefreshButton } from '@/components/common/RefreshButton'
+import { TopLoadingBar } from '@/components/common/TopLoadingBar'
 import { Button } from '@/components/ui/button'
 
 const baseNavItems = [
@@ -88,6 +89,7 @@ export function AppHeader() {
           </Button>
         </div>
       </div>
+      <TopLoadingBar />
     </header>
     </>
   )

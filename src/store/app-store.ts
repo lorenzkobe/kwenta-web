@@ -38,6 +38,11 @@ interface AppState {
    * to Dexie. This counter is the invalidation signal that replaces it.
    */
   dataVersion: number
+  /**
+   * Screen fetches in flight while online: each `useServerData` holds one begin/end pair. Only the
+   * header's loading bar and Refresh button subscribe, so moving it re-renders no page.
+   */
+  screenLoadCount: number
 
   setOnline: (online: boolean) => void
   setSyncStatus: (status: SyncStatus) => void
@@ -48,6 +53,8 @@ interface AppState {
   setInitialCloudHydration: (state: InitialCloudHydration) => void
   setPullStale: (stale: boolean) => void
   bumpDataVersion: () => void
+  beginScreenLoad: () => void
+  endScreenLoad: () => void
 }
 
 export const useAppStore = create<AppState>((set) => ({
@@ -59,6 +66,7 @@ export const useAppStore = create<AppState>((set) => ({
   initialCloudHydration: initialCloudHydrationFromStorage(),
   pullStale: false,
   dataVersion: 0,
+  screenLoadCount: 0,
   runtimeFlags: {
     dedupeSyncEnabled: true,
     realtimeCatchupSingleRun: true,
@@ -78,4 +86,8 @@ export const useAppStore = create<AppState>((set) => ({
   setInitialCloudHydration: (initialCloudHydration) => set({ initialCloudHydration }),
   setPullStale: (pullStale) => set({ pullStale }),
   bumpDataVersion: () => set((state) => ({ dataVersion: state.dataVersion + 1 })),
+  beginScreenLoad: () => set((state) => ({ screenLoadCount: state.screenLoadCount + 1 })),
+  // Floored: a negative balance would swallow the next load and hide the bar for it.
+  endScreenLoad: () =>
+    set((state) => ({ screenLoadCount: Math.max(0, state.screenLoadCount - 1) })),
 }))

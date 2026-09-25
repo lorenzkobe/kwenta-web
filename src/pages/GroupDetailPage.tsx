@@ -79,7 +79,7 @@ import { MemberMultiPicker } from '@/components/common/MemberMultiPicker'
 import { PayIntoGroupDialog } from '@/components/common/PayIntoGroupDialog'
 import { GroupSettleUpDialog } from '@/components/common/GroupSettleUpDialog'
 import { MemberBalancesDialog } from '@/components/common/MemberBalancesDialog'
-import { RefreshingChip, SavedCopyNotice } from '@/components/common/SavedCopyNotice'
+import { SavedCopyNotice } from '@/components/common/SavedCopyNotice'
 
 const CURRENCY_OPTIONS = [
   ['PHP', 'PHP — Philippine Peso'],
@@ -968,7 +968,6 @@ export function GroupDetailPage() {
         {detail.fromCache && !detail.revalidating && detail.data && (
           <SavedCopyNotice fetchedAt={detail.fetchedAt} />
         )}
-        <RefreshingChip show={detail.revalidating} />
         <div className="flex items-center justify-between gap-2">
           <Button asChild variant="ghost" size="sm" className="rounded-full gap-1">
             <Link to="/app/groups">

@@ -18,6 +18,7 @@ function input(overrides: Partial<RefreshStateInput> = {}): RefreshStateInput {
     hasPendingUpload: false,
     pullStale: false,
     msSinceLastRefresh: 0,
+    screenLoading: false,
     ...overrides,
   }
 }
@@ -88,6 +89,65 @@ describe('resolveRefreshState', () => {
     expect(resolveRefreshState(input({ msSinceLastRefresh: Number.POSITIVE_INFINITY }))).toBe(
       'stale',
     )
+  })
+})
+
+/**
+ * loading-bar-refresh-landing C6: a screen fetch in flight reads "Updating…" on the header button.
+ * The rung sits after offline and syncing (those are facts about the whole app / nothing can be
+ * done) and before error, pending-upload and stale (a fetch in flight may be the recovery).
+ */
+describe('resolveRefreshState — updating (screen fetch in flight)', () => {
+  it('C2: reports updating when a screen fetch is in flight and nothing else is going on', () => {
+    expect(resolveRefreshState(input({ screenLoading: true }))).toBe('updating')
+  })
+
+  it('C6: offline outranks updating', () => {
+    expect(resolveRefreshState(input({ isOnline: false, screenLoading: true }))).toBe('offline')
+  })
+
+  it('C6: syncing outranks updating', () => {
+    expect(resolveRefreshState(input({ syncStatus: 'syncing', screenLoading: true }))).toBe(
+      'syncing',
+    )
+  })
+
+  it('C6: updating outranks error, pending upload and staleness all at once', () => {
+    expect(
+      resolveRefreshState(
+        input({
+          screenLoading: true,
+          syncStatus: 'error',
+          hasPendingUpload: true,
+          pullStale: true,
+          msSinceLastRefresh: Number.POSITIVE_INFINITY,
+        }),
+      ),
+    ).toBe('updating')
+  })
+
+  it('C6: updating outranks each lower state on its own', () => {
+    expect(resolveRefreshState(input({ screenLoading: true, syncStatus: 'error' }))).toBe('updating')
+    expect(resolveRefreshState(input({ screenLoading: true, hasPendingUpload: true }))).toBe(
+      'updating',
+    )
+    expect(resolveRefreshState(input({ screenLoading: true, pullStale: true }))).toBe('updating')
+    expect(
+      resolveRefreshState(input({ screenLoading: true, msSinceLastRefresh: STALE_AFTER_MS })),
+    ).toBe('updating')
+  })
+
+  it('C6: with no screen fetch in flight the lower states are unchanged', () => {
+    expect(resolveRefreshState(input({ screenLoading: false, syncStatus: 'error' }))).toBe('error')
+    expect(resolveRefreshState(input({ screenLoading: false }))).toBe('idle')
+  })
+
+  it('C6: updating does not disable the button', () => {
+    expect(isRefreshDisabled('updating')).toBe(false)
+  })
+
+  it('C2: labels the updating state "Updating…"', () => {
+    expect(refreshStatusLabel('updating', null)).toBe('Updating…')
   })
 })
 

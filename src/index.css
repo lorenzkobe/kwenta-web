@@ -80,3 +80,13 @@ body,
     background-position: 200% 50%;
   }
 }
+
+/* Indeterminate header bar: a third-width segment sweeping from off the left edge to off the right. */
+@keyframes kwentaLoadingBar {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(300%);
+  }
+}

@@ -13,9 +13,10 @@ export type ServerDataState<T> = {
   /** When the rendered data was fetched, ISO. */
   fetchedAt: string | null
   /**
-   * True while a saved copy is on screen and the server answer for it is still in flight. A
-   * screen shows a quiet "Updating…" chip for this and keeps `SavedCopyNotice` for the case where
-   * the FINAL answer is the saved copy (`fromCache && !revalidating`).
+   * True while a saved copy is on screen and the server answer for it is still in flight. The
+   * header's loading bar and Refresh button ("Updating…") mark the revalidation itself; a screen
+   * keeps `SavedCopyNotice` for the case where the FINAL answer is the saved copy
+   * (`fromCache && !revalidating`), and may disable an action that must not act on the copy.
    */
   revalidating: boolean
   refresh: () => void
@@ -202,6 +203,17 @@ export function useServerData<T>(
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [...deps, dataVersion, manualTick, isOnline])
+
+  // One begin/end pair per in-flight online fetch, keyed on the boolean so a subject change or an
+  // invalidation tick mid-fetch keeps the pair it already holds. Offline a fetch is only the cache
+  // answering again, which is not an update the header should announce.
+  const holdsScreenLoad = view.loading && isOnline
+  useEffect(() => {
+    if (!holdsScreenLoad) return
+    const { beginScreenLoad, endScreenLoad } = useAppStore.getState()
+    beginScreenLoad()
+    return endScreenLoad
+  }, [holdsScreenLoad])
 
   const refresh = useCallback(() => setManualTick((n) => n + 1), [])
 
