@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import { readLastRefreshAt } from '@/lib/kwenta-storage-keys'
+import { readLastRefreshAt, writeLastCheckedAt } from '@/lib/kwenta-storage-keys'
 
 type SyncStatus = 'idle' | 'syncing' | 'error'
 
@@ -43,6 +43,11 @@ interface AppState {
    * header's loading bar and Refresh button subscribe, so moving it re-renders no page.
    */
   screenLoadCount: number
+  /**
+   * The last check stamped in this tab: the header's re-render signal. The stored marker
+   * (`readLastUpToDateAt`) stays the value it reads, so a wipe that removes it wins.
+   */
+  lastCheckedAt: string | null
 
   setOnline: (online: boolean) => void
   setSyncStatus: (status: SyncStatus) => void
@@ -55,6 +60,8 @@ interface AppState {
   bumpDataVersion: () => void
   beginScreenLoad: () => void
   endScreenLoad: () => void
+  /** The server just confirmed this device's copy is current without a full refresh. */
+  markServerChecked: () => void
 }
 
 export const useAppStore = create<AppState>((set) => ({
@@ -67,6 +74,7 @@ export const useAppStore = create<AppState>((set) => ({
   pullStale: false,
   dataVersion: 0,
   screenLoadCount: 0,
+  lastCheckedAt: null,
   runtimeFlags: {
     dedupeSyncEnabled: true,
     realtimeCatchupSingleRun: true,
@@ -90,4 +98,9 @@ export const useAppStore = create<AppState>((set) => ({
   // Floored: a negative balance would swallow the next load and hide the bar for it.
   endScreenLoad: () =>
     set((state) => ({ screenLoadCount: Math.max(0, state.screenLoadCount - 1) })),
+  markServerChecked: () => {
+    const at = new Date().toISOString()
+    writeLastCheckedAt(at)
+    set({ lastCheckedAt: at })
+  },
 }))

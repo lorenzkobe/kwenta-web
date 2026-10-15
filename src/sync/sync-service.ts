@@ -3,7 +3,7 @@ import { db } from '@/db/db'
 import { supabase } from '@/lib/supabase'
 import { captureMetric, withMetric } from '@/lib/client-metrics'
 import { isRuntimeFlagEnabled } from '@/lib/runtime-flags'
-import { KWENTA_LAST_REFRESH_STORAGE_KEY, readLastRefreshAt } from '@/lib/kwenta-storage-keys'
+import { KWENTA_LAST_REFRESH_STORAGE_KEY, readLastRefreshAt, readLastUpToDateAt } from '@/lib/kwenta-storage-keys'
 import { useAppStore } from '@/store/app-store'
 import { currentSessionEpoch, isSessionEpochCurrent } from '@/sync/session-epoch'
 import { describeError, now } from '@/lib/utils'
@@ -166,9 +166,25 @@ export function shouldApplyPulledRow(
  * hide a row.
  */
 export function getMillisecondsSinceLastRefresh(): number {
-  const v = readLastRefreshAt()
-  if (!v) return Number.POSITIVE_INFINITY
-  const t = Date.parse(v)
+  return millisecondsSince(readLastRefreshAt())
+}
+
+/**
+ * How long the event log can be trusted to say what changed since the server last vouched for this
+ * copy. 073's housekeeping hard-deletes events older than 30 days, so past this a catch-up could
+ * miss changes silently and an open takes the complete bundle instead (pinned against 073 in
+ * tests/build/event-log-retention.test.ts).
+ */
+export const EVENT_LOG_TRUST_MS = 25 * 24 * 60 * 60 * 1000
+
+/** Time since the server last vouched for this copy: a full refresh, or a check that found it current. */
+export function getMillisecondsSinceUpToDate(): number {
+  return millisecondsSince(readLastUpToDateAt())
+}
+
+function millisecondsSince(iso: string | null): number {
+  if (!iso) return Number.POSITIVE_INFINITY
+  const t = Date.parse(iso)
   if (Number.isNaN(t)) return Number.POSITIVE_INFINITY
   // A marker in the future means the clock moved backwards since it was stamped. Reading it as
   // "just refreshed" would switch the staleness bounds off until real time caught up; one sync

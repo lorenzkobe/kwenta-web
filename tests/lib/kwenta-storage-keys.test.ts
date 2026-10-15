@@ -1,8 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
+  KWENTA_LAST_CHECKED_STORAGE_KEY,
   KWENTA_LAST_REFRESH_STORAGE_KEY,
   KWENTA_LEGACY_LAST_PULL_STORAGE_KEY,
+  advanceRealtimeCursor,
   readLastRefreshAt,
+  readLastUpToDateAt,
   readRealtimeCursor,
   realtimeCursorKey,
 } from '@/lib/kwenta-storage-keys'
@@ -95,5 +98,51 @@ describe('readRealtimeCursor', () => {
     } finally {
       Object.defineProperty(localStorage, 'getItem', { configurable: true, writable: true, value: originalGet })
     }
+  })
+})
+
+describe('readLastUpToDateAt', () => {
+  it('is null with neither marker', () => {
+    expect(readLastUpToDateAt()).toBeNull()
+  })
+
+  it('is the newer of the full refresh and the check', () => {
+    localStorage.setItem(KWENTA_LAST_REFRESH_STORAGE_KEY, '2026-10-01T00:00:00.000Z')
+    localStorage.setItem(KWENTA_LAST_CHECKED_STORAGE_KEY, '2026-10-05T00:00:00.000Z')
+    expect(readLastUpToDateAt()).toBe('2026-10-05T00:00:00.000Z')
+    localStorage.setItem(KWENTA_LAST_CHECKED_STORAGE_KEY, '2026-09-01T00:00:00.000Z')
+    expect(readLastUpToDateAt()).toBe('2026-10-01T00:00:00.000Z')
+  })
+
+  it('ignores a check marker dated in the future (the clock moved back)', () => {
+    localStorage.setItem(KWENTA_LAST_REFRESH_STORAGE_KEY, '2026-10-01T00:00:00.000Z')
+    localStorage.setItem(KWENTA_LAST_CHECKED_STORAGE_KEY, new Date(Date.now() + 3600_000).toISOString())
+    expect(readLastUpToDateAt()).toBe('2026-10-01T00:00:00.000Z')
+  })
+
+  it('ignores an unparseable check marker', () => {
+    localStorage.setItem(KWENTA_LAST_REFRESH_STORAGE_KEY, '2026-10-01T00:00:00.000Z')
+    localStorage.setItem(KWENTA_LAST_CHECKED_STORAGE_KEY, 'garbage')
+    expect(readLastUpToDateAt()).toBe('2026-10-01T00:00:00.000Z')
+  })
+
+  it('survives storage that throws on read', () => {
+    vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => {
+      throw new Error('blocked')
+    })
+    expect(readLastUpToDateAt()).toBeNull()
+  })
+})
+
+describe('advanceRealtimeCursor', () => {
+  it('moves forward and never back', () => {
+    advanceRealtimeCursor('u', '2026-10-02T00:00:00+00:00')
+    expect(readRealtimeCursor('u')).toBe('2026-10-02T00:00:00+00:00')
+    advanceRealtimeCursor('u', '2026-10-01T00:00:00+00:00')
+    expect(readRealtimeCursor('u')).toBe('2026-10-02T00:00:00+00:00')
+    advanceRealtimeCursor('u', null)
+    expect(readRealtimeCursor('u')).toBe('2026-10-02T00:00:00+00:00')
+    advanceRealtimeCursor('u', '2026-10-03T00:00:00+00:00')
+    expect(readRealtimeCursor('u')).toBe('2026-10-03T00:00:00+00:00')
   })
 })

@@ -55,6 +55,10 @@ const h = vi.hoisted(() => {
     joined: false,
     /** Order of the newest-event read and the full sync (H1.6: read BEFORE the sync). */
     log: [] as string[],
+    /** Runs once after the next ascending catch-up read (e.g. the manager moving the cursor meanwhile). */
+    afterCatchUpRead: null as null | (() => void),
+    /** An error the ascending catch-up read answers with instead of rows. */
+    catchUpError: null as null | { message: string },
   }
   const rpc = vi.fn(async (fn: string) => {
     const answer = state.rpcAnswer[fn]
@@ -84,10 +88,17 @@ vi.mock('@/lib/supabase', () => {
       limit: async (...a: unknown[]) => {
         calls.push(['limit', ...a])
         const desc = calls.some((c) => c[0] === 'order' && (c[2] as { ascending?: boolean } | undefined)?.ascending === false)
-        const rows = [...(h.state.catchUpEvents as Array<{ created_at: string }>)].sort((x, y) =>
-          desc ? y.created_at.localeCompare(x.created_at) : x.created_at.localeCompare(y.created_at),
-        )
+        const after = calls.find((c) => c[0] === 'gt')?.[2] as string | undefined
+        const rows = (h.state.catchUpEvents as Array<{ created_at: string }>)
+          .filter((r) => after === undefined || r.created_at > after)
+          .sort((x, y) => (desc ? y.created_at.localeCompare(x.created_at) : x.created_at.localeCompare(y.created_at)))
         if (desc && a[0] === 1) h.state.log.push('newest')
+        if (!desc && h.state.catchUpError) return { data: null, error: h.state.catchUpError }
+        if (!desc && h.state.afterCatchUpRead) {
+          const hook = h.state.afterCatchUpRead
+          h.state.afterCatchUpRead = null
+          hook()
+        }
         return { data: rows.slice(0, typeof a[0] === 'number' ? a[0] : rows.length), error: null }
       },
     }
@@ -163,6 +174,7 @@ vi.mock('@/lib/client-metrics', () => ({
 import { processEvent, startRealtimeForUser } from '@/sync/realtime-events'
 import { clearRealtimeProcessingFailed, realtimeProcessingFailed } from '@/sync/realtime-health'
 import { bumpSessionEpoch } from '@/sync/session-epoch'
+import { KWENTA_LAST_CHECKED_STORAGE_KEY } from '@/lib/kwenta-storage-keys'
 
 const USER = 'ME'
 /** Either full-bundle path (fullSync or a bare syncRoundTrip) — both cost the complete bundle. */
@@ -239,6 +251,8 @@ beforeEach(async () => {
   h.state.onStatus = null
   h.state.joined = false
   h.state.log = []
+  h.state.afterCatchUpRead = null
+  h.state.catchUpError = null
   h.state.flags = {
     targetedRealtimeReconcile: true,
     coalesceRealtimeBatch: true,
@@ -1094,6 +1108,86 @@ describe('sync-realign: per-entity reconcile', () => {
     await settle()
     expect(fullSyncs()).toBe(1)
     expect(reconciles()).toHaveLength(0)
+  })
+
+  it('a >50 catch-up whose cursor moved meanwhile catches up from the new cursor instead of a second full sync', async () => {
+    // The manager's own full sync advanced the cursor while this catch-up read the old backlog.
+    localStorage.setItem(CURSOR_KEY, '2026-09-23T09:00:00.000Z')
+    h.state.catchUpEvents = missedAcrossBills(60)
+    h.state.afterCatchUpRead = () => localStorage.setItem(CURSOR_KEY, ts(57))
+    reconcileMovesSplit()
+    stop = startRealtimeForUser(USER)
+    await vi.waitFor(() => expect(localStorage.getItem(CURSOR_KEY)).toBe(ts(59)))
+    await settle()
+    expect(fullSyncs()).toBe(0)
+    expect(reconciles()).toHaveLength(2)
+  })
+
+  it('a catch-up that drained cleanly stamps the check marker; an empty one does too', async () => {
+    localStorage.setItem(CURSOR_KEY, '2026-09-23T09:00:00.000Z')
+    localStorage.setItem('kwenta_last_refresh', new Date(Date.now() - 3 * 24 * 3600_000).toISOString())
+    h.state.catchUpEvents = missedAcrossBills(5)
+    reconcileMovesSplit()
+    stop = startRealtimeForUser(USER)
+    await vi.waitFor(() => expect(localStorage.getItem(KWENTA_LAST_CHECKED_STORAGE_KEY)).not.toBeNull())
+    stop()
+    stop = null
+
+    localStorage.removeItem(KWENTA_LAST_CHECKED_STORAGE_KEY)
+    h.state.catchUpEvents = []
+    stop = startRealtimeForUser(USER)
+    await vi.waitFor(() => expect(localStorage.getItem(KWENTA_LAST_CHECKED_STORAGE_KEY)).not.toBeNull())
+  })
+
+  it('a catch-up whose query failed stamps no check marker', async () => {
+    localStorage.setItem(CURSOR_KEY, '2026-09-23T09:00:00.000Z')
+    h.state.catchUpError = { message: 'boom' }
+    stop = startRealtimeForUser(USER)
+    await vi.waitFor(() =>
+      expect(h.state.queries.some((q) => q.some((c) => c[0] === 'gt'))).toBe(true),
+    )
+    await settle()
+    expect(localStorage.getItem(KWENTA_LAST_CHECKED_STORAGE_KEY)).toBeNull()
+  })
+
+  it('a clean catch-up after more than 25 days without a vouch stamps no check: the log may be pruned', async () => {
+    // Otherwise it could land before the open's gate and talk it out of the complete bundle.
+    localStorage.setItem(CURSOR_KEY, '2026-09-23T09:00:00.000Z')
+    localStorage.setItem('kwenta_last_refresh', new Date(Date.now() - 26 * 24 * 3600_000).toISOString())
+    h.state.catchUpEvents = []
+    stop = startRealtimeForUser(USER)
+    await vi.waitFor(() =>
+      expect(h.state.queries.some((q) => q.some((c) => c[0] === 'gt'))).toBe(true),
+    )
+    await settle()
+    expect(localStorage.getItem(KWENTA_LAST_CHECKED_STORAGE_KEY)).toBeNull()
+  })
+
+  it('a catch-up whose apply failed stamps no check marker', async () => {
+    localStorage.setItem(CURSOR_KEY, '2026-09-23T09:00:00.000Z')
+    h.state.catchUpEvents = missedAcrossBills(5)
+    h.state.rpcAnswer.kwenta_reconcile_user_event = async () => ({ data: null, error: { message: 'boom' } })
+    h.state.syncResult = { pushed: 0, pulled: 0, changed: 0, errors: ['fallback failed'] }
+    stop = startRealtimeForUser(USER)
+    await vi.waitFor(() => expect(fullSyncs()).toBe(1))
+    await settle()
+    expect(realtimeProcessingFailed()).toBe(true)
+    expect(localStorage.getItem(KWENTA_LAST_CHECKED_STORAGE_KEY)).toBeNull()
+  })
+
+  it('a catch-up that ends with its session stamps no check marker', async () => {
+    localStorage.setItem(CURSOR_KEY, '2026-09-23T09:00:00.000Z')
+    h.state.catchUpEvents = missedAcrossBills(5)
+    let release!: () => void
+    h.state.rpcAnswer.kwenta_reconcile_user_event = () =>
+      new Promise((r) => (release = () => r({ data: null, error: null })))
+    stop = startRealtimeForUser(USER)
+    await vi.waitFor(() => expect(reconciles().length).toBeGreaterThan(0))
+    stop()
+    stop = null
+    release()
+    await settle()
+    expect(localStorage.getItem(KWENTA_LAST_CHECKED_STORAGE_KEY)).toBeNull()
   })
 
   it('C35: an account with no user events gets cursor PULL_SINCE_EPOCH and no sync', async () => {

@@ -1,6 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { useAppStore } from '@/store/app-store'
-import { KWENTA_LAST_REFRESH_STORAGE_KEY, realtimeCursorKey } from '@/lib/kwenta-storage-keys'
+import {
+  KWENTA_LAST_CHECKED_STORAGE_KEY,
+  KWENTA_LAST_REFRESH_STORAGE_KEY,
+  realtimeCursorKey,
+} from '@/lib/kwenta-storage-keys'
 import {
   clearRealtimeProcessingFailed,
   markRealtimeProcessingFailed,
@@ -43,6 +47,7 @@ const mocks = vi.hoisted(() => ({
   syncRoundTrip: vi.fn(async () => ({ pushed: 0, pulled: 0, changed: 0, errors: [] as string[] })),
   hasUnsyncedLocalDataForUser: vi.fn(async () => false),
   getMillisecondsSinceLastRefresh: vi.fn(() => 0),
+  getMillisecondsSinceUpToDate: vi.fn(() => 0),
   newestUserEventSince: vi.fn<(userId: string, since: string) => Promise<{ newer: boolean; newest: string | null }>>(
     async () => ({ newer: false, newest: null }),
   ),
@@ -105,6 +110,10 @@ vi.mock('@/sync/write-queue', () => ({
 }))
 
 const ACTIVATION_REFRESH_MIN_INTERVAL_MS = 5_000
+const HOUR = 60 * 60 * 1000
+const DAY = 24 * HOUR
+/** 073 prunes events after 30 days; past this the event log may have holes. */
+const EVENT_LOG_TRUST_MS = 25 * DAY
 
 /** Let the fire-and-forget runSync chain settle. */
 async function settle() {
@@ -135,6 +144,7 @@ beforeEach(() => {
   mocks.syncRoundTrip.mockResolvedValue({ pushed: 0, pulled: 0, changed: 0, errors: [] })
   mocks.hasUnsyncedLocalDataForUser.mockResolvedValue(false)
   mocks.getMillisecondsSinceLastRefresh.mockReturnValue(0)
+  mocks.getMillisecondsSinceUpToDate.mockReturnValue(0)
   mocks.newestUserEventSince.mockResolvedValue({ newer: false, newest: null })
   mocks.mayHaveStagedRows.mockResolvedValue(false)
   mocks.isFullSyncInFlight.mockReturnValue(false)
@@ -397,13 +407,16 @@ describe('returning to the tab: probe before syncing', () => {
     expect(mocks.newestUserEventSince).not.toHaveBeenCalled()
   })
 
-  it('C4: a refresh 60 minutes old syncs even with no event (event-less changes)', async () => {
+  it('a refresh 60 minutes old only probes now: time away alone no longer forces the full bundle', async () => {
+    // Changed on purpose (fast app open): this used to be a full sync on every open past 60
+    // minutes. The event log answers what changed; the safety refresh moved to the backup tick.
     withCursor()
     await startManager()
     mocks.getMillisecondsSinceLastRefresh.mockReturnValue(60 * 60 * 1000)
+    mocks.getMillisecondsSinceUpToDate.mockReturnValue(60 * 60 * 1000)
     await focus()
-    expect(mocks.fullSync).toHaveBeenCalledTimes(1)
-    expect(mocks.newestUserEventSince).not.toHaveBeenCalled()
+    expect(mocks.fullSync).not.toHaveBeenCalled()
+    expect(mocks.newestUserEventSince).toHaveBeenCalledTimes(1)
   })
 
   it('C4: a refresh 59 minutes old only probes', async () => {
@@ -472,8 +485,10 @@ describe('returning to the tab: probe before syncing', () => {
     withCursor()
     await startManager()
     mocks.hasUnsyncedLocalDataForUser.mockClear()
-    mocks.getMillisecondsSinceLastRefresh.mockReturnValue(60 * 60 * 1000)
+    // A failed realtime apply is a cheap check (the age rule now probes for the cursor first).
+    markRealtimeProcessingFailed()
     await focus()
+    expect(mocks.fullSync).toHaveBeenCalledTimes(1)
     expect(mocks.hasUnsyncedLocalDataForUser).not.toHaveBeenCalled()
     expect(mocks.newestUserEventSince).not.toHaveBeenCalled()
   })
@@ -502,7 +517,7 @@ describe('returning to the tab: probe before syncing', () => {
     mocks.newestUserEventSince.mockResolvedValue({ newer: true, newest: '2026-09-24T02:00:00+00:00' })
     mocks.fullSync.mockResolvedValue({ pushed: 0, pulled: 0, changed: 0, errors: ['boom'] })
     await startManager()
-    mocks.getMillisecondsSinceLastRefresh.mockReturnValue(60 * 60 * 1000)
+    mocks.getMillisecondsSinceUpToDate.mockReturnValue(EVENT_LOG_TRUST_MS)
     await focus()
     expect(mocks.fullSync).toHaveBeenCalledTimes(1)
     expect(localStorage.getItem(realtimeCursorKey('me'))).toBe(CURSOR)
@@ -512,7 +527,7 @@ describe('returning to the tab: probe before syncing', () => {
     withCursor()
     mocks.newestUserEventSince.mockResolvedValue({ newer: true, newest: '2026-09-23T00:00:00+00:00' })
     await startManager()
-    mocks.getMillisecondsSinceLastRefresh.mockReturnValue(60 * 60 * 1000)
+    mocks.getMillisecondsSinceUpToDate.mockReturnValue(EVENT_LOG_TRUST_MS)
     await focus()
     expect(localStorage.getItem(realtimeCursorKey('me'))).toBe(CURSOR)
   })
@@ -528,7 +543,7 @@ describe('returning to the tab: probe before syncing', () => {
   it('a failure marked while a sync is running survives that sync', async () => {
     withCursor()
     await startManager()
-    mocks.getMillisecondsSinceLastRefresh.mockReturnValue(60 * 60 * 1000)
+    mocks.getMillisecondsSinceUpToDate.mockReturnValue(EVENT_LOG_TRUST_MS)
     mocks.fullSync.mockImplementation(async () => {
       markRealtimeProcessingFailed()
       return { pushed: 0, pulled: 0, changed: 0, errors: [] }
@@ -616,8 +631,13 @@ describe('sync-realign: startup gate, 60-minute safety refresh, no duplicate', (
     localStorage.removeItem(KWENTA_LAST_REFRESH_STORAGE_KEY)
     localStorage.setItem(realtimeCursorKey('me'), CURSOR)
     mocks.getMillisecondsSinceLastRefresh.mockReturnValue(Number.POSITIVE_INFINITY)
+    const statuses: string[] = []
+    const unsubscribe = useAppStore.subscribe((s) => statuses.push(s.syncStatus))
     stopSyncManager = startSyncManager()
     await drain()
+    unsubscribe()
+    // The first hydration is not quiet: the loading bar shows while it runs.
+    expect(statuses).toContain('syncing')
     expect(mocks.syncRoundTrip).toHaveBeenCalledTimes(1)
     expect(mocks.fullSync).not.toHaveBeenCalled()
     expect(mocks.newestUserEventSince).not.toHaveBeenCalled()
@@ -651,15 +671,69 @@ describe('sync-realign: startup gate, 60-minute safety refresh, no duplicate', (
     expect(mocks.newestUserEventSince).toHaveBeenCalledTimes(1)
   })
 
-  it('C4: on start, a marker 60 minutes old runs one full sync', async () => {
+  it('on start, a marker a week old with nothing newer makes one probe and no full sync', async () => {
+    // Changed on purpose (fast app open): a marker 60 minutes old used to cost the complete bundle.
     localStorage.setItem(realtimeCursorKey('me'), CURSOR)
-    mocks.getMillisecondsSinceLastRefresh.mockReturnValue(60 * MIN)
+    mocks.getMillisecondsSinceLastRefresh.mockReturnValue(7 * DAY)
+    mocks.getMillisecondsSinceUpToDate.mockReturnValue(7 * DAY)
+    stopSyncManager = startSyncManager()
+    await drain()
+    expect(fullSyncCount()).toBe(0)
+    expect(mocks.newestUserEventSince).toHaveBeenCalledTimes(1)
+    expect(localStorage.getItem(KWENTA_LAST_CHECKED_STORAGE_KEY)).not.toBeNull()
+  })
+
+  it('on start, 2 h and 23 h since the last full refresh only probe', async () => {
+    for (const age of [2 * HOUR, 23 * HOUR]) {
+      stopSyncManager?.()
+      for (const m of Object.values(mocks)) m.mockClear()
+      localStorage.setItem(realtimeCursorKey('me'), CURSOR)
+      mocks.getMillisecondsSinceLastRefresh.mockReturnValue(age)
+      mocks.getMillisecondsSinceUpToDate.mockReturnValue(age)
+      stopSyncManager = startSyncManager()
+      await drain()
+      expect(fullSyncCount(), `age ${age}`).toBe(0)
+      expect(mocks.newestUserEventSince, `age ${age}`).toHaveBeenCalledTimes(1)
+    }
+  })
+
+  it('on start, 25 days since the server last confirmed this copy runs one full sync; just under only probes', async () => {
+    localStorage.setItem(realtimeCursorKey('me'), CURSOR)
+    mocks.getMillisecondsSinceLastRefresh.mockReturnValue(EVENT_LOG_TRUST_MS - 1)
+    mocks.getMillisecondsSinceUpToDate.mockReturnValue(EVENT_LOG_TRUST_MS - 1)
+    stopSyncManager = startSyncManager()
+    await drain()
+    expect(fullSyncCount()).toBe(0)
+
+    stopSyncManager()
+    for (const m of Object.values(mocks)) m.mockClear()
+    mocks.getMillisecondsSinceLastRefresh.mockReturnValue(EVENT_LOG_TRUST_MS)
+    mocks.getMillisecondsSinceUpToDate.mockReturnValue(EVENT_LOG_TRUST_MS)
     stopSyncManager = startSyncManager()
     await drain()
     expect(fullSyncCount()).toBe(1)
   })
 
-  it('C4: the backup tick does not full-sync at 59 minutes with nothing staged, and does at 60', async () => {
+  it('a recent check keeps an old full-refresh marker from forcing the full sync on open', async () => {
+    localStorage.setItem(realtimeCursorKey('me'), CURSOR)
+    mocks.getMillisecondsSinceLastRefresh.mockReturnValue(26 * DAY)
+    mocks.getMillisecondsSinceUpToDate.mockReturnValue(2 * HOUR)
+    stopSyncManager = startSyncManager()
+    await drain()
+    expect(fullSyncCount()).toBe(0)
+    expect(mocks.newestUserEventSince).toHaveBeenCalledTimes(1)
+  })
+
+  it('a probe that fails open (newer, newest unknown) stamps no check', async () => {
+    localStorage.setItem(realtimeCursorKey('me'), CURSOR)
+    mocks.newestUserEventSince.mockResolvedValue({ newer: true, newest: null })
+    stopSyncManager = startSyncManager()
+    await drain()
+    expect(localStorage.getItem(KWENTA_LAST_CHECKED_STORAGE_KEY)).toBeNull()
+    expect(mocks.requestRealtimeCatchUp).toHaveBeenCalledTimes(1)
+  })
+
+  it('the backup tick runs the safety refresh at 24 h, not before, and without the loading bar', async () => {
     localStorage.setItem(realtimeCursorKey('me'), CURSOR)
     mocks.getMillisecondsSinceLastRefresh.mockReturnValue(2 * MIN)
     stopSyncManager = startSyncManager()
@@ -667,15 +741,173 @@ describe('sync-realign: startup gate, 60-minute safety refresh, no duplicate', (
     mocks.fullSync.mockClear()
     mocks.syncRoundTrip.mockClear()
 
-    mocks.getMillisecondsSinceLastRefresh.mockReturnValue(59 * MIN)
+    mocks.getMillisecondsSinceLastRefresh.mockReturnValue(DAY - 1)
     vi.advanceTimersByTime(5 * MIN)
     await drain()
     expect(fullSyncCount()).toBe(0)
 
-    mocks.getMillisecondsSinceLastRefresh.mockReturnValue(60 * MIN)
+    const statuses: string[] = []
+    const unsubscribe = useAppStore.subscribe((s) => statuses.push(s.syncStatus))
+    mocks.getMillisecondsSinceLastRefresh.mockReturnValue(DAY)
     vi.advanceTimersByTime(5 * MIN)
     await drain()
+    unsubscribe()
     expect(fullSyncCount()).toBe(1)
+    expect(statuses).not.toContain('syncing')
+  })
+
+  it('a start with a day-old full refresh schedules ONE quiet safety refresh a minute later', async () => {
+    localStorage.setItem(realtimeCursorKey('me'), CURSOR)
+    mocks.getMillisecondsSinceLastRefresh.mockReturnValue(DAY)
+    mocks.getMillisecondsSinceUpToDate.mockReturnValue(2 * HOUR)
+    stopSyncManager = startSyncManager()
+    await drain()
+    expect(fullSyncCount()).toBe(0)
+
+    const statuses: string[] = []
+    const unsubscribe = useAppStore.subscribe((s) => statuses.push(s.syncStatus))
+    vi.advanceTimersByTime(60_000)
+    await drain()
+    unsubscribe()
+    expect(fullSyncCount()).toBe(1)
+    expect(statuses).not.toContain('syncing')
+
+    vi.advanceTimersByTime(60_000)
+    await drain()
+    expect(fullSyncCount()).toBe(1)
+  })
+
+  it('stopping the manager cancels the pending safety refresh; a fresh marker schedules none', async () => {
+    localStorage.setItem(realtimeCursorKey('me'), CURSOR)
+    mocks.getMillisecondsSinceLastRefresh.mockReturnValue(DAY)
+    stopSyncManager = startSyncManager()
+    await drain()
+    stopSyncManager()
+    stopSyncManager = null
+    vi.advanceTimersByTime(60_000)
+    await drain()
+    expect(fullSyncCount()).toBe(0)
+
+    mocks.getMillisecondsSinceLastRefresh.mockReturnValue(2 * HOUR)
+    stopSyncManager = startSyncManager()
+    await drain()
+    vi.advanceTimersByTime(60_000)
+    await drain()
+    expect(fullSyncCount()).toBe(0)
+  })
+
+  it('Refresh pressed during a quiet safety sync shows Refreshing at once and runs ONE user sync after it', async () => {
+    localStorage.setItem(realtimeCursorKey('me'), CURSOR)
+    mocks.getMillisecondsSinceLastRefresh.mockReturnValue(2 * MIN)
+    stopSyncManager = startSyncManager()
+    await drain()
+    for (const m of Object.values(mocks)) m.mockClear()
+
+    let release!: () => void
+    mocks.fullSync.mockImplementationOnce(
+      () => new Promise((r) => (release = () => r({ pushed: 0, pulled: 0, changed: 0, errors: [] }))),
+    )
+    mocks.getMillisecondsSinceLastRefresh.mockReturnValue(DAY)
+    vi.advanceTimersByTime(5 * MIN)
+    await vi.waitFor(() => expect(mocks.fullSync).toHaveBeenCalledTimes(1))
+    expect(useAppStore.getState().syncStatus).toBe('idle')
+
+    requestSyncNow()
+    await settle()
+    expect(useAppStore.getState().syncStatus).toBe('syncing')
+    const version = useAppStore.getState().dataVersion
+    release()
+    await drain()
+    expect(mocks.fullSync).toHaveBeenCalledTimes(2)
+    expect(mocks.drainWriteQueue).toHaveBeenCalledWith('me', { ignoreBackoff: true })
+    // The rerun is the user's Refresh: it re-reads the screens even though nothing moved.
+    expect(useAppStore.getState().dataVersion).toBeGreaterThan(version)
+    expect(useAppStore.getState().syncStatus).toBe('idle')
+  })
+
+  it('a quiet safety sync that fails sets no error, no stale flag and no retry; the next tick tries again', async () => {
+    localStorage.setItem(realtimeCursorKey('me'), CURSOR)
+    mocks.getMillisecondsSinceLastRefresh.mockReturnValue(2 * MIN)
+    stopSyncManager = startSyncManager()
+    await drain()
+    for (const m of Object.values(mocks)) m.mockClear()
+
+    mocks.fullSync.mockResolvedValue({ pushed: 0, pulled: 0, changed: 0, errors: ['offline-ish'] })
+    mocks.getMillisecondsSinceLastRefresh.mockReturnValue(DAY)
+    const statuses: string[] = []
+    const unsubscribe = useAppStore.subscribe((s) => statuses.push(s.syncStatus))
+    vi.advanceTimersByTime(5 * MIN)
+    await drain()
+    expect(mocks.fullSync).toHaveBeenCalledTimes(1)
+    expect(useAppStore.getState().syncStatus).toBe('idle')
+    expect(useAppStore.getState().pullStale).toBe(false)
+    expect(useAppStore.getState().syncRetryAt).toBeNull()
+
+    // No retry timer at the 30 s backoff; the next backup tick is the retry.
+    vi.advanceTimersByTime(60_000)
+    await drain()
+    expect(mocks.fullSync).toHaveBeenCalledTimes(1)
+    vi.advanceTimersByTime(5 * MIN)
+    await drain()
+    unsubscribe()
+    expect(mocks.fullSync).toHaveBeenCalledTimes(2)
+    expect(statuses).not.toContain('syncing')
+    expect(statuses).not.toContain('error')
+  })
+
+  it('a week away with an active account: the gate makes no full sync and leaves the backlog to the catch-up', async () => {
+    // The catch-up's own >50-event path (one full sync, no loading bar) is pinned in realtime-echo.
+    localStorage.setItem(realtimeCursorKey('me'), CURSOR)
+    mocks.getMillisecondsSinceLastRefresh.mockReturnValue(7 * DAY)
+    mocks.getMillisecondsSinceUpToDate.mockReturnValue(7 * DAY)
+    mocks.newestUserEventSince.mockResolvedValue({ newer: true, newest: '2026-09-30T00:00:00+00:00' })
+    const statuses: string[] = []
+    const unsubscribe = useAppStore.subscribe((s) => statuses.push(s.syncStatus))
+    stopSyncManager = startSyncManager()
+    await drain()
+    unsubscribe()
+    expect(fullSyncCount()).toBe(0)
+    expect(mocks.requestRealtimeCatchUp).toHaveBeenCalledTimes(1)
+    expect(statuses).not.toContain('syncing')
+  })
+
+  it('a forced full sync moves the realtime cursor to the newest event read BEFORE it', async () => {
+    localStorage.setItem(realtimeCursorKey('me'), CURSOR)
+    const NEWEST = '2026-09-24T05:00:00+00:00'
+    mocks.newestUserEventSince.mockResolvedValue({ newer: true, newest: NEWEST })
+    const order: string[] = []
+    mocks.newestUserEventSince.mockImplementation(async () => {
+      order.push('probe')
+      return { newer: true, newest: NEWEST }
+    })
+    mocks.fullSync.mockImplementation(async () => {
+      order.push('sync')
+      return { pushed: 0, pulled: 0, changed: 0, errors: [] }
+    })
+    mocks.getMillisecondsSinceUpToDate.mockReturnValue(EVENT_LOG_TRUST_MS)
+    stopSyncManager = startSyncManager()
+    await drain()
+    expect(order).toEqual(['probe', 'sync'])
+    expect(localStorage.getItem(realtimeCursorKey('me'))).toBe(NEWEST)
+  })
+
+  it('a forced full sync leaves the cursor alone when it joined a running sync or the probe failed', async () => {
+    localStorage.setItem(realtimeCursorKey('me'), CURSOR)
+    mocks.getMillisecondsSinceUpToDate.mockReturnValue(EVENT_LOG_TRUST_MS)
+    mocks.newestUserEventSince.mockResolvedValue({ newer: true, newest: '2026-09-24T05:00:00+00:00' })
+    mocks.isFullSyncInFlight.mockReturnValue(true)
+    stopSyncManager = startSyncManager()
+    await drain()
+    expect(mocks.fullSync).toHaveBeenCalledTimes(1)
+    expect(localStorage.getItem(realtimeCursorKey('me'))).toBe(CURSOR)
+
+    stopSyncManager()
+    mocks.isFullSyncInFlight.mockReturnValue(false)
+    mocks.newestUserEventSince.mockResolvedValue({ newer: true, newest: null })
+    stopSyncManager = startSyncManager()
+    await drain()
+    expect(mocks.fullSync).toHaveBeenCalledTimes(2)
+    expect(localStorage.getItem(realtimeCursorKey('me'))).toBe(CURSOR)
   })
 
   it('the browser online event no longer starts a sync of its own (reconnect restarts the manager)', async () => {

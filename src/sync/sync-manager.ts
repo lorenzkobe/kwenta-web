@@ -4,7 +4,7 @@ import { flushQueuedKwentaNotifications, hasQueuedKwentaNotifications } from '@/
 import { markPendingMutationsApplied } from '@/sync/cloud-first-mutations'
 import { supabase } from '@/lib/supabase'
 import { useAppStore } from '@/store/app-store'
-import { readLastRefreshAt, readRealtimeCursor } from '@/lib/kwenta-storage-keys'
+import { advanceRealtimeCursor, readLastRefreshAt, readRealtimeCursor } from '@/lib/kwenta-storage-keys'
 import { requestRealtimeCatchUp } from '@/sync/realtime-events'
 import {
   clearRealtimeProcessingFailed,
@@ -16,6 +16,8 @@ import { drainWriteQueue } from '@/sync/write-queue'
 import {
   fullSync,
   getMillisecondsSinceLastRefresh,
+  EVENT_LOG_TRUST_MS,
+  getMillisecondsSinceUpToDate,
   isFullSyncInFlight,
   mayHaveStagedRows,
   hasUnsyncedLocalDataForUser,
@@ -26,11 +28,14 @@ import {
 /** How often the backup tick asks whether the mirror needs a refresh. */
 const SYNC_BACKUP_INTERVAL_MS = 5 * 60 * 1000
 /**
- * The bound on changes that emit no event. Contacts, renames and peer links emit events since 077,
- * so what is left is rare enough for an hourly safety refresh (it was 5 minutes on focus and 15 on
- * the backup tick).
+ * The bound on changes that emit no event, run by the backup tick only and without the loading bar.
+ * Since 077 contacts, renames and peer links emit events too, and every screen reads its numbers
+ * from the server, so the mirror is the only thing it can correct. An open never waits on it: it
+ * was hourly on every open, which made coming back after a while a complete download each time.
  */
-const MIRROR_SAFETY_REFRESH_MS = 60 * 60 * 1000
+const MIRROR_SAFETY_REFRESH_MS = 24 * 60 * 60 * 1000
+/** A start this far past the last full refresh runs the safety refresh soon, so short sessions get it too. */
+const SAFETY_REFRESH_AFTER_START_MS = 60_000
 
 /**
  * 'start', 'activation' and 'backup' go through the `refreshIfNeeded` gate and never queue a re-run
@@ -55,6 +60,11 @@ let isSyncing = false
 // Set when an explicit or user sync is requested while one is already running, so the in-flight
 // sync (which already snapshotted Dexie) doesn't drop the newer mutation.
 let rerunRequested = false
+// Refresh was pressed while a sync ran: the re-run is the user's (drain now, re-read the screens).
+let rerunForUser = false
+// The running sync is the backup tick's: it shows no loading bar and reports no failure.
+let runningQuietly = false
+let safetyRefreshTimer: ReturnType<typeof setTimeout> | null = null
 let backoffMs = BACKOFF_INITIAL_MS
 
 function isDatabaseClosedError(err: unknown): boolean {
@@ -111,28 +121,35 @@ function monotonicNow(): number {
     : Date.now()
 }
 
+type RefreshDecision = 'checked' | 'fullSync' | 'fullSyncPastEventLog'
+
 /**
  * Whether the mirror needs the complete bundle, cheapest question first:
- *   - no completed refresh yet (first sign-in: the hydration splash waits on it), or the last one
- *     is at least MIRROR_SAFETY_REFRESH_MS old;
+ *   - no completed refresh yet (first sign-in: the hydration splash waits on it);
+ *   - the server last vouched for this copy EVENT_LOG_TRUST_MS ago or more: the event log may have
+ *     been pruned past the cursor ('fullSyncPastEventLog', so the cursor moves with the sync);
+ *   - the backup tick, with the last full refresh MIRROR_SAFETY_REFRESH_MS old;
  *   - a realtime event failed to apply (its cursor moved on anyway);
  *   - a queued notification, or an unsynced row no queue entry owns (a legacy staged write) — the
  *     sync is what sends them (index counts first, so a quiet check reads no table in full);
  *   - no server cursor to ask from.
- * Otherwise one `LIMIT 1` probe; events newer than the cursor go to realtime's per-entity
- * catch-up, which moves the cursor itself, instead of the complete bundle.
+ * Otherwise one `LIMIT 1` probe, however long the device was away: events newer than the cursor go
+ * to realtime's per-entity catch-up, which moves the cursor itself; none means the copy is current.
  */
-async function needsFullSync(userId: string): Promise<boolean> {
-  if (!readLastRefreshAt()) return true
-  if (getMillisecondsSinceLastRefresh() >= MIRROR_SAFETY_REFRESH_MS) return true
-  if (realtimeProcessingFailed()) return true
-  if (await hasQueuedKwentaNotifications(userId)) return true
-  if ((await mayHaveStagedRows()) && (await hasUnsyncedLocalDataForUser(userId))) return true
+async function decideRefresh(userId: string, reason: RefreshReason): Promise<RefreshDecision> {
+  if (!readLastRefreshAt()) return 'fullSync'
+  if (getMillisecondsSinceUpToDate() >= EVENT_LOG_TRUST_MS) return 'fullSyncPastEventLog'
+  if (reason === 'backup' && getMillisecondsSinceLastRefresh() >= MIRROR_SAFETY_REFRESH_MS) return 'fullSync'
+  if (realtimeProcessingFailed()) return 'fullSync'
+  if (await hasQueuedKwentaNotifications(userId)) return 'fullSync'
+  if ((await mayHaveStagedRows()) && (await hasUnsyncedLocalDataForUser(userId))) return 'fullSync'
   const cursor = readRealtimeCursor(userId)
-  if (!cursor) return true
+  if (!cursor) return 'fullSync'
+  const epoch = currentSessionEpoch()
   const probe = await newestUserEventSince(userId, cursor)
   if (probe.newer) requestRealtimeCatchUp()
-  return false
+  else if (isSessionEpochCurrent(epoch)) useAppStore.getState().markServerChecked()
+  return 'checked'
 }
 
 /**
@@ -164,7 +181,7 @@ async function drainQueueNow(userId: string): Promise<void> {
 
 /**
  * App start, tab activation and the backup tick: drain the write queue, then run the full sync only
- * when `needsFullSync` says the mirror may be behind.
+ * when `decideRefresh` says the mirror may be behind.
  * @returns whether the refresh was handled (checked, or synced) — false gives an activation's
  * throttle window back.
  */
@@ -174,15 +191,19 @@ async function refreshIfNeeded(reason: RefreshReason): Promise<boolean> {
   if (!session?.user) return false
   const userId = session.user.id
   drainQueueInBackground(userId)
-  let sync: boolean
+  let decision: RefreshDecision
   try {
-    sync = await needsFullSync(userId)
+    decision = await decideRefresh(userId, reason)
   } catch {
     // Unsure (a closed database, a failed read): sync, as every refresh used to.
-    sync = true
+    decision = 'fullSync'
   }
-  if (!sync) return true
-  return runSync(reason, userId)
+  if (decision === 'checked') return true
+  // The newest event is read BEFORE the sync, so one created while it runs stays ahead of the
+  // cursor; without the move, realtime's catch-up would replay the same backlog as a second bundle.
+  const cursor = decision === 'fullSyncPastEventLog' ? readRealtimeCursor(userId) : null
+  const coveredUpTo = cursor ? (await newestUserEventSince(userId, cursor)).newest : null
+  return runSync(reason, userId, coveredUpTo)
 }
 
 function onTabActivated() {
@@ -217,11 +238,9 @@ async function resolveSessionWithRetry() {
  * @returns whether a sync was actually attempted. False means it bailed out before doing any work
  * (offline, no session yet, one already in flight).
  */
-async function runSync(reason: SyncRunReason, knownUserId?: string): Promise<boolean> {
+async function runSync(reason: SyncRunReason, knownUserId?: string, coveredUpTo?: string | null): Promise<boolean> {
   if (isSyncing) {
-    // A sync is already in flight. A local change or Refresh must run once more afterwards so the
-    // newer write (not in the in-flight snapshot) still goes out; a refresh is covered by it.
-    if (reason === 'explicit' || reason === 'user') rerunRequested = true
+    requestRerun(reason)
     return false
   }
 
@@ -236,11 +255,12 @@ async function runSync(reason: SyncRunReason, knownUserId?: string): Promise<boo
   }
   // Re-checked after the await above: two callers may both have passed the first check.
   if (isSyncing) {
-    if (reason === 'explicit' || reason === 'user') rerunRequested = true
+    requestRerun(reason)
     return false
   }
 
   isSyncing = true
+  runningQuietly = reason === 'backup'
   const epoch = currentSessionEpoch()
   const healthToken = realtimeHealthToken()
   // The mirror was wiped (sign-out, account switch) while this sync ran; sync-service wrote nothing
@@ -251,8 +271,19 @@ async function runSync(reason: SyncRunReason, knownUserId?: string): Promise<boo
     useAppStore.getState().setSyncStatus('idle')
     return true
   }
-  useAppStore.getState().setSyncStatus('syncing')
-  useAppStore.getState().setSyncRetryAt(null)
+  if (!runningQuietly) {
+    useAppStore.getState().setSyncStatus('syncing')
+    useAppStore.getState().setSyncRetryAt(null)
+  }
+  // A quiet sync's failure waits for the next backup tick: an error state or a retry timer would
+  // bring the loading bar back for a refresh nobody asked for. Refresh pressed meanwhile un-quiets it.
+  const failed = () => {
+    if (runningQuietly) return
+    useAppStore.getState().setSyncStatus('error')
+    useAppStore.getState().setPullStale(true)
+    if (!readLastRefreshAt()) useAppStore.getState().setInitialCloudHydration('failed')
+    scheduleRetry()
+  }
 
   try {
     // A full sync never sends a row the write queue owns (sync-service excludes them), so every
@@ -271,10 +302,7 @@ async function runSync(reason: SyncRunReason, knownUserId?: string): Promise<boo
       if (!isSessionEpochCurrent(epoch)) return abandon()
       if (initialResult.errors.length > 0) {
         console.warn('[sync] initial sync round-trip failed:', initialResult.errors)
-        useAppStore.getState().setSyncStatus('error')
-        useAppStore.getState().setPullStale(true)
-        useAppStore.getState().setInitialCloudHydration('failed')
-        scheduleRetry()
+        failed()
         return true
       }
       await hydrateLinkedRemoteProfilesForActor(userId)
@@ -302,13 +330,9 @@ async function runSync(reason: SyncRunReason, knownUserId?: string): Promise<boo
       // Queue entries are not touched: a failed sync (often a network blip) says nothing about
       // whether the server would refuse them — only the drain's own answer marks one refused.
       console.warn('[sync] errors:', result.errors)
-      useAppStore.getState().setSyncStatus('error')
-      useAppStore.getState().setPullStale(true)
-      if (!readLastRefreshAt()) {
-        useAppStore.getState().setInitialCloudHydration('failed')
-      }
-      scheduleRetry()
+      failed()
     } else {
+      if (coveredUpTo && !joinedRunningSync) advanceRealtimeCursor(userId, coveredUpTo)
       // Legacy (pre-queue) entries ride this row-scan push; a clean sync confirms them.
       await markPendingMutationsApplied(userId)
       if (!joinedRunningSync) clearRealtimeProcessingFailed(healthToken)
@@ -340,24 +364,53 @@ async function runSync(reason: SyncRunReason, knownUserId?: string): Promise<boo
       return true
     }
     console.warn('[sync] failed:', err)
-    useAppStore.getState().setSyncStatus('error')
-    useAppStore.getState().setPullStale(true)
-    if (!readLastRefreshAt()) {
-      useAppStore.getState().setInitialCloudHydration('failed')
-    }
-    scheduleRetry()
+    failed()
   } finally {
     isSyncing = false
+    runningQuietly = false
     if (rerunRequested) {
+      const rerunReason = rerunForUser ? 'user' : 'explicit'
       rerunRequested = false
-      void runSync('explicit')
+      rerunForUser = false
+      void runSync(rerunReason)
     }
   }
   return true
 }
 
+/**
+ * A local change or Refresh must run once more after the sync in flight, so the newer write (not
+ * in its snapshot) still goes out; a gated refresh is covered by it. Refresh during a quiet sync
+ * shows as refreshing at once rather than looking ignored.
+ */
+function requestRerun(reason: SyncRunReason): void {
+  if (reason !== 'explicit' && reason !== 'user') return
+  rerunRequested = true
+  if (reason !== 'user') return
+  rerunForUser = true
+  if (runningQuietly) {
+    runningQuietly = false
+    useAppStore.getState().setSyncStatus('syncing')
+    useAppStore.getState().setSyncRetryAt(null)
+  }
+}
+
+function clearSafetyRefreshTimer() {
+  if (safetyRefreshTimer) {
+    clearTimeout(safetyRefreshTimer)
+    safetyRefreshTimer = null
+  }
+}
+
 export function startSyncManager() {
   void refreshIfNeeded('start')
+  clearSafetyRefreshTimer()
+  if (readLastRefreshAt() && getMillisecondsSinceLastRefresh() >= MIRROR_SAFETY_REFRESH_MS) {
+    safetyRefreshTimer = setTimeout(() => {
+      safetyRefreshTimer = null
+      void refreshIfNeeded('backup')
+    }, SAFETY_REFRESH_AFTER_START_MS)
+  }
 
   if (backupTimer) clearInterval(backupTimer)
   backupTimer = setInterval(() => void refreshIfNeeded('backup'), SYNC_BACKUP_INTERVAL_MS)
@@ -373,6 +426,7 @@ export function startSyncManager() {
       backupTimer = null
     }
     clearRetryTimer()
+    clearSafetyRefreshTimer()
     if (debounceTimer) {
       clearTimeout(debounceTimer)
       debounceTimer = null

@@ -10,6 +10,13 @@
 export const KWENTA_LAST_REFRESH_STORAGE_KEY = 'kwenta_last_refresh'
 
 /**
+ * When the server last confirmed this device's mirror current WITHOUT a full refresh: an open whose
+ * probe found no newer event, or a realtime catch-up that drained cleanly. Display/scheduling only,
+ * stamped from the device clock like the refresh marker; it never filters a query.
+ */
+export const KWENTA_LAST_CHECKED_STORAGE_KEY = 'kwenta_last_checked'
+
+/**
  * Legacy cursor key (`kwenta_last_pull`) from the incremental-pull era. Read once so an existing
  * install counts as already-hydrated instead of re-gating the shell, then removed.
  */
@@ -46,6 +53,37 @@ export function readLastRefreshAt(): string | null {
   return legacy
 }
 
+function readParsable(key: string): string | null {
+  try {
+    const value = localStorage.getItem(key)
+    return value && !Number.isNaN(Date.parse(value)) ? value : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * The newer of the full-refresh and check markers: when the server last vouched for this copy. A
+ * check dated in the future (the clock moved back) is ignored: it would otherwise win over every
+ * later full refresh until a catch-up happened to restamp it.
+ */
+export function readLastUpToDateAt(): string | null {
+  if (typeof localStorage === 'undefined') return null
+  const refreshed = readLastRefreshAt()
+  const checked = readParsable(KWENTA_LAST_CHECKED_STORAGE_KEY)
+  if (!checked || Date.parse(checked) > Date.now()) return refreshed
+  if (!refreshed || Number.isNaN(Date.parse(refreshed))) return checked
+  return Date.parse(checked) > Date.parse(refreshed) ? checked : refreshed
+}
+
+export function writeLastCheckedAt(at: string): void {
+  try {
+    localStorage.setItem(KWENTA_LAST_CHECKED_STORAGE_KEY, at)
+  } catch {
+    // Display only: the next check stamps it again.
+  }
+}
+
 /**
  * Per-user key of the realtime cursor: the newest `kwenta_user_events.created_at` this device has
  * drained. Only ever written from SERVER timestamps (CLAUDE.md rule 7) — a device-clock value in
@@ -62,5 +100,17 @@ export function readRealtimeCursor(userId: string): string | null {
     return localStorage.getItem(realtimeCursorKey(userId)) || null
   } catch {
     return null
+  }
+}
+
+/** Moves the realtime cursor to a SERVER timestamp, never backwards. */
+export function advanceRealtimeCursor(userId: string, serverCreatedAt: string | null): void {
+  if (!serverCreatedAt) return
+  const current = readRealtimeCursor(userId)
+  if (current && Date.parse(serverCreatedAt) <= Date.parse(current)) return
+  try {
+    localStorage.setItem(realtimeCursorKey(userId), serverCreatedAt)
+  } catch {
+    // An unwritable cursor stays where it was; the next catch-up re-reads from there.
   }
 }

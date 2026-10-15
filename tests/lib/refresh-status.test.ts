@@ -18,7 +18,7 @@ function input(overrides: Partial<RefreshStateInput> = {}): RefreshStateInput {
     hasPendingUpload: false,
     hasNotApplied: false,
     pullStale: false,
-    msSinceLastRefresh: 0,
+    msSinceUpToDate: 0,
     screenLoading: false,
     ...overrides,
   }
@@ -39,7 +39,7 @@ describe('resolveRefreshState', () => {
           syncStatus: 'error',
           hasPendingUpload: true,
           pullStale: true,
-          msSinceLastRefresh: Number.POSITIVE_INFINITY,
+          msSinceUpToDate: Number.POSITIVE_INFINITY,
         }),
       ),
     ).toBe('offline')
@@ -52,7 +52,7 @@ describe('resolveRefreshState', () => {
           syncStatus: 'syncing',
           hasPendingUpload: true,
           pullStale: true,
-          msSinceLastRefresh: Number.POSITIVE_INFINITY,
+          msSinceUpToDate: Number.POSITIVE_INFINITY,
         }),
       ),
     ).toBe('syncing')
@@ -79,15 +79,15 @@ describe('resolveRefreshState', () => {
   // The cold-start bug: pullStale resets to false on every launch, so elapsed time is the only
   // staleness signal that survives a reload.
   it('reports stale from elapsed time even when pullStale is false', () => {
-    expect(resolveRefreshState(input({ msSinceLastRefresh: STALE_AFTER_MS }))).toBe('stale')
+    expect(resolveRefreshState(input({ msSinceUpToDate: STALE_AFTER_MS }))).toBe('stale')
   })
 
   it('stays idle just under the staleness threshold', () => {
-    expect(resolveRefreshState(input({ msSinceLastRefresh: STALE_AFTER_MS - 1 }))).toBe('idle')
+    expect(resolveRefreshState(input({ msSinceUpToDate: STALE_AFTER_MS - 1 }))).toBe('idle')
   })
 
   it('treats a device that has never refreshed as stale', () => {
-    expect(resolveRefreshState(input({ msSinceLastRefresh: Number.POSITIVE_INFINITY }))).toBe(
+    expect(resolveRefreshState(input({ msSinceUpToDate: Number.POSITIVE_INFINITY }))).toBe(
       'stale',
     )
   })
@@ -110,7 +110,7 @@ describe('resolveRefreshState — not applied (a refused queued write)', () => {
           hasNotApplied: true,
           hasPendingUpload: true,
           pullStale: true,
-          msSinceLastRefresh: Number.POSITIVE_INFINITY,
+          msSinceUpToDate: Number.POSITIVE_INFINITY,
         }),
       ),
     ).toBe('not-applied')
@@ -159,7 +159,7 @@ describe('resolveRefreshState — updating (screen fetch in flight)', () => {
           syncStatus: 'error',
           hasPendingUpload: true,
           pullStale: true,
-          msSinceLastRefresh: Number.POSITIVE_INFINITY,
+          msSinceUpToDate: Number.POSITIVE_INFINITY,
         }),
       ),
     ).toBe('updating')
@@ -172,7 +172,7 @@ describe('resolveRefreshState — updating (screen fetch in flight)', () => {
     )
     expect(resolveRefreshState(input({ screenLoading: true, pullStale: true }))).toBe('updating')
     expect(
-      resolveRefreshState(input({ screenLoading: true, msSinceLastRefresh: STALE_AFTER_MS })),
+      resolveRefreshState(input({ screenLoading: true, msSinceUpToDate: STALE_AFTER_MS })),
     ).toBe('updating')
   })
 

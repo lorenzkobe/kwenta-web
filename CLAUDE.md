@@ -389,23 +389,32 @@ The old incremental cursor (`kwenta_last_pull`) was stamped from the **device cl
 
 `kwenta_last_refresh` in `localStorage` records the last successful refresh. It is **display/scheduling only** (staleness chip, backup-timer skip, initial-hydration gate) and never filters a query; `readLastRefreshAt()` migrates the legacy `kwenta_last_pull` key once. Mirror-refresh triggers: app start, tab activation (one handler for `focus` + `visibilitychange`, rate-limited to 5s) and the 5-minute backup tick — all three through ONE gated `refreshIfNeeded` (below) — plus realtime events and the Refresh button, which awaits a queue drain (`ignoreBackoff`) and then always runs a full sync.
 
-**Startup, tab activation and the backup tick share one gate** *(2026-09-25; the tab-focus probe
-dates from 2026-09-24)*. `refreshIfNeeded` (`sync-manager.ts`) starts a write-queue drain in the
-BACKGROUND alongside the gate (a full sync never pushes queue-owned rows, so the two cannot reorder
-a write, and a slow head entry must not hold the refresh); held notifications are flushed only
-after a drain that applied something. The gate runs a full sync only when: there is no refresh marker (first
-sign-in on this device — the hydration splash stays), the marker is at least **60 min** old
-(`MIRROR_SAFETY_REFRESH_MS`, the bound on anything that emits no event; relaxed from 5 min once
-`077` made contacts, renames and merges emit events), a realtime apply failed
-(`src/sync/realtime-health.ts`), there is no realtime cursor, legacy unsynced rows exist
-(`mayHaveStagedRows` — index counts only, and rows a queue entry owns do not count: a pending entry
-means a DRAIN, never a full sync), or an unconfirmed notification is queued. Otherwise it costs one
-probe: `newestUserEventSince` (an indexed `LIMIT 1` on the caller's own `kwenta_user_events`,
-failing open); a newer event triggers the realtime catch-up (per entity), not a full download. A
-returning user with nothing new makes **zero** full bundles on open. An activation while a sync is
-in flight does not queue a second one. A failure is cleared only by a sync that started after it
-(`realtimeHealthToken`), a refresh marker dated in the future reads as stale, and the realtime
-cursor is only ever a SERVER timestamp.
+**Startup, tab activation and the backup tick share one gate** *(2026-09-25; time away stopped
+forcing the bundle 2026-10-15)*. `refreshIfNeeded` (`sync-manager.ts`) starts a write-queue drain in
+the BACKGROUND alongside the gate (a full sync never pushes queue-owned rows, so the two cannot
+reorder a write); held notifications are flushed only after a drain that applied something.
+`decideRefresh` runs a full sync only when: there is no refresh marker (first sign-in — the
+hydration splash stays); the server last vouched for this copy **25 days** ago or more
+(`EVENT_LOG_TRUST_MS`: 073 prunes events at 30 days, so past this the log may have holes — pinned
+against 073 by `tests/build/event-log-retention.test.ts`; that sync reads the newest event first and
+moves the realtime cursor to it, so the catch-up does not replay the backlog as a second bundle);
+the BACKUP tick finds the last full refresh **24 h** old (`MIRROR_SAFETY_REFRESH_MS`, the bound on
+anything that emits no event; also run once a minute after a start that finds it that old); a
+realtime apply failed; there is no realtime cursor; legacy unsynced rows exist (`mayHaveStagedRows`
+— index counts, queue-owned rows excluded); or an unconfirmed notification is queued. Otherwise ONE
+probe, however long the device was away: `newestUserEventSince` (an indexed `LIMIT 1`, failing
+open); a newer event goes to the realtime catch-up (per entity, or one full sync past 50 events),
+none stamps `kwenta_last_checked`. **The backup tick's sync is quiet**: no loading bar, and a failure
+sets no error and no retry (the next tick is the retry); Refresh pressed during it shows
+"Refreshing…" at once and re-runs as the user's sync. An activation while a sync is in flight does
+not queue a second one. A failure is cleared only by a sync that started after it
+(`realtimeHealthToken`), a marker dated in the future reads as stale, and the realtime cursor is
+only ever a SERVER timestamp.
+
+**`kwenta_last_checked`** records when the server last confirmed this copy current WITHOUT a full
+refresh (a probe that found nothing newer, a catch-up that drained cleanly). Like
+`kwenta_last_refresh` it is display/scheduling only; the header's staleness and "Updated X ago" read
+the newer of the two (`readLastUpToDateAt`), and a wipe removes both.
 
 **Route changes do NOT sync** *(removed 2026-08-04)*. Opening a screen fetches that screen's own scoped endpoint, which IS server truth (rule 7), so pulling the whole bundle per route change bought nothing and cost 213 kB a tap. A write no longer refreshes the mirror either: `kwenta_write` (066) returns only its own rows and deliberately does not stamp `kwenta_last_refresh`.
 

@@ -36,8 +36,11 @@ export type RefreshStateInput = {
   hasNotApplied: boolean
   /** Set by the sync manager when a refresh failed; in-memory, so it does not survive a reload. */
   pullStale: boolean
-  /** `Number.POSITIVE_INFINITY` when this device has never completed a refresh, or its marker is dated in the future (the clock moved back). */
-  msSinceLastRefresh: number
+  /**
+   * Since the server last vouched for this copy (a full refresh, or a check that found nothing
+   * newer). `Number.POSITIVE_INFINITY` when it never has, or the marker is dated in the future.
+   */
+  msSinceUpToDate: number
   /** A screen fetch has been in flight past the debounce delay (`useScreenLoading`). */
   screenLoading: boolean
 }
@@ -56,7 +59,7 @@ export function resolveRefreshState(input: RefreshStateInput): RefreshState {
   if (input.syncStatus === 'error') return 'error'
   if (input.hasNotApplied) return 'not-applied'
   if (input.hasPendingUpload) return 'pending-upload'
-  if (input.pullStale || input.msSinceLastRefresh >= STALE_AFTER_MS) return 'stale'
+  if (input.pullStale || input.msSinceUpToDate >= STALE_AFTER_MS) return 'stale'
   return 'idle'
 }
 
@@ -94,9 +97,9 @@ export function refreshStatusLabel(state: RefreshState, retrySeconds: number | n
 }
 
 /** Freshness line, e.g. "Updated 4m ago". Never shows a bare timestamp. */
-export function lastUpdatedLabel(lastRefreshAt: string | null): string {
-  if (!lastRefreshAt) return 'Not synced yet'
-  const ago = timeAgo(lastRefreshAt)
+export function lastUpdatedLabel(lastUpToDateAt: string | null): string {
+  if (!lastUpToDateAt) return 'Not synced yet'
+  const ago = timeAgo(lastUpToDateAt)
   // timeAgo returns "Just now" rather than a duration, so "Updated Just now" would read wrong.
   return ago === 'Just now' ? 'Updated just now' : `Updated ${ago}`
 }

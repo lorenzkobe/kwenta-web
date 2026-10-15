@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { db } from '@/db/db'
 import { clearKwentaLocalData, KWENTA_LOCAL_USER_KEY } from '@/lib/clear-kwenta-local'
 import {
+  KWENTA_LAST_CHECKED_STORAGE_KEY,
   KWENTA_LAST_REFRESH_STORAGE_KEY,
   KWENTA_LEGACY_LAST_PULL_STORAGE_KEY,
   realtimeCursorKey,
@@ -58,6 +59,7 @@ describe('clearKwentaLocalData', () => {
   it('removes Kwenta-specific localStorage keys', async () => {
     localStorage.setItem(KWENTA_LOCAL_USER_KEY, 'user-1')
     localStorage.setItem(KWENTA_LAST_REFRESH_STORAGE_KEY, '2026-01-01T00:00:00Z')
+    localStorage.setItem(KWENTA_LAST_CHECKED_STORAGE_KEY, '2026-01-01T00:00:00Z')
     // Legacy cursor from the incremental-pull era: must not survive an account switch on a
     // shared device, or the next user inherits a "we are hydrated" marker.
     localStorage.setItem(KWENTA_LEGACY_LAST_PULL_STORAGE_KEY, '2026-01-01T00:00:00Z')
@@ -68,6 +70,7 @@ describe('clearKwentaLocalData', () => {
 
     expect(localStorage.getItem(KWENTA_LOCAL_USER_KEY)).toBeNull()
     expect(localStorage.getItem(KWENTA_LAST_REFRESH_STORAGE_KEY)).toBeNull()
+    expect(localStorage.getItem(KWENTA_LAST_CHECKED_STORAGE_KEY)).toBeNull()
     expect(localStorage.getItem(KWENTA_LEGACY_LAST_PULL_STORAGE_KEY)).toBeNull()
     expect(localStorage.getItem('kwenta_account_banner_dismissed')).toBeNull()
     expect(localStorage.getItem('kwenta_notification_outbox_v1')).toBeNull()

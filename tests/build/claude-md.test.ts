@@ -41,8 +41,11 @@ describe('CLAUDE.md reflects the sync realignment', () => {
     }
   })
 
-  it('C30: the tab-activation staleness bound reads 60 minutes, not 5', () => {
-    expect(doc).toMatch(/60[ -]min/)
+  it('the open-time bounds read 25 days (event log) and 24 h (backup safety refresh), not 60 minutes', () => {
+    // Changed on purpose (fast app open, 2026-10-15): time away alone no longer forces the bundle.
+    expect(doc).toMatch(/\*\*25 days\*\*/)
+    expect(doc).toMatch(/\*\*24 h\*\*/)
+    expect(doc).not.toMatch(/at least \*\*60 min\*\* old/)
     expect(doc).not.toMatch(/a refresh >= 5 min old/)
   })
 

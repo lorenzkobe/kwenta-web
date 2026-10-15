@@ -2,8 +2,8 @@ import { supabase } from '@/lib/supabase'
 import { db } from '@/db/db'
 import { captureMetric, withMetric } from '@/lib/client-metrics'
 import { isRuntimeFlagEnabled } from '@/lib/runtime-flags'
-import { readRealtimeCursor, realtimeCursorKey } from '@/lib/kwenta-storage-keys'
-import { markRealtimeProcessingFailed } from '@/sync/realtime-health'
+import { advanceRealtimeCursor, readRealtimeCursor, realtimeCursorKey } from '@/lib/kwenta-storage-keys'
+import { markRealtimeProcessingFailed, realtimeProcessingFailed } from '@/sync/realtime-health'
 import type {
   SyncFields,
   Bill,
@@ -14,9 +14,11 @@ import type {
   Settlement,
 } from '@/types'
 import {
+  EVENT_LOG_TRUST_MS,
   PULL_SINCE_EPOCH,
   compareTimestamps,
   fullSync,
+  getMillisecondsSinceUpToDate,
   isFullSyncInFlight,
   newestUserEventSince,
   pullChanges,
@@ -450,10 +452,7 @@ export function startRealtimeForUser(userId: string): () => void {
 
   /** Moves the cursor forward to a SERVER timestamp; never backwards, never after sign-out. */
   function advanceCursor(serverCreatedAt: string | null): void {
-    if (!serverCreatedAt || ended()) return
-    const current = readRealtimeCursor(userId)
-    if (current && Date.parse(serverCreatedAt) <= Date.parse(current)) return
-    localStorage.setItem(realtimeCursorKey(userId), serverCreatedAt)
+    if (!ended()) advanceRealtimeCursor(userId, serverCreatedAt)
   }
 
   /** The one-event-at-a-time path, used only with `coalesceRealtimeBatch` off. */
@@ -633,6 +632,13 @@ export function startRealtimeForUser(userId: string): () => void {
    * catch-up fetched are the OLDEST ones, so their max would leave the cursor creeping behind.)
    */
   async function catchUpWithFullSync(sinceIso: string): Promise<void> {
+    // The sync manager's own complete sync may have moved the cursor past this backlog meanwhile;
+    // what is left after it is usually a handful of events, not a second bundle.
+    const current = readRealtimeCursor(userId)
+    if (current && Date.parse(current) > Date.parse(sinceIso)) {
+      await catchUpSince(current)
+      return
+    }
     const probe = await newestUserEventSince(userId, sinceIso)
     // A joined sync may have read the server before these events existed.
     const joined = isFullSyncInFlight(userId)
@@ -657,13 +663,20 @@ export function startRealtimeForUser(userId: string): () => void {
     }
 
     const events = (data ?? []) as UserEventRow[]
-    if (events.length === 0 || ended()) return
+    if (ended()) return
     if (events.length > CATCH_UP_MAX_EVENTS) {
       await catchUpWithFullSync(sinceIso)
       return
     }
-    queue.push(...events)
-    await flush()
+    if (events.length > 0) {
+      queue.push(...events)
+      await flush()
+    }
+    // Nothing was missed, or all of it applied: the server has vouched for this copy — unless the
+    // log may have been pruned since the last vouch, which only the complete bundle can settle.
+    if (!ended() && !realtimeProcessingFailed() && getMillisecondsSinceUpToDate() < EVENT_LOG_TRUST_MS) {
+      useAppStore.getState().markServerChecked()
+    }
   }
 
   function scheduleCatchUp(sinceIso: string) {

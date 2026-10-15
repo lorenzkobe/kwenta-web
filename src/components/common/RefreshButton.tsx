@@ -5,7 +5,7 @@ import { useLiveQuery } from 'dexie-react-hooks'
 import { Button } from '@/components/ui/button'
 import { useCurrentUser } from '@/hooks/useCurrentUser'
 import { useScreenLoading } from '@/hooks/useScreenLoading'
-import { readLastRefreshAt } from '@/lib/kwenta-storage-keys'
+import { readLastUpToDateAt } from '@/lib/kwenta-storage-keys'
 import {
   isRefreshDisabled,
   lastUpdatedLabel,
@@ -18,7 +18,7 @@ import { cn } from '@/lib/utils'
 import { useAppStore } from '@/store/app-store'
 import { db } from '@/db/db'
 import { requestSyncNow } from '@/sync/sync-manager'
-import { getMillisecondsSinceLastRefresh, mayHaveStagedRows } from '@/sync/sync-service'
+import { getMillisecondsSinceUpToDate, mayHaveStagedRows } from '@/sync/sync-service'
 import type { PendingMutationStatus } from '@/types'
 
 /** How often the "Updated 4m ago" label re-renders to age itself. */
@@ -90,8 +90,9 @@ export function RefreshButton({ showLastUpdated = false, className }: RefreshBut
     const id = window.setInterval(() => setFreshnessTick((n) => n + 1), FRESHNESS_TICK_MS)
     return () => window.clearInterval(id)
   }, [])
-  // eslint-disable-next-line react-hooks/exhaustive-deps -- re-read on sync settle and on tick
-  const lastRefreshAt = useMemo(() => readLastRefreshAt(), [syncStatus, freshnessTick])
+  const lastCheckedAt = useAppStore((s) => s.lastCheckedAt)
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- re-read on sync settle, a check and on tick
+  const lastUpToDateAt = useMemo(() => readLastUpToDateAt(), [syncStatus, lastCheckedAt, freshnessTick])
 
   // Only run the 1s countdown clock while a retry is actually scheduled.
   const [nowMs, setNowMs] = useState(() => Date.now())
@@ -109,7 +110,7 @@ export function RefreshButton({ showLastUpdated = false, className }: RefreshBut
     hasPendingUpload: upload.unsent,
     hasNotApplied: upload.notApplied,
     pullStale,
-    msSinceLastRefresh: getMillisecondsSinceLastRefresh(),
+    msSinceUpToDate: getMillisecondsSinceUpToDate(),
   }
   const state = resolveRefreshState({ ...stateInput, screenLoading })
   // Every screen fetch past the delay reads "Updating…", which would make a screen reader
@@ -118,7 +119,7 @@ export function RefreshButton({ showLastUpdated = false, className }: RefreshBut
     state === 'updating' ? resolveRefreshState({ ...stateInput, screenLoading: false }) : state
 
   const label = refreshStatusLabel(state, retrySeconds)
-  const updated = lastUpdatedLabel(lastRefreshAt)
+  const updated = lastUpdatedLabel(lastUpToDateAt)
   const attention =
     state === 'error' || state === 'not-applied' || state === 'stale' || state === 'pending-upload'
   const busy = state === 'syncing' || state === 'updating'

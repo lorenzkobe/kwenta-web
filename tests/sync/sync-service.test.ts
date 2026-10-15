@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { db } from '@/db/db'
 import {
   getMillisecondsSinceLastRefresh,
+  getMillisecondsSinceUpToDate,
   mayHaveStagedRows,
   hasUnsyncedLocalDataForUser,
   isEntityUnsyncedForActor,
@@ -13,7 +14,7 @@ import {
   KWENTA_LAST_REFRESH_STORAGE_KEY,
   PULL_SINCE_EPOCH,
 } from '@/sync/sync-service'
-import { KWENTA_LEGACY_LAST_PULL_STORAGE_KEY } from '@/lib/kwenta-storage-keys'
+import { KWENTA_LAST_CHECKED_STORAGE_KEY, KWENTA_LEGACY_LAST_PULL_STORAGE_KEY } from '@/lib/kwenta-storage-keys'
 import { makeActivity, makeBill, makeGroup, makeItem, makeMember, makeProfile, makeSettlement, makeSplit, resetDb } from '../helpers/db'
 
 // sync-service imports the Supabase client at module load; neither function
@@ -29,6 +30,23 @@ vi.mock('@/lib/supabase', () => ({
 beforeEach(async () => {
   await resetDb()
   localStorage.clear()
+})
+
+describe('getMillisecondsSinceUpToDate', () => {
+  it('is Infinity with neither marker', () => {
+    expect(getMillisecondsSinceUpToDate()).toBe(Number.POSITIVE_INFINITY)
+  })
+
+  it('measures from the newer of the full refresh and the check', () => {
+    localStorage.setItem(KWENTA_LAST_REFRESH_STORAGE_KEY, new Date(Date.now() - 5 * 3600_000).toISOString())
+    localStorage.setItem(KWENTA_LAST_CHECKED_STORAGE_KEY, new Date(Date.now() - 60_000).toISOString())
+    expect(getMillisecondsSinceUpToDate()).toBeLessThan(2 * 60_000)
+  })
+
+  it('treats a future check marker as stale rather than as just checked', () => {
+    localStorage.setItem(KWENTA_LAST_CHECKED_STORAGE_KEY, new Date(Date.now() + 60_000).toISOString())
+    expect(getMillisecondsSinceUpToDate()).toBe(Number.POSITIVE_INFINITY)
+  })
 })
 
 describe('getMillisecondsSinceLastRefresh', () => {

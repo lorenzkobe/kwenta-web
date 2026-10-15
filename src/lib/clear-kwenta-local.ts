@@ -4,6 +4,7 @@ import { clearApiCache } from '@/api/cache'
 import { clearPrimedReads } from '@/api/primed-reads'
 import { resetAutoRepairGuard } from '@/lib/kwenta-data-repair'
 import {
+  KWENTA_LAST_CHECKED_STORAGE_KEY,
   KWENTA_LAST_REFRESH_STORAGE_KEY,
   KWENTA_LEGACY_LAST_PULL_STORAGE_KEY,
   realtimeCursorKey,
@@ -43,6 +44,7 @@ export async function clearKwentaLocalData(): Promise<void> {
   })
   localStorage.removeItem(KWENTA_LOCAL_USER_KEY)
   localStorage.removeItem(KWENTA_LAST_REFRESH_STORAGE_KEY)
+  localStorage.removeItem(KWENTA_LAST_CHECKED_STORAGE_KEY)
   // Legacy cursor from the incremental-pull era; drop it too so an account switch on an
   // upgraded device cannot inherit the previous user's marker.
   localStorage.removeItem(KWENTA_LEGACY_LAST_PULL_STORAGE_KEY)

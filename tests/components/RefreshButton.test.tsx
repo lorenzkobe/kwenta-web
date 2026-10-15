@@ -5,7 +5,7 @@ import { createRoot, type Root } from 'react-dom/client'
 // The button's network and Dexie edges; the state under test is the store + the load counter.
 vi.mock('@/sync/sync-manager', () => ({ requestSyncNow: vi.fn() }))
 vi.mock('@/sync/sync-service', () => ({
-  getMillisecondsSinceLastRefresh: () => 0,
+  getMillisecondsSinceUpToDate: () => 0,
   hasUnsyncedLocalDataForUser: async () => false,
   mayHaveStagedRows: async () => false,
 }))
