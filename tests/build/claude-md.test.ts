@@ -7,7 +7,14 @@ import { describe, expect, it } from 'vitest'
  * sends the next contributor to write 076 over an existing file or to mutate a shipped version.
  */
 
-const doc = readFileSync(resolve(__dirname, '../../CLAUDE.md'), 'utf8')
+const read = (path: string) => readFileSync(resolve(__dirname, '../..', path), 'utf8')
+const doc = read('CLAUDE.md')
+const migrations = read('docs/migrations.md')
+const coverage = read('docs/testing-coverage.md')
+
+// Claude Code refuses instruction files past 150k chars in total, and the user-level files take
+// ~18k of that, so the reference material lives in docs/ and CLAUDE.md stays an index.
+const CLAUDE_MD_CHAR_BUDGET = 110_000
 
 describe('CLAUDE.md reflects the sync realignment', () => {
   it('C30: rule 3 names 079 as the next migration', () => {
@@ -21,16 +28,16 @@ describe('CLAUDE.md reflects the sync realignment', () => {
 
   it('C30: the migrations table has rows for 076, 077 and 078', () => {
     for (const n of ['076', '077', '078']) {
-      expect(doc, `migrations table row for ${n}`).toMatch(new RegExp('^\\| `' + n + '` \\|', 'm'))
+      expect(migrations, `migrations table row for ${n}`).toMatch(new RegExp('^\\| `' + n + '` \\|', 'm'))
     }
   })
 
   it('C30: the coverage inventory names the new suites', () => {
     for (const name of ['write-queue', 'write-errors', 'device-owner', 'AuthProvider']) {
-      expect(doc, name).toContain(name)
+      expect(coverage, name).toContain(name)
     }
     for (const n of ['076_', '077_', '078_']) {
-      expect(doc, `SQL coverage entry ${n}`).toContain('`' + n)
+      expect(coverage, `SQL coverage entry ${n}`).toContain('`' + n)
     }
   })
 
@@ -41,5 +48,11 @@ describe('CLAUDE.md reflects the sync realignment', () => {
 
   it('C30: finalizeMutationSync is no longer described as the mutation path', () => {
     expect(doc).not.toMatch(/notifySyncAfterMutation → finalizeMutationSync/)
+  })
+
+  it('stays within its character budget and points at the reference docs', () => {
+    expect(doc.length).toBeLessThanOrEqual(CLAUDE_MD_CHAR_BUDGET)
+    expect(doc).toContain('docs/migrations.md')
+    expect(doc).toContain('docs/testing-coverage.md')
   })
 })
