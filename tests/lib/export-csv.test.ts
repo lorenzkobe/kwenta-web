@@ -67,6 +67,9 @@ function billRow(over: Partial<PersonalBillRow> = {}): PersonalBillRow {
     settled: false,
     category: 'food',
     participants: [],
+    originalCurrency: null,
+    originalTotal: null,
+    exchangeRate: null,
     ...over,
   }
 }
@@ -85,6 +88,43 @@ describe('exportBillsToCSV', () => {
     // My own share still comes from my own split rows.
     expect(csv).toContain('40')
     expect(csv).toContain('No')
+  })
+
+  // A converted bill (079) exports what was paid beside the balance amount; a plain bill leaves
+  // the three cells blank so one file can mix both. They sit at the END so every column an
+  // existing consumer reads keeps its position.
+  it('appends Paid In, Original Amount and Exchange Rate columns, blank for plain bills', async () => {
+    await db.profiles.add(makeProfile({ id: 'ME' }))
+    await exportBillsToCSV('ME', [
+      billRow({ id: 'PLAIN', title: 'Plain', createdAt: '2026-01-01T00:00:00.000Z' }),
+      billRow({
+        id: 'CONV',
+        title: 'Hanoi dinner',
+        createdAt: '2026-01-02T00:00:00.000Z',
+        totalAmount: 1231.93,
+        originalCurrency: 'VND',
+        originalTotal: 500000,
+        exchangeRate: 1 / 405.868219,
+      }),
+    ])
+
+    const lines = (await readCsv()).split('\r\n')
+    const header = lines.find((l) => l.startsWith('Date,Bill Title'))!.split(',')
+    expect(header.slice(-6)).toEqual(['Paid By', 'My Share', 'Settled', 'Paid In', 'Original Amount', 'Exchange Rate'])
+
+    const cells = (title: string) => lines.find((l) => l.includes(`,${title},`))!
+    expect(cells('Plain').endsWith(',No,,,')).toBe(true)
+    // The rate reads the way the screens say it, not as the raw stored multiplier.
+    expect(cells('Hanoi dinner').endsWith(',No,VND,500000,1 PHP = 405.87 VND')).toBe(true)
+  })
+
+  it('writes nothing in the paid-in columns for an unreadable currency code', async () => {
+    await db.profiles.add(makeProfile({ id: 'ME' }))
+    await exportBillsToCSV('ME', [
+      billRow({ title: 'Odd', originalCurrency: 'vnd', originalTotal: 5, exchangeRate: 0.0025 }),
+    ])
+    const line = (await readCsv()).split('\r\n').find((l) => l.includes(',Odd,'))!
+    expect(line.endsWith(',No,,,')).toBe(true)
   })
 
   // The settled flag is the server's answer, not a local recomputation — that is the whole point

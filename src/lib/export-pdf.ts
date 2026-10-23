@@ -10,6 +10,8 @@ import type {
 } from '@/api/balances'
 import { makeExportFilename } from '@/lib/export-utils'
 import { loadSplitsByBill } from '@/lib/export-splits'
+import { formatLockedRate, isValidRate, toCurrencyCode } from '@/lib/currency-conversion'
+import { isConvertedDetail } from '@/lib/bill-paid-in'
 
 // A4 Portrait: 210 × 297 mm
 const PW = 210
@@ -272,6 +274,19 @@ export async function generateBillsPDF(userId: string, rows: PersonalBillRow[]):
   doc.save(makeExportFilename('Bills', 'pdf'))
 }
 
+/**
+ * " · Paid in VND 500,000 · 1 PHP = 405.87 VND (locked)" for a converted bill, else "". The amount
+ * uses `fmt` (currency code, no symbol) because jsPDF's Helvetica has no glyph for symbols like ₫.
+ */
+export function paidInSubtitle(detail: BillDetail): string {
+  const { bill, items } = detail
+  const paidIn = toCurrencyCode(bill.originalCurrency)
+  if (!isConvertedDetail(bill, items) || paidIn === null || bill.originalTotal === null || !isValidRate(bill.exchangeRate)) {
+    return ''
+  }
+  return ` · Paid in ${fmt(bill.originalTotal, paidIn)} · ${formatLockedRate(bill.exchangeRate, paidIn, bill.currency)} (locked)`
+}
+
 /** `detail` is the screen's own payload — see the note on `exportBillsToCSV`. */
 export async function generateBillDetailPDF(detail: BillDetail): Promise<void> {
   const { jsPDF } = await import('jspdf')
@@ -282,7 +297,8 @@ export async function generateBillDetailPDF(detail: BillDetail): Promise<void> {
   const dateStr = new Date(bill.createdAt).toLocaleDateString('en-US', {
     month: 'long', day: 'numeric', year: 'numeric',
   })
-  const sub = `Paid by ${bill.payorName} · ${bill.currency} · ${dateStr}${bill.note ? ` · ${bill.note}` : ''}`
+  const paidIn = paidInSubtitle(detail)
+  const sub = `Paid by ${bill.payorName} · ${bill.currency} · ${dateStr}${paidIn}${bill.note ? ` · ${bill.note}` : ''}`
   let y = drawPageHeader(doc, bill.title, sub)
 
   // Collect participants

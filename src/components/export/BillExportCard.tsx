@@ -1,4 +1,5 @@
 import { formatCurrency } from '@/lib/utils'
+import { detailPaidInNote } from '@/lib/bill-paid-in'
 
 /**
  * Only what the card draws. Declared structurally rather than derived from a Dexie query, so the
@@ -11,11 +12,15 @@ type BillDetails = {
   totalAmount: number
   createdAt: string
   payorName: string
+  originalCurrency: string | null
+  originalTotal: number | null
+  exchangeRate: number | null
   items: {
     id: string
     name: string
     amount: number
-    splits: { id: string; displayName: string; computedAmount: number }[]
+    originalAmount: number | null
+    splits: { id: string; displayName: string; computedAmount: number; originalAmount: number | null }[]
   }[]
 }
 
@@ -48,6 +53,7 @@ function computePersonTotals(items: BillDetails['items']): { name: string; amoun
 
 export function BillExportCard({ bill, groupName, payments = [] }: Props) {
   const personTotals = computePersonTotals(bill.items)
+  const paidIn = detailPaidInNote(bill, bill.items)
 
   return (
     <div
@@ -136,6 +142,8 @@ export function BillExportCard({ bill, groupName, payments = [] }: Props) {
             <div style={{ color: '#6b7280', fontSize: 11, marginTop: 2 }}>{bill.currency}</div>
           </div>
         </div>
+
+        {paidIn && <div style={{ color: '#9ca3af', fontSize: 11, marginTop: 8 }}>{paidIn}</div>}
 
         {bill.note && (
           <div

@@ -303,7 +303,7 @@ Three profile flavors in Dexie (`src/types/index.ts`):
 
 ## Dexie Schema (`src/db/db.ts`)
 
-Current version: **15** (v15 turned `pending_mutations` into the ordered write queue: `seq`, `submission_id`, the exact `push` rows, multi-entry `row_keys`, `next_attempt_at`, `last_error_kind`, index `[actor_user_id+status+seq]`; the upgrade backfills legacy entries with `push = null`, `seq` by `created_at`. A rolled-back v14 build cannot open a v15 database. v14 added optional `settlements.method`). All tables extend sync fields: `id` (UUID PK), `created_at`, `updated_at`, `synced_at` (null = unsynced), `is_deleted`, `device_id`. Versions 9+ added compound indexes (e.g. `[group_id+is_deleted]`) for query performance.
+Current version: **16** (v16 added the foreign-currency fields, null-backfilled: `bills.original_currency/exchange_rate/rate_source/original_total`, `bill_items.original_amount`, `item_splits.original_amount`. v15 turned `pending_mutations` into the ordered write queue: `seq`, `submission_id`, the exact `push` rows, multi-entry `row_keys`, `next_attempt_at`, `last_error_kind`, index `[actor_user_id+status+seq]`; the upgrade backfills legacy entries with `push = null`, `seq` by `created_at`. A rolled-back v14 build cannot open a v15 database. v14 added optional `settlements.method`). All tables extend sync fields: `id` (UUID PK), `created_at`, `updated_at`, `synced_at` (null = unsynced), `is_deleted`, `device_id`. Versions 9+ added compound indexes (e.g. `[group_id+is_deleted]`) for query performance.
 
 | Table | Key Indexes | Purpose |
 |-------|---------|---------|
@@ -581,6 +581,19 @@ Split types computed at write time and stored as `computed_amount`:
 - **`percentage`**: `amount × (splitValue / 100)`, rounded to 2 decimal places
 - **`custom`**: explicit amounts; remainder distributed evenly to unassigned rows
 
+### Foreign-currency bills (079)
+
+A bill can be typed in another currency ("Paid in" on both bill forms) and is converted at save with
+a rate that is then **locked**. **Invariant: every money column (`total_amount`, `bill_items.amount`,
+`item_splits.computed_amount`) stays in the BALANCE currency (`bills.currency`: the chosen one, or
+the group's), so no SQL money function changes; the `original_*` columns are a record of what was
+typed, never an input to a balance.** A bill is converted only when `isConvertedBill`
+(`src/lib/currency-conversion.ts`) says so (the bill has `original_currency` AND every live item has
+`original_amount`); anything else hydrates as plain, so a re-save can never convert twice. The rate
+prefill comes from `fetchExchangeRate` (open.er-api.com, cached 12 h, never throws, never on the
+save path); editing keeps the saved rate and offers today's as "Use this". Editing a group bill keeps
+the bill's own stored currency as target. Detail: migration `079`'s header.
+
 ---
 
 ## Operations Layer (`src/db/operations.ts`)
@@ -819,7 +832,7 @@ Each of these reflects a real past correction in this repo:
 2. **Deletion is server-authoritative.** A device is sent only its own profile plus its own
    local contacts, so it can never conclude that a person/bill/group does not exist. No
    client-side soft-delete driven by a missing row — ever.
-3. **Migrations are append-only.** Next number: **`079`**. Never edit a past migration.
+3. **Migrations are append-only.** Next number: **`080`**. Never edit a past migration.
    **Every migration carries its own explanatory header** — what broke, why the shape is
    what it is, and whether it must be applied before the code that uses it ships. That
    header is the canonical record; read it rather than trusting any summary. A signature or

@@ -75,20 +75,13 @@ import { GroupExportCard } from '@/components/export/GroupExportCard'
 import { GroupMemberExportCard, type GroupMemberBillEntry } from '@/components/export/GroupMemberExportCard'
 import { GroupSelectionExportCard } from '@/components/export/GroupSelectionExportCard'
 import { loadPhonebookRows } from '@/lib/people'
+import { CURRENCIES, currencyLabel } from '@/lib/currencies'
+import { OriginalAmountLine } from '@/components/common/CurrencyConversionField'
 import { MemberMultiPicker } from '@/components/common/MemberMultiPicker'
 import { PayIntoGroupDialog } from '@/components/common/PayIntoGroupDialog'
 import { GroupSettleUpDialog } from '@/components/common/GroupSettleUpDialog'
 import { MemberBalancesDialog } from '@/components/common/MemberBalancesDialog'
 import { SavedCopyNotice } from '@/components/common/SavedCopyNotice'
-
-const CURRENCY_OPTIONS = [
-  ['PHP', 'PHP — Philippine Peso'],
-  ['USD', 'USD — US Dollar'],
-  ['EUR', 'EUR — Euro'],
-  ['JPY', 'JPY — Japanese Yen'],
-  ['KRW', 'KRW — Korean Won'],
-  ['GBP', 'GBP — British Pound'],
-] as const
 
 type MemberRow = {
   id: string
@@ -371,9 +364,9 @@ function EditGroupDialog({
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                {CURRENCY_OPTIONS.map(([code, label]) => (
-                  <SelectItem key={code} value={code}>
-                    {label}
+                {CURRENCIES.map((c) => (
+                  <SelectItem key={c.code} value={c.code}>
+                    {currencyLabel(c.code)}
                   </SelectItem>
                 ))}
               </SelectContent>
@@ -777,6 +770,8 @@ export function GroupDetailPage() {
         note: b.note,
         currency: b.currency,
         total_amount: b.totalAmount,
+        original_currency: b.originalCurrency,
+        original_total: b.originalTotal,
         created_at: b.createdAt,
         created_by: b.createdBy,
         paid_by: b.paidBy,
@@ -1410,9 +1405,12 @@ export function GroupDetailPage() {
                       Paid by {bill.payorName} · {new Date(bill.created_at).toLocaleDateString()}
                     </p>
                   </div>
-                  <span className="text-sm font-semibold text-stone-800">
-                    {formatCurrency(bill.total_amount, bill.currency)}
-                  </span>
+                  <div className="text-right">
+                    <span className="text-sm font-semibold text-stone-800">
+                      {formatCurrency(bill.total_amount, bill.currency)}
+                    </span>
+                    <OriginalAmountLine currency={bill.original_currency} amount={bill.original_total} />
+                  </div>
                 </button>
               ))}
               {filteredBills.length > billsShown && (

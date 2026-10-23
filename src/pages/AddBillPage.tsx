@@ -44,8 +44,11 @@ import {
   redistributeWithPinned,
   remapLineSplits,
   resolveBillEditIds,
+  entryLineFromStored,
   type PinnedSplits,
 } from '@/lib/bill-split-form'
+import { CURRENCIES, currencyLabel } from '@/lib/currencies'
+import { conversionForSave, isConvertedBill } from '@/lib/currency-conversion'
 import { BILL_BACK_QUERY, parseSafeAppPath, withBillBackQuery } from '@/lib/bill-navigation'
 import { listCanonicalRelatedProfileIds, personalPickerIdFor } from '@/lib/people'
 import { announceBillOffset } from '@/lib/bill-offset-notice'
@@ -58,6 +61,7 @@ import { Textarea } from '@/components/ui/textarea'
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@/components/ui/select'
 import { SplitPersonSelector, type SplitMemberOption } from '@/components/common/SplitPersonSelector'
 import { ConfirmDialog } from '@/components/common/ConfirmDialog'
+import { CurrencyConversionField, type ConversionValue } from '@/components/common/CurrencyConversionField'
 
 type BillMode = 'simple' | 'itemized'
 
@@ -105,15 +109,6 @@ function isItemizedLineComplete(
   )
 }
 
-const CURRENCIES = [
-  { value: 'PHP', label: 'PHP — Philippine Peso' },
-  { value: 'USD', label: 'USD — US Dollar' },
-  { value: 'EUR', label: 'EUR — Euro' },
-  { value: 'JPY', label: 'JPY — Japanese Yen' },
-  { value: 'KRW', label: 'KRW — Korean Won' },
-  { value: 'GBP', label: 'GBP — British Pound' },
-]
-
 export function AddBillPage() {
   const navigate = useNavigate()
   const [searchParams] = useSearchParams()
@@ -126,6 +121,9 @@ export function AddBillPage() {
   const [mode, setMode] = useState<BillMode>('simple')
   const [title, setTitle] = useState('')
   const [currency, setCurrency] = useState('PHP')
+  // What the amounts below are typed in. Equal to `currency` unless the bill is paid in another one.
+  const [conv, setConv] = useState<ConversionValue>({ currency: 'PHP', rate: null, source: 'online' })
+  const [savedConversion, setSavedConversion] = useState<(ConversionValue & { rate: number }) | null>(null)
   const [groupId, setGroupId] = useState<string | null>(groupIdParam)
   const [paidBy, setPaidBy] = useState<string>('')
   const [payorOpen, setPayorOpen] = useState(false)
@@ -294,9 +292,27 @@ export function AddBillPage() {
         item.selectedUserIds.includes(userId),
     )
 
+  const conversionResult = conversionForSave({
+    paidInCurrency: conv.currency,
+    targetCurrency: currency,
+    rate: conv.rate,
+    source: conv.source,
+  })
+  const conversion = conversionResult === 'invalid' ? null : conversionResult
+  const enteredTotal =
+    mode === 'itemized'
+      ? itemizedTotal
+      : simpleSplitType === 'quantity'
+        ? effectiveSimpleSelectedUserIds.reduce(
+            (s, uid) => s + (parseInt(simpleSplitValues[uid] ?? '0', 10) || 0),
+            0,
+          ) * simpleAmountNum
+        : simpleAmountNum
+
   const canSave =
     Boolean(userId) &&
     !!title.trim() &&
+    conversionResult !== 'invalid' &&
     (mode === 'simple'
       ? simpleSplitsOk && simpleAmountNum > 0
       : itemizedLinesOk && hasAnyCompleteItem && itemizedIncludesUser)
@@ -362,6 +378,20 @@ export function AddBillPage() {
       setTitle(d.title)
       setNote(d.note)
       setCurrency(d.currency)
+      // A bill is hydrated as converted only when every live item kept its paid-in amount;
+      // otherwise the stored amounts are the balance ones and re-saving them must not convert twice.
+      const paidInCurrency = isConvertedBill(d, d.items) ? d.original_currency : null
+      const savedRate = d.exchange_rate
+      const converted = paidInCurrency != null && savedRate != null
+      const entryLine = (item: (typeof d.items)[number]) =>
+        entryLineFromStored(converted ? item : { ...item, original_amount: null })
+      if (converted) {
+        setConv({ currency: paidInCurrency, rate: savedRate, source: d.rate_source ?? 'manual' })
+        setSavedConversion({ currency: paidInCurrency, rate: savedRate, source: d.rate_source ?? 'manual' })
+      } else {
+        setConv({ currency: d.currency, rate: null, source: 'online' })
+        setSavedConversion(null)
+      }
       setCategory(d.category ?? null)
       setGroupId(d.group_id)
 
@@ -380,7 +410,7 @@ export function AddBillPage() {
 
       if (d.items.length === 1) {
         setMode('simple')
-        const line = d.items[0]
+        const line = entryLine(d.items[0])
         setSimpleAmount(String(line.amount))
         if (line.splits.length) {
           setSimpleSplitType(line.splits[0].split_type)
@@ -396,11 +426,12 @@ export function AddBillPage() {
         setMode('itemized')
         setItems(
           d.items.map((item) => {
-            const hydrated = remapLineSplits(item.splits, pickerIdFor)
+            const line = entryLine(item)
+            const hydrated = remapLineSplits(line.splits, pickerIdFor)
             return {
               key: item.id,
               name: item.name,
-              amount: String(item.amount),
+              amount: String(line.amount),
               splitType: item.splits[0]?.split_type ?? 'equal',
               selectedUserIds: hydrated.selectedUserIds,
               splitValues: hydrated.splitValues,
@@ -726,6 +757,7 @@ export function AddBillPage() {
         input = {
           title: title.trim(),
           currency,
+          conversion,
           groupId,
           createdBy: userId,
           paidBy: paidBy || userId,
@@ -748,6 +780,7 @@ export function AddBillPage() {
         input = {
           title: title.trim(),
           currency,
+          conversion,
           groupId,
           createdBy: userId,
           paidBy: paidBy || userId,
@@ -768,6 +801,7 @@ export function AddBillPage() {
           paidBy: input.paidBy,
           category: input.category,
           items: input.items,
+          conversion,
         })
         navigate(
           returnBack
@@ -834,6 +868,7 @@ export function AddBillPage() {
                   setMode('simple')
                   setTitle('')
                   setCurrency('PHP')
+                  setConv({ currency: 'PHP', rate: null, source: 'online' })
                   setPaidBy(userId ?? '')
                   setNote('')
                   setCategory(null)
@@ -861,6 +896,7 @@ export function AddBillPage() {
                   setMode('itemized')
                   setTitle('')
                   setCurrency('PHP')
+                  setConv({ currency: 'PHP', rate: null, source: 'online' })
                   setPaidBy(userId ?? '')
                   setNote('')
                   setCategory(null)
@@ -979,7 +1015,15 @@ export function AddBillPage() {
                 <label className="text-sm font-medium">Currency</label>
                 <Select
                   value={currency}
-                  onValueChange={setCurrency}
+                  onValueChange={(next) => {
+                    setCurrency(next)
+                    // A paid-in currency the user picked survives; only its rate is for the old pair.
+                    setConv((c) => ({
+                      currency: c.currency !== currency && c.currency !== next ? c.currency : next,
+                      rate: null,
+                      source: 'online',
+                    }))
+                  }}
                   disabled={isEdit}
                 >
                   <SelectTrigger>
@@ -987,13 +1031,21 @@ export function AddBillPage() {
                   </SelectTrigger>
                   <SelectContent>
                     {CURRENCIES.map((c) => (
-                      <SelectItem key={c.value} value={c.value}>
-                        {c.label}
+                      <SelectItem key={c.code} value={c.code}>
+                        {currencyLabel(c.code)}
                       </SelectItem>
                     ))}
                   </SelectContent>
                 </Select>
               </div>
+
+              <CurrencyConversionField
+                targetCurrency={currency}
+                value={conv}
+                onChange={setConv}
+                total={enteredTotal}
+                saved={savedConversion}
+              />
 
               <div className="flex flex-col gap-2">
                 <label className="text-sm font-medium">Note (optional)</label>
@@ -1114,7 +1166,7 @@ export function AddBillPage() {
                           lockUserInSplits && userId ? new Set([userId]) : undefined
                         }
                         splitType={simpleSplitType}
-                        currency={currency}
+                        currency={conv.currency}
                         values={simpleSplitValues}
                         pinnedUserIds={simpleSplitMeta.pinned}
                         lineAmount={simpleAmountNum}
@@ -1187,7 +1239,7 @@ export function AddBillPage() {
                               <span className="font-semibold text-teal-800">
                                 {formatCurrency(
                                   simpleAmountNum / effectiveSimpleSelectedUserIds.length,
-                                  currency,
+                                  conv.currency,
                                 )}
                               </span>{' '}
                               each across {effectiveSimpleSelectedUserIds.length}{' '}
@@ -1203,7 +1255,7 @@ export function AddBillPage() {
                                 <p className="text-sm text-stone-500">
                                   {totalUnits} unit{totalUnits !== 1 ? 's' : ''} ·{' '}
                                   <span className="font-semibold text-stone-800">
-                                    {formatCurrency(totalUnits * simpleAmountNum, currency)}
+                                    {formatCurrency(totalUnits * simpleAmountNum, conv.currency)}
                                   </span>{' '}
                                   total
                                 </p>
@@ -1213,7 +1265,7 @@ export function AddBillPage() {
                             <p className="text-sm text-stone-500">
                               Total:{' '}
                               <span className="font-semibold text-stone-800">
-                                {formatCurrency(simpleAmountNum, currency)}
+                                {formatCurrency(simpleAmountNum, conv.currency)}
                               </span>{' '}
                               among {effectiveSimpleSelectedUserIds.length}{' '}
                               {effectiveSimpleSelectedUserIds.length === 1 ? 'person' : 'people'}
@@ -1300,9 +1352,9 @@ export function AddBillPage() {
                                     (s, uid) => s + (parseInt(item.splitValues[uid] ?? '0', 10) || 0),
                                     0,
                                   ) * (parseFloat(item.amount) || 0),
-                                  currency,
+                                  conv.currency,
                                 )
-                              : formatCurrency(parseFloat(item.amount) || 0, currency)}
+                              : formatCurrency(parseFloat(item.amount) || 0, conv.currency)}
                           </span>
                           <ChevronRight className="size-4 shrink-0 text-stone-400" aria-hidden />
                         </button>
@@ -1426,7 +1478,7 @@ export function AddBillPage() {
                             selectedUserIds={effectiveItemIds}
                             onToggle={(uid) => toggleUserForItem(item.key, uid)}
                             splitType={item.splitType}
-                            currency={currency}
+                            currency={conv.currency}
                             values={item.splitValues}
                             pinnedUserIds={item.pinnedSplit}
                             lineAmount={parseFloat(item.amount) || 0}
@@ -1493,7 +1545,7 @@ export function AddBillPage() {
                             <p className="mt-1.5 text-xs text-stone-400">
                               {formatCurrency(
                                 parseFloat(item.amount) / effectiveItemIds.length,
-                                currency,
+                                conv.currency,
                               )}{' '}
                               each
                             </p>
@@ -1525,7 +1577,7 @@ export function AddBillPage() {
                 <div className="mt-4 flex items-center justify-between rounded-2xl border border-stone-200 bg-stone-50 px-4 py-3">
                   <span className="text-sm font-medium text-stone-600">Running total</span>
                   <span className="text-lg font-semibold text-stone-800">
-                    {formatCurrency(itemizedTotal, currency)}
+                    {formatCurrency(itemizedTotal, conv.currency)}
                   </span>
                 </div>
               )}

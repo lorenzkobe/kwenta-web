@@ -1,5 +1,6 @@
 import { supabase } from '@/lib/supabase'
 import { now } from '@/lib/utils'
+import { toCurrencyCode } from '@/lib/currency-conversion'
 import { readCache, writeCache } from '@/api/cache'
 import { currentSessionEpoch } from '@/sync/session-epoch'
 import { consumePrimedRead, rememberReadSpec, rpcArgs, type ReadSpec } from '@/api/primed-reads'
@@ -45,6 +46,28 @@ export type RecentBill = {
   currency: string
   createdAt: string
   groupName?: string
+  /** Paid-in currency and amount of a converted bill; null when entered in `currency`. */
+  originalCurrency: string | null
+  originalTotal: number | null
+}
+
+/** Conversion keys are absent from a server older than 079, which must read as unconverted. */
+function nullableNumber(v: unknown): number | null {
+  return typeof v === 'number' && Number.isFinite(v) ? v : null
+}
+
+/** One unreadable currency code makes the whole bill read as unconverted, never a crash in a screen. */
+function toConversionFields(row: Record<string, unknown>) {
+  const originalCurrency = toCurrencyCode(row.originalCurrency)
+  return {
+    originalCurrency,
+    originalTotal: originalCurrency ? nullableNumber(row.originalTotal) : null,
+    exchangeRate: originalCurrency ? nullableNumber(row.exchangeRate) : null,
+  }
+}
+
+function toRateSource(v: unknown): 'online' | 'manual' | null {
+  return v === 'online' || v === 'manual' ? v : null
 }
 
 export type PersonSummary = {
@@ -279,6 +302,9 @@ export type PersonalBillRow = {
   settled: boolean
   category: string | null
   participants: { id: string; label: string }[]
+  originalCurrency: string | null
+  originalTotal: number | null
+  exchangeRate: number | null
 }
 
 export type PersonalBillBuckets = { mine: PersonalBillRow[]; shared: PersonalBillRow[] }
@@ -302,6 +328,7 @@ function toBillRow(row: Record<string, unknown>): PersonalBillRow {
     settled: row.settled === true,
     category: typeof row.category === 'string' && row.category ? row.category : null,
     participants,
+    ...toConversionFields(row),
   }
 }
 
@@ -409,6 +436,9 @@ export type GroupDetail = {
     groupId: string
     category: string | null
     payorName: string
+    originalCurrency: string | null
+    originalTotal: number | null
+    exchangeRate: number | null
   }[]
   /** What each OTHER member owes the viewer. Never involves a third party. */
   pairwise: { memberUserId: string; displayName: string; net: number }[]
@@ -458,6 +488,7 @@ export async function fetchGroupDetail(userId: string, groupId: string) {
         groupId: String(b.groupId ?? ''),
         category: typeof b.category === 'string' && b.category ? b.category : null,
         payorName: String(b.payorName ?? 'Unknown'),
+        ...toConversionFields(b),
       })),
       pairwise: arr(o.pairwise).map((p) => ({
         memberUserId: String(p.memberUserId ?? ''),
@@ -488,6 +519,7 @@ export type BillSplitRow = {
   splitType: string
   splitValue: number
   computedAmount: number
+  originalAmount: number | null
 }
 
 export type BillDetail = {
@@ -504,9 +536,13 @@ export type BillDetail = {
     category: string | null
     creatorName: string
     payorName: string
+    originalCurrency: string | null
+    exchangeRate: number | null
+    rateSource: 'online' | 'manual' | null
+    originalTotal: number | null
   }
   groupName: string | null
-  items: { id: string; name: string; amount: number; splits: BillSplitRow[] }[]
+  items: { id: string; name: string; amount: number; originalAmount: number | null; splits: BillSplitRow[] }[]
   /** Personal bills only — null on a group bill, where the screen does not show it. */
   mySplitTotal: number | null
   pairs: { otherId: string; displayName: string; net: number; squareOverall: boolean }[]
@@ -524,6 +560,8 @@ export async function fetchBillDetail(userId: string, billId: string) {
     const b = (o.bill ?? {}) as Record<string, unknown>
     const items = Array.isArray(o.items) ? (o.items as Record<string, unknown>[]) : []
     const pairs = Array.isArray(o.pairs) ? (o.pairs as Record<string, unknown>[]) : []
+    const conversion = toConversionFields(b)
+    const paidIn = (v: unknown) => (conversion.originalCurrency ? nullableNumber(v) : null)
     return {
       bill: {
         id: String(b.id ?? ''),
@@ -538,12 +576,15 @@ export async function fetchBillDetail(userId: string, billId: string) {
         category: typeof b.category === 'string' && b.category ? b.category : null,
         creatorName: String(b.creatorName ?? 'Unknown'),
         payorName: String(b.payorName ?? 'Unknown'),
+        ...conversion,
+        rateSource: conversion.originalCurrency ? toRateSource(b.rateSource) : null,
       },
       groupName: typeof o.groupName === 'string' ? o.groupName : null,
       items: items.map((it) => ({
         id: String(it.id ?? ''),
         name: String(it.name ?? ''),
         amount: Number(it.amount ?? 0),
+        originalAmount: paidIn(it.originalAmount),
         splits: (Array.isArray(it.splits) ? (it.splits as Record<string, unknown>[]) : []).map(
           (sp) => ({
             id: String(sp.id ?? ''),
@@ -552,6 +593,7 @@ export async function fetchBillDetail(userId: string, billId: string) {
             splitType: String(sp.splitType ?? 'equal'),
             splitValue: Number(sp.splitValue ?? 0),
             computedAmount: Number(sp.computedAmount ?? 0),
+            originalAmount: paidIn(sp.originalAmount),
           }),
         ),
       })),
@@ -610,14 +652,19 @@ export async function fetchRecentBills(userId: string, limit = 5) {
     { fn: 'kwenta_recent_bills', limit },
     (data) => {
       if (!Array.isArray(data)) throw new Error('unexpected response shape')
-      return (data as Record<string, unknown>[]).map((row) => ({
-        id: String(row.id ?? ''),
-        title: String(row.title ?? ''),
-        amount: Number(row.amount ?? 0),
-        currency: String(row.currency ?? ''),
-        createdAt: String(row.createdAt ?? ''),
-        groupName: typeof row.groupName === 'string' && row.groupName ? row.groupName : undefined,
-      }))
+      return (data as Record<string, unknown>[]).map((row) => {
+        const { originalCurrency, originalTotal } = toConversionFields(row)
+        return {
+          id: String(row.id ?? ''),
+          title: String(row.title ?? ''),
+          amount: Number(row.amount ?? 0),
+          currency: String(row.currency ?? ''),
+          createdAt: String(row.createdAt ?? ''),
+          groupName: typeof row.groupName === 'string' && row.groupName ? row.groupName : undefined,
+          originalCurrency,
+          originalTotal,
+        }
+      })
     },
   )
 }

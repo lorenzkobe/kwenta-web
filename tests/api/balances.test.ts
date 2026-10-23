@@ -112,8 +112,34 @@ describe('balance API wrappers', () => {
         currency: 'PHP',
         createdAt: 'T1',
         groupName: undefined,
+        originalCurrency: null,
+        originalTotal: null,
       })
       expect(data[1].groupName).toBe('Squad')
+    })
+
+    it('H8.2: an unreadable originalCurrency reads as unconverted, with its amounts nulled too', async () => {
+      rpc.mockResolvedValue({
+        data: [
+          { id: 'b1', title: 'x', amount: 1, currency: 'PHP', createdAt: 'T1', originalCurrency: '<b>VND</b>', originalTotal: 500000 },
+        ],
+        error: null,
+      })
+
+      const { data } = await fetchRecentBills('u1', 5)
+      expect(data[0]).toMatchObject({ originalCurrency: null, originalTotal: null })
+    })
+
+    it('maps the paid-in currency and amount of a converted bill', async () => {
+      rpc.mockResolvedValue({
+        data: [
+          { id: 'b1', title: 'Pho', amount: 1231.93, currency: 'PHP', createdAt: 'T1', originalCurrency: 'VND', originalTotal: 500000 },
+        ],
+        error: null,
+      })
+
+      const { data } = await fetchRecentBills('u1', 5)
+      expect(data[0]).toMatchObject({ originalCurrency: 'VND', originalTotal: 500000 })
     })
 
     it('rejects a non-array response instead of rendering a broken list', async () => {

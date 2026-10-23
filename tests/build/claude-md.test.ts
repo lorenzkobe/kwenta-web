@@ -17,13 +17,13 @@ const coverage = read('docs/testing-coverage.md')
 const CLAUDE_MD_CHAR_BUDGET = 110_000
 
 describe('CLAUDE.md reflects the sync realignment', () => {
-  it('C30: rule 3 names 079 as the next migration', () => {
-    expect(doc).toMatch(/Next number: \*\*`079`\*\*/)
+  it('C30: rule 3 names 080 as the next migration', () => {
+    expect(doc).toMatch(/Next number: \*\*`080`\*\*/)
     expect(doc).not.toMatch(/Next number: \*\*`076`\*\*/)
   })
 
-  it('C30: the Dexie schema section says version 15', () => {
-    expect(doc).toMatch(/Current version: \*\*15\*\*/)
+  it('C30: the Dexie schema section says version 16', () => {
+    expect(doc).toMatch(/Current version: \*\*16\*\*/)
   })
 
   it('C30: the migrations table has rows for 076, 077 and 078', () => {

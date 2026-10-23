@@ -413,6 +413,40 @@ export class KwentaDB extends Dexie {
       })
       if (upgraded.length > 0) await table.bulkPut(upgraded)
     })
+
+    // Version 16: foreign-currency bills (079). Non-indexed fields, so the stores schema repeats
+    // v15; existing bills, items and splits are backfilled to null (unconverted).
+    this.version(16).stores({
+      profiles: 'id, email, owner_id, linked_profile_id, synced_at, is_deleted, [owner_id+is_deleted]',
+      groups: 'id, created_by, invite_code, synced_at, is_deleted, [created_by+is_deleted]',
+      group_members:
+        'id, group_id, user_id, [group_id+user_id], synced_at, is_deleted, [group_id+is_deleted], [user_id+is_deleted]',
+      bills:
+        'id, group_id, created_by, paid_by, created_at, synced_at, is_deleted, [created_by+group_id], [group_id+is_deleted], [created_by+is_deleted]',
+      bill_items: 'id, bill_id, synced_at, is_deleted, [bill_id+is_deleted]',
+      item_splits: 'id, item_id, user_id, synced_at, is_deleted, [item_id+is_deleted], [user_id+is_deleted]',
+      settlements:
+        'id, group_id, bill_id, bundle_id, from_user_id, to_user_id, is_settled, synced_at, is_deleted, [group_id+is_deleted], [bill_id+is_deleted], [from_user_id+to_user_id]',
+      activity_log:
+        'id, group_id, user_id, entity_type, entity_id, created_at, synced_at, is_deleted, [user_id+created_at]',
+      profile_peer_links:
+        'id, owner_user_id, anchor_profile_id, peer_profile_id, synced_at, is_deleted, [owner_user_id+anchor_profile_id], [owner_user_id+is_deleted]',
+      pending_mutations:
+        'id, actor_user_id, status, entity_type, entity_id, created_at, updated_at, seq, submission_id, *row_keys, [actor_user_id+status+seq]',
+      not_applied_changes:
+        'id, actor_user_id, resolution, entity_type, entity_id, [entity_type+entity_id], created_at, resolved_at, pending_mutation_id',
+    }).upgrade(async (tx) => {
+      await tx.table('bills').toCollection().modify((b: Record<string, unknown>) => {
+        for (const key of ['original_currency', 'exchange_rate', 'rate_source', 'original_total']) {
+          if (b[key] === undefined) b[key] = null
+        }
+      })
+      for (const name of ['bill_items', 'item_splits']) {
+        await tx.table(name).toCollection().modify((r: Record<string, unknown>) => {
+          if (r.original_amount === undefined) r.original_amount = null
+        })
+      }
+    })
   }
 }
 

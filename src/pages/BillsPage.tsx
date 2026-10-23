@@ -10,6 +10,7 @@ import { loadStagedPersonalBillRows } from '@/lib/staged-rows'
 import { SavedCopyNotice } from '@/components/common/SavedCopyNotice'
 import { useCurrentUser } from '@/hooks/useCurrentUser'
 import { formatCurrency, timeAgo, cn } from '@/lib/utils'
+import { OriginalAmountLine } from '@/components/common/CurrencyConversionField'
 import {
   BILL_CATEGORIES,
   CATEGORY_COLORS,
@@ -416,9 +417,12 @@ export function BillsPage() {
                       )}
                     </Link>
                     <div className="flex items-center gap-2">
-                      <span className="text-sm font-semibold text-stone-800">
-                        {formatCurrency(bill.totalAmount, bill.currency)}
-                      </span>
+                      <div className="text-right">
+                        <span className="text-sm font-semibold text-stone-800">
+                          {formatCurrency(bill.totalAmount, bill.currency)}
+                        </span>
+                        <OriginalAmountLine currency={bill.originalCurrency} amount={bill.originalTotal} />
+                      </div>
                       <Button
                         variant="ghost"
                         size="icon-xs"
@@ -494,9 +498,12 @@ export function BillsPage() {
                         <span>Paid by {bill.payorName ?? 'Someone'}</span>
                       </div>
                     </div>
-                    <span className="text-sm font-semibold text-stone-800">
-                      {formatCurrency(bill.totalAmount, bill.currency)}
-                    </span>
+                    <div className="shrink-0 text-right">
+                      <span className="text-sm font-semibold text-stone-800">
+                        {formatCurrency(bill.totalAmount, bill.currency)}
+                      </span>
+                      <OriginalAmountLine currency={bill.originalCurrency} amount={bill.originalTotal} />
+                    </div>
                   </div>
                 </Link>
               ))}

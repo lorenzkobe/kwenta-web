@@ -49,12 +49,20 @@ export interface Bill extends SyncFields {
   total_amount: number
   note: string
   category: string | null
+  /** Paid-in currency of a converted bill; null = entered in `currency`. All four fields are set together. */
+  original_currency: string | null
+  /** `currency` units per ONE `original_currency` unit, locked at save. */
+  exchange_rate: number | null
+  rate_source: 'online' | 'manual' | null
+  original_total: number | null
 }
 
 export interface BillItem extends SyncFields {
   bill_id: string
   name: string
   amount: number
+  /** The amount as typed in the bill's paid-in currency (unit price for a quantity line). */
+  original_amount: number | null
 }
 
 export type SplitType = 'equal' | 'percentage' | 'custom' | 'quantity'
@@ -65,6 +73,8 @@ export interface ItemSplit extends SyncFields {
   split_type: SplitType
   split_value: number
   computed_amount: number
+  /** This person's share in the bill's paid-in currency. */
+  original_amount: number | null
 }
 
 export interface Settlement extends SyncFields {

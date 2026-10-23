@@ -142,3 +142,69 @@ describe('BillDetailModal load failure', () => {
     expect(text).toMatch(/no longer exists/i)
   })
 })
+
+describe('BillDetailModal converted bill', () => {
+  const split = (id: string, computed: number, original: number | null) => ({
+    id,
+    displayName: id,
+    split_type: 'equal',
+    computed_amount: computed,
+    original_amount: original,
+  })
+
+  async function renderBill(bill: Record<string, unknown>) {
+    mocks.bill = bill
+    await act(async () =>
+      root.render(<BillDetailModal billId="bill-1" currentUserId="me" onClose={vi.fn()} onEdit={vi.fn()} />),
+    )
+    return container.textContent ?? ''
+  }
+
+  it('C17: shows the paid-in total, the locked rate and the original beside each item and share', async () => {
+    const text = await renderBill({
+      ...STORED_BILL,
+      total_amount: 1231.93,
+      original_currency: 'VND',
+      original_total: 500000,
+      exchange_rate: 1 / 405.868219,
+      items: [
+        {
+          id: 'i1',
+          name: 'Dinner',
+          amount: 1231.93,
+          original_amount: 500000,
+          splits: [split('Ana', 615.97, 250000), split('Ben', 615.96, 250000)],
+        },
+      ],
+    })
+    expect(text).toContain('1 PHP = 405.87 VND (locked)')
+    expect(text).toContain('500,000')
+    expect(text.match(/250,000/g)).toHaveLength(2)
+  })
+
+  it('C17: a bill with a stale conversion but an item missing its original renders as plain', async () => {
+    const text = await renderBill({
+      ...STORED_BILL,
+      original_currency: 'VND',
+      original_total: 500000,
+      exchange_rate: 0.0025,
+      items: [
+        { id: 'i1', name: 'Dinner', amount: 300, original_amount: null, splits: [split('Ana', 300, null)] },
+      ],
+    })
+    expect(text).not.toContain('(locked)')
+    expect(text).not.toContain('500,000')
+  })
+
+  it('C17: an unconverted bill shows no paid-in line', async () => {
+    const text = await renderBill({
+      ...STORED_BILL,
+      original_currency: null,
+      items: [
+        { id: 'i1', name: 'Dinner', amount: 300, original_amount: null, splits: [split('Ana', 300, null)] },
+      ],
+    })
+    expect(text).not.toContain('(locked)')
+    expect(text).not.toContain('Paid in')
+  })
+})

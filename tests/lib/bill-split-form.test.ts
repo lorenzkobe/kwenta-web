@@ -12,6 +12,7 @@ import {
   remapLineSplits,
   resolveBillEditIds,
   splitTotalEvenly,
+  entryLineFromStored,
 } from '@/lib/bill-split-form'
 
 const sum = (vals: Record<string, string>) =>
@@ -512,5 +513,130 @@ describe('resolveBillEditIds', () => {
     const detail = { paid_by: 'ME', payorName: 'Me', items: [] }
     const { pickerIdFor } = await resolveBillEditIds(detail, identity, 'ME')
     expect(pickerIdFor('UNSEEN')).toBe('UNSEEN')
+  })
+})
+
+// C8: an edit form hydrates a converted bill in the currency it was PAID in. The stored money
+// columns are the balance-currency copy (079), so the form must read the original_amount columns
+// back, or a VND bill would reopen showing PHP numbers and re-convert them on save.
+describe('entryLineFromStored', () => {
+  const shape = (out: ReturnType<typeof entryLineFromStored>) => ({
+    amount: out.amount,
+    splits: out.splits.map((s) => ({ user_id: s.user_id, split_type: s.split_type, split_value: s.split_value })),
+  })
+
+  it('C8: an equal converted line returns the paid-in amount, split values unchanged', () => {
+    const out = entryLineFromStored({
+      amount: 1231.93,
+      original_amount: 500000,
+      splits: [
+        { user_id: 'ME', split_type: 'equal', split_value: 1, original_amount: 250000 },
+        { user_id: 'FR', split_type: 'equal', split_value: 1, original_amount: 250000 },
+      ],
+    })
+    expect(shape(out)).toEqual({
+      amount: 500000,
+      splits: [
+        { user_id: 'ME', split_type: 'equal', split_value: 1 },
+        { user_id: 'FR', split_type: 'equal', split_value: 1 },
+      ],
+    })
+  })
+
+  it('C8: a custom converted line reads split values from original_amount, and 0 (auto) stays 0', () => {
+    // Stored: 10 USD at 56.3 -> ME typed 7 USD (stored split_value 394.10 PHP), FR on auto.
+    const out = entryLineFromStored({
+      amount: 563,
+      original_amount: 10,
+      splits: [
+        { user_id: 'ME', split_type: 'custom', split_value: 394.1, original_amount: 7 },
+        { user_id: 'FR', split_type: 'custom', split_value: 0, original_amount: 3 },
+      ],
+    })
+    expect(shape(out)).toEqual({
+      amount: 10,
+      splits: [
+        { user_id: 'ME', split_type: 'custom', split_value: 7 },
+        { user_id: 'FR', split_type: 'custom', split_value: 0 },
+      ],
+    })
+  })
+
+  it('C8: percentage and quantity converted lines keep their split values', () => {
+    const pct = entryLineFromStored({
+      amount: 563,
+      original_amount: 10,
+      splits: [
+        { user_id: 'ME', split_type: 'percentage', split_value: 60, original_amount: 6 },
+        { user_id: 'FR', split_type: 'percentage', split_value: 40, original_amount: 4 },
+      ],
+    })
+    expect(shape(pct)).toEqual({
+      amount: 10,
+      splits: [
+        { user_id: 'ME', split_type: 'percentage', split_value: 60 },
+        { user_id: 'FR', split_type: 'percentage', split_value: 40 },
+      ],
+    })
+
+    // A quantity line's amount is the UNIT price; original_amount on the item is the typed unit price.
+    const qty = entryLineFromStored({
+      amount: 140.75,
+      original_amount: 2.5,
+      splits: [
+        { user_id: 'ME', split_type: 'quantity', split_value: 3, original_amount: 7.5 },
+        { user_id: 'FR', split_type: 'quantity', split_value: 1, original_amount: 2.5 },
+      ],
+    })
+    expect(shape(qty)).toEqual({
+      amount: 2.5,
+      splits: [
+        { user_id: 'ME', split_type: 'quantity', split_value: 3 },
+        { user_id: 'FR', split_type: 'quantity', split_value: 1 },
+      ],
+    })
+  })
+
+  it('C8: an unconverted line is returned unchanged', () => {
+    const out = entryLineFromStored({
+      amount: 100,
+      original_amount: null,
+      splits: [
+        { user_id: 'ME', split_type: 'custom', split_value: 70, original_amount: null },
+        { user_id: 'FR', split_type: 'custom', split_value: 0, original_amount: null },
+      ],
+    })
+    expect(shape(out)).toEqual({
+      amount: 100,
+      splits: [
+        { user_id: 'ME', split_type: 'custom', split_value: 70 },
+        { user_id: 'FR', split_type: 'custom', split_value: 0 },
+      ],
+    })
+  })
+
+  it('C29: a line an older client re-saved (item original_amount null, stale split originals) keeps the balance amounts', () => {
+    // An old build writes new child rows without original_amount. Whatever a split still carries,
+    // the line is not a converted line, so re-saving must not treat 1231.93 as VND.
+    const out = entryLineFromStored({
+      amount: 1231.93,
+      original_amount: null,
+      splits: [
+        { user_id: 'ME', split_type: 'custom', split_value: 615.97, original_amount: 250000 },
+        { user_id: 'FR', split_type: 'custom', split_value: 615.96, original_amount: 250000 },
+      ],
+    })
+    expect(shape(out)).toEqual({
+      amount: 1231.93,
+      splits: [
+        { user_id: 'ME', split_type: 'custom', split_value: 615.97 },
+        { user_id: 'FR', split_type: 'custom', split_value: 615.96 },
+      ],
+    })
+  })
+
+  it('C8: a line with no splits still returns the paid-in amount', () => {
+    const out = entryLineFromStored({ amount: 1231.93, original_amount: 500000, splits: [] })
+    expect(shape(out)).toEqual({ amount: 500000, splits: [] })
   })
 })

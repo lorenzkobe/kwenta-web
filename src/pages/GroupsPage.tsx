@@ -9,6 +9,7 @@ import { useServerData } from '@/hooks/useServerData'
 import { SavedCopyNotice } from '@/components/common/SavedCopyNotice'
 import { loadPhonebookRows } from '@/lib/people'
 import { formatCurrency, cn } from '@/lib/utils'
+import { CURRENCIES, currencyLabel } from '@/lib/currencies'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@/components/ui/select'
@@ -204,12 +205,11 @@ export function GroupsPage() {
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="PHP">PHP — Philippine Peso</SelectItem>
-                  <SelectItem value="USD">USD — US Dollar</SelectItem>
-                  <SelectItem value="EUR">EUR — Euro</SelectItem>
-                  <SelectItem value="JPY">JPY — Japanese Yen</SelectItem>
-                  <SelectItem value="KRW">KRW — Korean Won</SelectItem>
-                  <SelectItem value="GBP">GBP — British Pound</SelectItem>
+                  {CURRENCIES.map((c) => (
+                    <SelectItem key={c.code} value={c.code}>
+                      {currencyLabel(c.code)}
+                    </SelectItem>
+                  ))}
                 </SelectContent>
               </Select>
             </div>

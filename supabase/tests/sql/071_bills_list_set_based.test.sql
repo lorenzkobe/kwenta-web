@@ -43,6 +43,21 @@ AS $$
     AND NOT COALESCE(bi.is_deleted, false);
 $$;
 
+-- 079 adds originalCurrency / originalTotal / exchangeRate to every row of the live endpoint. The
+-- frozen 065 copy below does not have them, so the comparison drops exactly those three keys from
+-- the live output and nothing else; 079's suite pins the keys themselves.
+CREATE OR REPLACE FUNCTION test.without_conversion_keys(p jsonb)
+RETURNS jsonb
+LANGUAGE sql
+IMMUTABLE
+AS $$
+  SELECT jsonb_build_object(
+    'mine', COALESCE((SELECT jsonb_agg(r - 'originalCurrency' - 'originalTotal' - 'exchangeRate')
+                      FROM jsonb_array_elements(p -> 'mine') r), '[]'::jsonb),
+    'shared', COALESCE((SELECT jsonb_agg(r - 'originalCurrency' - 'originalTotal' - 'exchangeRate')
+                        FROM jsonb_array_elements(p -> 'shared') r), '[]'::jsonb));
+$$;
+
 -- verbatim from 065_list_settled_map_and_payor_names.sql (kwenta_personal_bills); only the name is rewritten.
 CREATE OR REPLACE FUNCTION test.old_personal_bills()
 RETURNS jsonb
@@ -458,7 +473,7 @@ BEGIN
       format('relevant_bill_ids_for_user has no duplicate ids for %s', v));
 
     pb := test.try_json('SELECT public.kwenta_personal_bills()');
-    PERFORM test.assert_json_eq(pb, test.try_json('SELECT test.old_personal_bills()'),
+    PERFORM test.assert_json_eq(test.without_conversion_keys(pb), test.try_json('SELECT test.old_personal_bills()'),
       format('personal_bills for %s', v));
     PERFORM test.assert_true(test.bills_in_list_order(pb -> 'mine') AND test.bills_in_list_order(pb -> 'shared'),
       format('personal_bills lists newest first, then id, for %s', v));
@@ -568,7 +583,7 @@ BEGIN
   FOREACH v IN ARRAY accounts LOOP
     PERFORM test.as_user(v);
     pb := test.try_json('SELECT public.kwenta_personal_bills()');
-    PERFORM test.assert_json_eq(test.canon(pb), test.canon(test.try_json('SELECT test.old_personal_bills()')),
+    PERFORM test.assert_json_eq(test.canon(test.without_conversion_keys(pb)), test.canon(test.try_json('SELECT test.old_personal_bills()')),
       format('personal_bills with created_at ties, as multisets, for %s', v));
     PERFORM test.assert_true(test.bills_in_list_order(pb -> 'mine') AND test.bills_in_list_order(pb -> 'shared'),
       format('personal_bills breaks created_at ties by id for %s', v));

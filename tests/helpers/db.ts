@@ -102,6 +102,11 @@ export function makeBill(over: Partial<Bill> = {}): Bill {
     total_amount: over.total_amount ?? 0,
     note: '',
     category: null,
+    // 079: a bill entered in its balance currency carries no conversion.
+    original_currency: null,
+    exchange_rate: null,
+    rate_source: null,
+    original_total: null,
     ...over,
   }
 }
@@ -113,6 +118,7 @@ export function makeItem(over: Partial<BillItem> = {}): BillItem {
     bill_id: over.bill_id ?? tid('bill'),
     name: 'Item',
     amount: over.amount ?? 0,
+    original_amount: null,
     ...over,
   }
 }
@@ -126,6 +132,7 @@ export function makeSplit(over: Partial<ItemSplit> = {}): ItemSplit {
     split_type: 'equal',
     split_value: 1,
     computed_amount: over.computed_amount ?? 0,
+    original_amount: null,
     ...over,
   }
 }

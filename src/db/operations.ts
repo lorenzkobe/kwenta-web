@@ -11,7 +11,7 @@ import type {
   Settlement,
   SplitType,
 } from '@/types'
-import { generateId, getDeviceId, now } from '@/lib/utils'
+import { generateId, getDeviceId, now, roundMoney } from '@/lib/utils'
 import { normalizePaymentMethod } from '@/lib/payment-method'
 import { commitCloudFirstWrite, type CloudWritePayload } from '@/sync/cloud-write'
 import { loadBillIntoMirror } from '@/sync/bill-mirror'
@@ -23,6 +23,13 @@ import {
   resolveRecipientProfileIdForNotify,
 } from '@/lib/kwenta-notifications'
 import { computeSplits, type SplitInput } from '@/lib/splits'
+import {
+  allocateConvertedShares,
+  convertAmount,
+  convertLine,
+  isValidRate,
+  type BillConversion,
+} from '@/lib/currency-conversion'
 import { loadGroupMemberBreakdownFresh, loadOwedInGroup } from '@/api/balances'
 import type { SettlementLeg } from '@/lib/settlement-suggestions'
 import {
@@ -140,9 +147,117 @@ export interface CreateBillInput {
       splitValue: number
     }[]
   }[]
+  /** When set, `items` are typed in `conversion.fromCurrency` and stored converted into `currency`. */
+  conversion?: BillConversion | null
+}
+
+/** Refuses a conversion the server would reject, before anything is built or sent. */
+function assertValidConversion(conversion: BillConversion | null | undefined, currency: string): void {
+  if (!conversion) return
+  if (!isValidRate(conversion.rate)) throw new Error('Enter an exchange rate greater than zero.')
+  if (conversion.source !== 'online' && conversion.source !== 'manual') {
+    throw new Error('The exchange rate source is not recognised.')
+  }
+  if (!conversion.fromCurrency || conversion.fromCurrency === currency) {
+    throw new Error('The paid-in currency must differ from the bill currency.')
+  }
+}
+
+// Column limits (001, 079): the balance-currency money columns are numeric(12,2) (< 1e10), a custom
+// split_value numeric(12,4) (< 1e8), the original_* columns numeric(16,2) (< 1e14). A mistyped
+// rate must fail here with a readable message, not as a server overflow that rolls the write back.
+const MAX_BALANCE_AMOUNT = 1e10
+const MAX_SPLIT_VALUE = 1e8
+const MAX_ORIGINAL_AMOUNT = 1e14
+
+function assertAmountsInRange(limit: number, ...amounts: number[]): void {
+  if (amounts.some((a) => !Number.isFinite(a) || Math.abs(a) >= limit)) {
+    throw new Error('This amount is too large once converted. Check the exchange rate.')
+  }
+}
+
+function conversionColumns(conversion: BillConversion | null, originalTotal: number | null) {
+  return {
+    original_currency: conversion?.fromCurrency ?? null,
+    exchange_rate: conversion?.rate ?? null,
+    rate_source: conversion?.source ?? null,
+    original_total: conversion ? originalTotal : null,
+  }
+}
+
+/**
+ * The one child-row builder behind createBill and updateBill. Without a conversion the rows are
+ * the amounts as typed; with one, each line is converted by `convertLine` and the typed amounts
+ * ride along in the `original_amount` columns.
+ */
+function buildBillChildRows(
+  billId: string,
+  items: CreateBillInput['items'],
+  conversion: BillConversion | null,
+  resolvedSplitUserId: Map<string, string>,
+): { items: BillItem[]; splits: ItemSplit[]; totalAmount: number; originalTotal: number } {
+  const billItems: BillItem[] = []
+  const itemSplits: ItemSplit[] = []
+  let totalAmount = 0
+  let originalTotal = 0
+  for (const item of items) {
+    const itemId = generateId()
+    const isQuantity = item.splits.length > 0 && item.splits[0].splitType === 'quantity'
+    // Before convertLine: an overflowing rate would otherwise surface as a bare BigInt RangeError.
+    if (conversion) {
+      assertAmountsInRange(MAX_ORIGINAL_AMOUNT, item.amount)
+      assertAmountsInRange(MAX_BALANCE_AMOUNT, convertAmount(item.amount, conversion.rate))
+    }
+    const line = conversion ? convertLine({ amount: item.amount, splits: item.splits as SplitInput[] }, conversion.rate) : null
+    if (line) {
+      assertAmountsInRange(MAX_BALANCE_AMOUNT, ...line.splits.map((s) => s.computedAmount))
+      assertAmountsInRange(MAX_SPLIT_VALUE, ...line.splits.map((s) => s.splitValue))
+      assertAmountsInRange(MAX_ORIGINAL_AMOUNT, ...line.splits.map((s) => s.originalAmount))
+    }
+    const computed = line ? null : computeSplits(item.amount, item.splits as SplitInput[])
+    billItems.push({
+      ...syncFields({ id: itemId }),
+      bill_id: billId,
+      name: item.name,
+      amount: line ? line.amount : item.amount,
+      original_amount: line ? line.originalAmount : null,
+    })
+    for (let i = 0; i < item.splits.length; i++) {
+      const converted = line?.splits[i]
+      itemSplits.push({
+        ...syncFields(),
+        item_id: itemId,
+        user_id: resolvedSplitUserId.get(item.splits[i].userId) ?? item.splits[i].userId,
+        split_type: item.splits[i].splitType,
+        split_value: converted ? converted.splitValue : item.splits[i].splitValue,
+        computed_amount: converted ? converted.computedAmount : computed![i].computedAmount,
+        original_amount: converted ? converted.originalAmount : null,
+      })
+    }
+    if (isQuantity) {
+      const shares = line ? line.splits : computed!
+      totalAmount += shares.reduce((sum, r) => sum + r.computedAmount, 0)
+      if (line) originalTotal += line.splits.reduce((sum, r) => sum + r.originalAmount, 0)
+    } else {
+      totalAmount += line ? line.amount : item.amount
+      originalTotal += item.amount
+    }
+  }
+  if (conversion) {
+    assertAmountsInRange(MAX_BALANCE_AMOUNT, totalAmount)
+    assertAmountsInRange(MAX_ORIGINAL_AMOUNT, originalTotal)
+  }
+  return {
+    items: billItems,
+    splits: itemSplits,
+    totalAmount: conversion ? roundMoney(totalAmount) : totalAmount,
+    originalTotal: roundMoney(originalTotal),
+  }
 }
 
 export async function createBill(input: CreateBillInput): Promise<string> {
+  const conversion = input.conversion ?? null
+  assertValidConversion(conversion, input.currency)
   const billId = generateId()
 
   // Resolve chosen ids to the canonical group roster member id BEFORE the transaction
@@ -182,16 +297,9 @@ export async function createBill(input: CreateBillInput): Promise<string> {
     }
   }
 
-  const totalAmount = input.items.reduce((sum, item) => {
-    if (item.splits.length > 0 && item.splits[0].splitType === 'quantity') {
-      const computed = computeSplits(item.amount, item.splits as SplitInput[])
-      return sum + computed.reduce((s, r) => s + r.computedAmount, 0)
-    }
-    return sum + item.amount
-  }, 0)
-
   // BUILD — pure, in memory. Nothing touches Dexie until the server has accepted these rows
   // (or we know we are offline). See `commitCloudFirstWrite`.
+  const children = buildBillChildRows(billId, input.items, conversion, resolvedSplitUserId)
   const bill: Bill = {
     ...syncFields({ id: billId }),
     title: input.title,
@@ -199,33 +307,10 @@ export async function createBill(input: CreateBillInput): Promise<string> {
     currency: input.currency,
     created_by: input.createdBy,
     paid_by: resolvedPaidBy,
-    total_amount: totalAmount,
+    total_amount: children.totalAmount,
     note: input.note,
     category: input.category ?? null,
-  }
-
-  const billItems: BillItem[] = []
-  const itemSplits: ItemSplit[] = []
-  for (const item of input.items) {
-    const itemId = generateId()
-    billItems.push({
-      ...syncFields({ id: itemId }),
-      bill_id: billId,
-      name: item.name,
-      amount: item.amount,
-    })
-    if (item.splits.length === 0) continue
-    const computed = computeSplits(item.amount, item.splits as SplitInput[])
-    for (let i = 0; i < item.splits.length; i++) {
-      itemSplits.push({
-        ...syncFields(),
-        item_id: itemId,
-        user_id: resolvedSplitUserId.get(item.splits[i].userId) ?? item.splits[i].userId,
-        split_type: item.splits[i].splitType,
-        split_value: item.splits[i].splitValue,
-        computed_amount: computed[i].computedAmount,
-      })
-    }
+    ...conversionColumns(conversion, children.originalTotal),
   }
 
   const activity = {
@@ -240,8 +325,8 @@ export async function createBill(input: CreateBillInput): Promise<string> {
 
   const payload: CloudWritePayload = {
     bills: [bill],
-    bill_items: billItems,
-    item_splits: itemSplits,
+    bill_items: children.items,
+    item_splits: children.splits,
     activity_log: [activity],
   }
 
@@ -334,8 +419,12 @@ export async function updateBill(
     paidBy?: string
     category?: string | null
     items: UpdateBillItemsInput
+    /** Omitted or null: `items` are in `currency` and any previous conversion is cleared. */
+    conversion?: BillConversion | null
   },
 ): Promise<void> {
+  const conversion = patch.conversion ?? null
+  assertValidConversion(conversion, patch.currency)
   const timestamp = now()
   const bill = await db.bills.get(billId)
   // Every refusal throws: a silent return let the page navigate as if the edit had been saved.
@@ -363,14 +452,6 @@ export async function updateBill(
     }
   }
 
-  const totalAmount = patch.items.reduce((sum, item) => {
-    if (item.splits.length > 0 && item.splits[0].splitType === 'quantity') {
-      const computed = computeSplits(item.amount, item.splits as SplitInput[])
-      return sum + computed.reduce((s, r) => s + r.computedAmount, 0)
-    }
-    return sum + item.amount
-  }, 0)
-
   // BUILD — the replaced items/splits are soft-deleted and the new ones created. The upsert
   // needs COMPLETE rows, so each change is expressed as a whole row rather than a patch.
   const { items: retiredItems, splits: retiredSplits } = await buildBillChildSoftDeletes(
@@ -378,6 +459,7 @@ export async function updateBill(
     timestamp,
   )
 
+  const children = buildBillChildRows(billId, patch.items, conversion, resolvedSplitUserId)
   const updatedBill: Bill = {
     ...bill,
     title: patch.title,
@@ -385,33 +467,10 @@ export async function updateBill(
     currency: patch.currency,
     ...(resolvedPaidBy !== undefined && { paid_by: resolvedPaidBy }),
     category: patch.category ?? null,
-    total_amount: totalAmount,
+    total_amount: children.totalAmount,
+    ...conversionColumns(conversion, children.originalTotal),
     updated_at: timestamp,
     synced_at: null,
-  }
-
-  const newItems: BillItem[] = []
-  const newSplits: ItemSplit[] = []
-  for (const item of patch.items) {
-    const itemId = generateId()
-    newItems.push({
-      ...syncFields({ id: itemId }),
-      bill_id: billId,
-      name: item.name,
-      amount: item.amount,
-    })
-    if (item.splits.length === 0) continue
-    const computed = computeSplits(item.amount, item.splits as SplitInput[])
-    for (let i = 0; i < item.splits.length; i++) {
-      newSplits.push({
-        ...syncFields(),
-        item_id: itemId,
-        user_id: resolvedSplitUserId.get(item.splits[i].userId) ?? item.splits[i].userId,
-        split_type: item.splits[i].splitType,
-        split_value: item.splits[i].splitValue,
-        computed_amount: computed[i].computedAmount,
-      })
-    }
   }
 
   const activity = {
@@ -424,8 +483,8 @@ export async function updateBill(
     description: `Updated bill "${patch.title}"`,
   }
 
-  const billItemRows = [...retiredItems, ...newItems]
-  const itemSplitRows = [...retiredSplits, ...newSplits]
+  const billItemRows = [...retiredItems, ...children.items]
+  const itemSplitRows = [...retiredSplits, ...children.splits]
 
   await commitCloudFirstWrite({
     actorUserId: editorUserId,
@@ -1360,10 +1419,21 @@ async function removePersonFromPersonalBills(
         // floor-to-cent + remainder-to-first so splits sum to item.amount exactly.
         const base = Math.floor((item.amount / remaining.length) * 100) / 100
         const cents = Math.round((item.amount - base * remaining.length) * 100) / 100
+        // A converted line re-divides the paid-in amount by the same rule, then the balance shares
+        // follow it proportionally and still sum to the item amount.
+        const paidInShares =
+          item.original_amount == null
+            ? null
+            : computeSplits(
+                item.original_amount,
+                remaining.map((r) => ({ userId: r.user_id, splitType: 'equal' as const, splitValue: r.split_value })),
+              ).map((r) => roundMoney(r.computedAmount))
+        const balanceShares = paidInShares ? allocateConvertedShares(paidInShares, item.amount) : null
         for (let i = 0; i < remaining.length; i++) {
           collect.item_splits.push({
             ...remaining[i],
-            computed_amount: i === 0 ? base + cents : base,
+            computed_amount: balanceShares ? balanceShares[i] : i === 0 ? base + cents : base,
+            ...(paidInShares && { original_amount: paidInShares[i] }),
             updated_at: timestamp,
             synced_at: null,
           })

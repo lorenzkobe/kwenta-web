@@ -21,8 +21,10 @@ import {
   redistributeWithPinned,
   remapLineSplits,
   resolveBillEditIds,
+  entryLineFromStored,
   type PinnedSplits,
 } from '@/lib/bill-split-form'
+import { conversionForSave, editTargetCurrency, isConvertedBill } from '@/lib/currency-conversion'
 import { normalizeAmountInput, stripLeadingZerosAmount } from '@/lib/amount-input'
 import { cn, formatCurrency } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
@@ -31,6 +33,7 @@ import { Textarea } from '@/components/ui/textarea'
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@/components/ui/select'
 import { SplitPersonSelector, type SplitMemberOption } from '@/components/common/SplitPersonSelector'
 import { ConfirmDialog } from '@/components/common/ConfirmDialog'
+import { CurrencyConversionField, type ConversionValue } from '@/components/common/CurrencyConversionField'
 import { loadBillIntoMirror } from '@/sync/bill-mirror'
 
 type BillMode = 'simple' | 'itemized'
@@ -104,6 +107,12 @@ export function AddBillDialog({
   const [category, setCategory] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
   const [loadingEdit, setLoadingEdit] = useState(false)
+  // An edited bill keeps the currency it was stored in, even if the group's currency changed since:
+  // relabelling its amounts would change what they are worth. A new bill uses the group's currency.
+  const [storedCurrency, setStoredCurrency] = useState<string | null>(null)
+  const billCurrency = editTargetCurrency({ editingBillCurrency: storedCurrency, groupCurrency })
+  const [conv, setConv] = useState<ConversionValue>({ currency: groupCurrency, rate: null, source: 'online' })
+  const [savedConversion, setSavedConversion] = useState<(ConversionValue & { rate: number }) | null>(null)
 
   const [simpleAmount, setSimpleAmount] = useState('')
   const [simpleSplitType, setSimpleSplitType] = useState<SplitType>('equal')
@@ -169,8 +178,26 @@ export function AddBillDialog({
       )
     })
 
+  const conversionResult = conversionForSave({
+    paidInCurrency: conv.currency,
+    targetCurrency: billCurrency,
+    rate: conv.rate,
+    source: conv.source,
+  })
+  const conversion = conversionResult === 'invalid' ? null : conversionResult
+  const enteredTotal =
+    mode === 'itemized'
+      ? itemizedTotal
+      : simpleSplitType === 'quantity'
+        ? simpleSelectedUserIds.reduce(
+            (s, uid) => s + (parseInt(simpleSplitValues[uid] ?? '0', 10) || 0),
+            0,
+          ) * simpleAmountNum
+        : simpleAmountNum
+
   const canSave =
     !!title.trim() &&
+    conversionResult !== 'invalid' &&
     (mode === 'simple'
       ? simpleSplitsOk && simpleAmountNum > 0
       : itemizedLinesOk && hasAnyCompleteItem)
@@ -213,6 +240,21 @@ export function AddBillDialog({
       }
       setTitle(d.title)
       setNote(d.note)
+      setStoredCurrency(d.currency)
+      // Hydrated as converted only when every live item kept its paid-in amount; otherwise the
+      // stored amounts are the balance ones and re-saving them must not convert twice.
+      const paidInCurrency = isConvertedBill(d, d.items) ? d.original_currency : null
+      const savedRate = d.exchange_rate
+      const converted = paidInCurrency != null && savedRate != null
+      const entryLine = (item: (typeof d.items)[number]) =>
+        entryLineFromStored(converted ? item : { ...item, original_amount: null })
+      if (converted) {
+        setConv({ currency: paidInCurrency, rate: savedRate, source: d.rate_source ?? 'manual' })
+        setSavedConversion({ currency: paidInCurrency, rate: savedRate, source: d.rate_source ?? 'manual' })
+      } else {
+        setConv({ currency: d.currency, rate: null, source: 'online' })
+        setSavedConversion(null)
+      }
       setCategory(d.category ?? null)
 
       // Stored ids (`paid_by`, `item_splits.user_id`) are canonical roster ids already for a
@@ -230,7 +272,7 @@ export function AddBillDialog({
 
       if (d.items.length === 1) {
         setMode('simple')
-        const line = d.items[0]
+        const line = entryLine(d.items[0])
         setSimpleAmount(String(line.amount))
         if (line.splits.length) {
           setSimpleSplitType(line.splits[0].split_type)
@@ -246,11 +288,12 @@ export function AddBillDialog({
         setMode('itemized')
         setItems(
           d.items.map((item) => {
-            const hydrated = remapLineSplits(item.splits, pickerIdFor)
+            const line = entryLine(item)
+            const hydrated = remapLineSplits(line.splits, pickerIdFor)
             return {
               key: item.id,
               name: item.name,
-              amount: String(item.amount),
+              amount: String(line.amount),
               splitType: item.splits[0]?.split_type ?? 'equal',
               selectedUserIds: hydrated.selectedUserIds,
               splitValues: hydrated.splitValues,
@@ -599,7 +642,8 @@ export function AddBillDialog({
       if (mode === 'simple') {
         input = {
           title: title.trim(),
-          currency: groupCurrency,
+          currency: billCurrency,
+          conversion,
           groupId,
           createdBy: currentUserId,
           paidBy,
@@ -621,7 +665,8 @@ export function AddBillDialog({
         const validItems = items.filter((i) => i.name.trim() && parseFloat(i.amount) > 0)
         input = {
           title: title.trim(),
-          currency: groupCurrency,
+          currency: billCurrency,
+          conversion,
           groupId,
           createdBy: currentUserId,
           paidBy,
@@ -646,6 +691,7 @@ export function AddBillDialog({
           paidBy: input.paidBy,
           category: input.category,
           items: input.items,
+          conversion,
         })
       } else {
         await createBill(input)
@@ -690,7 +736,7 @@ export function AddBillDialog({
         <div className="flex shrink-0 items-center justify-between border-b border-stone-100 px-5 py-4">
           <div>
             <h2 className="text-base font-semibold">{isEdit ? 'Edit bill' : 'Add bill'}</h2>
-            <p className="text-xs text-stone-400">{groupCurrency}</p>
+            <p className="text-xs text-stone-400">{billCurrency}</p>
           </div>
           <Button variant="ghost" size="icon-xs" className="rounded-full" onClick={onClose}>
             <X className="size-4" />
@@ -721,6 +767,7 @@ export function AddBillDialog({
                       disabled={isEdit}
                       onClick={() => {
                         setMode(id)
+                        setConv({ currency: billCurrency, rate: null, source: 'online' })
                         setTitle('')
                         setPaidBy(currentUserId)
                         setNote('')
@@ -820,6 +867,14 @@ export function AddBillDialog({
                   </div>
                 </div>
               )}
+
+              <CurrencyConversionField
+                targetCurrency={billCurrency}
+                value={conv}
+                onChange={setConv}
+                total={enteredTotal}
+                saved={savedConversion}
+              />
 
               <div className="flex flex-col gap-2">
                 <label className="text-sm font-medium">Note (optional)</label>
@@ -924,7 +979,7 @@ export function AddBillDialog({
                           selectedUserIds={simpleSelectedUserIds}
                           onToggle={toggleSimpleUser}
                           splitType={simpleSplitType}
-                          currency={groupCurrency}
+                          currency={conv.currency}
                           values={simpleSplitValues}
                           pinnedUserIds={simpleSplitMeta.pinned}
                           lineAmount={simpleAmountNum}
@@ -941,7 +996,7 @@ export function AddBillDialog({
                                 <span className="font-semibold text-teal-800">
                                   {formatCurrency(
                                     simpleAmountNum / simpleSelectedUserIds.length,
-                                    groupCurrency,
+                                    conv.currency,
                                   )}
                                 </span>{' '}
                                 each · {simpleSelectedUserIds.length}{' '}
@@ -949,7 +1004,7 @@ export function AddBillDialog({
                               </p>
                             ) : (
                               <p className="text-sm text-stone-500">
-                                {formatCurrency(simpleAmountNum, groupCurrency)} among{' '}
+                                {formatCurrency(simpleAmountNum, conv.currency)} among{' '}
                                 {simpleSelectedUserIds.length}{' '}
                                 {simpleSelectedUserIds.length === 1 ? 'person' : 'people'}
                               </p>
@@ -1005,9 +1060,9 @@ export function AddBillDialog({
                               {item.splitType === 'quantity'
                                 ? formatCurrency(
                                     item.selectedUserIds.reduce((s, uid) => s + (parseInt(item.splitValues[uid] ?? '0', 10) || 0), 0) * (parseFloat(item.amount) || 0),
-                                    groupCurrency,
+                                    conv.currency,
                                   )
-                                : formatCurrency(parseFloat(item.amount) || 0, groupCurrency)}
+                                : formatCurrency(parseFloat(item.amount) || 0, conv.currency)}
                             </span>
                             <ChevronRight className="size-4 shrink-0 text-stone-400" aria-hidden />
                           </button>
@@ -1152,7 +1207,7 @@ export function AddBillDialog({
                               selectedUserIds={item.selectedUserIds}
                               onToggle={(uid) => toggleUserForItem(item.key, uid)}
                               splitType={item.splitType}
-                              currency={groupCurrency}
+                              currency={conv.currency}
                               values={item.splitValues}
                               pinnedUserIds={item.pinnedSplit}
                               lineAmount={parseFloat(item.amount) || 0}
@@ -1167,7 +1222,7 @@ export function AddBillDialog({
                               <p className="mt-1.5 text-xs text-stone-400">
                                 {formatCurrency(
                                   parseFloat(item.amount) / item.selectedUserIds.length,
-                                  groupCurrency,
+                                  conv.currency,
                                 )}{' '}
                                 each
                               </p>
@@ -1196,7 +1251,7 @@ export function AddBillDialog({
                     <div className="flex items-center justify-between rounded-2xl border border-stone-200 bg-white px-4 py-3">
                       <span className="text-sm font-medium text-stone-600">Running total</span>
                       <span className="text-lg font-semibold text-stone-800">
-                        {formatCurrency(itemizedTotal, groupCurrency)}
+                        {formatCurrency(itemizedTotal, conv.currency)}
                       </span>
                     </div>
                   )}

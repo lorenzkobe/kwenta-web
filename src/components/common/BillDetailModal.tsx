@@ -7,6 +7,8 @@ import { toast } from 'sonner'
 import { describeError, formatCurrency } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { ConfirmDialog } from '@/components/common/ConfirmDialog'
+import { PaidInSummary } from '@/components/common/CurrencyConversionField'
+import { isConvertedBill } from '@/lib/currency-conversion'
 
 type BillDetails = NonNullable<Awaited<ReturnType<typeof getBillWithDetails>>>
 
@@ -73,6 +75,12 @@ export function BillDetailModal({
   // so "not found" waits for that answer instead of flashing first.
   const bill = liveBill ?? billState
   const loading = liveBill ? false : loadingState
+  const converted = bill ? isConvertedBill(bill, bill.items) : false
+  // The amount as paid, shown quietly beside the balance amount every total and balance uses.
+  const paidIn = (amount: number | null | undefined) =>
+    converted && amount != null && bill?.original_currency
+      ? formatCurrency(amount, bill.original_currency)
+      : null
 
   return (
     <>
@@ -118,6 +126,15 @@ export function BillDetailModal({
                     <p className="text-[0.65rem] text-stone-400">{bill.currency}</p>
                   </div>
                 </div>
+                {converted && (
+                  <PaidInSummary
+                    balanceCurrency={bill.currency}
+                    originalCurrency={bill.original_currency}
+                    originalTotal={bill.original_total}
+                    exchangeRate={bill.exchange_rate}
+                    className="mt-2 text-xs text-stone-600"
+                  />
+                )}
                 {bill.note ? (
                   <p className="mt-3 rounded-xl bg-white/80 px-3 py-2 text-sm text-stone-600">{bill.note}</p>
                 ) : null}
@@ -136,9 +153,14 @@ export function BillDetailModal({
                     >
                       <div className="flex items-center justify-between gap-2">
                         <p className="font-medium text-stone-800">{item.name}</p>
-                        <p className="shrink-0 font-semibold text-stone-800">
-                          {formatCurrency(item.amount, bill.currency)}
-                        </p>
+                        <div className="shrink-0 text-right">
+                          <p className="font-semibold text-stone-800">
+                            {formatCurrency(item.amount, bill.currency)}
+                          </p>
+                          {paidIn(item.original_amount) && (
+                            <p className="text-xs text-stone-400">{paidIn(item.original_amount)}</p>
+                          )}
+                        </div>
                       </div>
                       {item.splits.length > 0 && (
                         <div className="mt-2 border-t border-stone-100 pt-2">
@@ -155,8 +177,13 @@ export function BillDetailModal({
                                   <Users className="size-3 text-stone-400" />
                                   {split.displayName}
                                 </span>
-                                <span className="font-medium text-stone-800">
-                                  {formatCurrency(split.computed_amount, bill.currency)}
+                                <span className="text-right">
+                                  <span className="font-medium text-stone-800">
+                                    {formatCurrency(split.computed_amount, bill.currency)}
+                                  </span>
+                                  {paidIn(split.original_amount) && (
+                                    <span className="block text-xs text-stone-400">{paidIn(split.original_amount)}</span>
+                                  )}
                                 </span>
                               </div>
                             ))}

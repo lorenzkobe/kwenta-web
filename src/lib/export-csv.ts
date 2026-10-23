@@ -9,6 +9,7 @@ import type {
 } from '@/api/balances'
 import { makeExportFilename } from '@/lib/export-utils'
 import { loadSplitsByBill } from '@/lib/export-splits'
+import { formatLockedRate, isValidRate, toCurrencyCode } from '@/lib/currency-conversion'
 
 function escapeCsv(value: string | number | null | undefined): string {
   if (value === null || value === undefined) return ''
@@ -73,12 +74,16 @@ export async function exportBillsToCSV(
       'Paid By',
       'My Share',
       'Settled',
+      'Paid In',
+      'Original Amount',
+      'Exchange Rate',
     ),
   ]
 
   for (const bill of bills) {
     const date = new Date(bill.createdAt).toLocaleDateString()
     const catLabel = bill.category ? (CATEGORY_LABELS[bill.category as BillCategory] ?? bill.category) : ''
+    const paidIn = toCurrencyCode(bill.originalCurrency)
     // The viewer's own share is a sum of their own split rows — a record they hold, not a
     // cross-entity balance, so it stays local.
     const myShare = (splitsByBill.get(bill.id) ?? [])
@@ -94,6 +99,9 @@ export async function exportBillsToCSV(
         bill.payorName,
         myShare || '',
         bill.settled ? 'Yes' : 'No',
+        paidIn,
+        paidIn ? bill.originalTotal : '',
+        paidIn && isValidRate(bill.exchangeRate) ? formatLockedRate(bill.exchangeRate, paidIn, bill.currency) : '',
       ),
     )
   }

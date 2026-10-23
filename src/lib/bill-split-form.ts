@@ -302,3 +302,28 @@ export async function resolveBillEditIds(
 
   return { pickerIdFor, billParticipants }
 }
+
+/**
+ * A stored line as the entry form should show it. A converted line (079) is shown in the currency
+ * it was paid in: the stored money columns are the balance-currency copy, and re-saving those as if
+ * typed would convert them a second time. A custom split_value is a money amount, so it reads from
+ * the share's `original_amount`; 0 ("auto") stays 0.
+ */
+export function entryLineFromStored(item: {
+  amount: number
+  original_amount: number | null
+  splits: { user_id: string; split_type: SplitType; split_value: number; original_amount: number | null }[]
+}): { amount: number; splits: { user_id: string; split_type: SplitType; split_value: number }[] } {
+  const converted = item.original_amount != null
+  return {
+    amount: item.original_amount ?? item.amount,
+    splits: item.splits.map((s) => ({
+      user_id: s.user_id,
+      split_type: s.split_type,
+      split_value:
+        converted && s.split_type === 'custom' && s.split_value > 0
+          ? (s.original_amount ?? s.split_value)
+          : s.split_value,
+    })),
+  }
+}

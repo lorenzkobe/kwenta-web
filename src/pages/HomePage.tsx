@@ -5,6 +5,7 @@ import { fetchBalancesOverview, fetchRecentBills, totalsToMap } from '@/api/bala
 import { useServerData } from '@/hooks/useServerData'
 import { useCurrentUser } from '@/hooks/useCurrentUser'
 import { formatCurrency, timeAgo } from '@/lib/utils'
+import { OriginalAmountLine } from '@/components/common/CurrencyConversionField'
 import { SavedCopyNotice } from '@/components/common/SavedCopyNotice'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -280,9 +281,12 @@ export function HomePage() {
                     {timeAgo(bill.createdAt)}
                   </p>
                 </div>
-                <span className="text-sm font-semibold text-stone-800">
-                  {formatCurrency(bill.amount, bill.currency)}
-                </span>
+                <div className="text-right">
+                  <span className="text-sm font-semibold text-stone-800">
+                    {formatCurrency(bill.amount, bill.currency)}
+                  </span>
+                  <OriginalAmountLine currency={bill.originalCurrency} amount={bill.originalTotal} />
+                </div>
               </Link>
             ))}
           </div>

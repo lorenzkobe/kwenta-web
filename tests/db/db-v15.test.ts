@@ -67,7 +67,9 @@ describe('C17: Dexie v14 -> v15 upgrade', () => {
     const { db } = await import('@/db/db')
     await db.open()
 
-    expect(db.verno).toBe(15)
+    // The app opens at its CURRENT version (16 since 079's conversion fields); what this test pins is
+    // the v14 -> v15 step it ran through on the way.
+    expect(db.verno).toBeGreaterThanOrEqual(15)
     const rows = (await db.pending_mutations.toArray()) as unknown as {
       id: string
       seq: number

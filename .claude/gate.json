@@ -1,0 +1,21 @@
+{
+  "testFiles": "npx vitest run {files}",
+  "verify": [
+    "npm run lint",
+    {
+      "related": true
+    },
+    {
+      "cmd": "npm run test",
+      "when": "final"
+    },
+    {
+      "cmd": "npm run test:sql",
+      "when": "final"
+    },
+    {
+      "cmd": "npm run build",
+      "when": "source"
+    }
+  ]
+}

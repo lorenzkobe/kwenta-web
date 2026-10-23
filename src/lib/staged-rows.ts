@@ -20,8 +20,9 @@ import { db } from '@/db/db'
 import { isUnsyncedRow } from '@/sync/sync-service'
 import { getBillWithDetails } from '@/db/operations'
 import { resolveProfileDisplay } from '@/lib/people'
+import { isConvertedBill } from '@/lib/currency-conversion'
 import type { BillDetail, ContactBalanceRow, PersonalBillRow } from '@/api/balances'
-import type { Bill } from '@/types'
+import type { Bill, BillItem } from '@/types'
 
 /** Unsent, undeleted personal bills this user created, newest first. */
 async function stagedPersonalBills(userId: string): Promise<Bill[]> {
@@ -56,10 +57,10 @@ export async function loadStagedPersonalBillRows(userId: string): Promise<Person
         )
       : []
 
-  const itemsByBill = new Map<string, string[]>()
+  const itemsByBill = new Map<string, BillItem[]>()
   for (const item of items) {
     const list = itemsByBill.get(item.bill_id) ?? []
-    list.push(item.id)
+    list.push(item)
     itemsByBill.set(item.bill_id, list)
   }
   const splitUserIdsByItem = new Map<string, string[]>()
@@ -77,9 +78,10 @@ export async function loadStagedPersonalBillRows(userId: string): Promise<Person
   }
 
   return bills.map((bill) => {
-    const ownItemIds = itemsByBill.get(bill.id) ?? []
+    const ownItems = itemsByBill.get(bill.id) ?? []
+    const converted = isConvertedBill(bill, ownItems)
     const participantIds = new Set<string>()
-    for (const itemId of ownItemIds) {
+    for (const { id: itemId } of ownItems) {
       for (const uid of splitUserIdsByItem.get(itemId) ?? []) participantIds.add(uid)
     }
     return {
@@ -90,7 +92,7 @@ export async function loadStagedPersonalBillRows(userId: string): Promise<Person
       createdAt: bill.created_at,
       createdBy: bill.created_by,
       payorName: names.get(bill.paid_by) ?? 'Unknown',
-      itemCount: ownItemIds.length,
+      itemCount: ownItems.length,
       // Not a computed balance: a bill the server has never seen cannot have been settled.
       settled: false,
       category: bill.category ?? null,
@@ -98,6 +100,9 @@ export async function loadStagedPersonalBillRows(userId: string): Promise<Person
         id,
         label: names.get(id) ?? 'Unknown',
       })),
+      originalCurrency: converted ? bill.original_currency : null,
+      originalTotal: converted ? (bill.original_total ?? null) : null,
+      exchangeRate: converted ? (bill.exchange_rate ?? null) : null,
     }
   })
 }
@@ -120,10 +125,12 @@ export async function loadStagedBillDetail(
   const detail = await getBillWithDetails(billId)
   if (!detail) return null
 
+  const converted = isConvertedBill(detail, detail.items)
   const items = detail.items.map((item) => ({
     id: item.id,
     name: item.name,
     amount: item.amount,
+    originalAmount: converted ? (item.original_amount ?? null) : null,
     splits: item.splits.map((split) => ({
       id: split.id,
       userId: split.user_id,
@@ -131,6 +138,7 @@ export async function loadStagedBillDetail(
       splitType: split.split_type,
       splitValue: split.split_value,
       computedAmount: split.computed_amount,
+      originalAmount: converted ? (split.original_amount ?? null) : null,
     })),
   }))
 
@@ -158,6 +166,10 @@ export async function loadStagedBillDetail(
       category: detail.category ?? null,
       creatorName: detail.creatorName,
       payorName: detail.payorName,
+      originalCurrency: converted ? detail.original_currency : null,
+      exchangeRate: converted ? (detail.exchange_rate ?? null) : null,
+      rateSource: converted ? (detail.rate_source ?? null) : null,
+      originalTotal: converted ? (detail.original_total ?? null) : null,
     },
     groupName: group?.name ?? null,
     items,

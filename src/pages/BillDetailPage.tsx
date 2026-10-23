@@ -23,6 +23,8 @@ import { SettlementHistoryList } from '@/components/common/SettlementHistoryList
 import { ConfirmDialog } from '@/components/common/ConfirmDialog'
 import { ExportImageDialog } from '@/components/export/ExportImageDialog'
 import { BillExportCard } from '@/components/export/BillExportCard'
+import { PaidInSummary } from '@/components/common/CurrencyConversionField'
+import { isConvertedDetail } from '@/lib/bill-paid-in'
 
 export function BillDetailPage() {
   const { billId } = useParams<{ billId: string }>()
@@ -157,6 +159,12 @@ export function BillDetailPage() {
   }
 
   const canEdit = Boolean(userId && bill.createdBy === userId)
+  const converted = isConvertedDetail(bill, bill.items)
+  // The amount as paid, shown quietly beside the balance amount every total and balance uses.
+  const paidIn = (amount: number | null) =>
+    converted && amount !== null && bill.originalCurrency
+      ? formatCurrency(amount, bill.originalCurrency)
+      : null
   return (
     <>
     <div className="space-y-5">
@@ -235,6 +243,16 @@ export function BillDetailPage() {
           </div>
         </div>
 
+        {converted && (
+          <PaidInSummary
+            balanceCurrency={bill.currency}
+            originalCurrency={bill.originalCurrency}
+            originalTotal={bill.originalTotal}
+            exchangeRate={bill.exchangeRate}
+            className="mt-3 text-sm text-stone-600"
+          />
+        )}
+
         {bill.note && (
           <div className="mt-4 rounded-2xl bg-stone-100/80 px-4 py-3">
             <p className="text-sm text-stone-600">{bill.note}</p>
@@ -301,11 +319,16 @@ export function BillDetailPage() {
                 <div key={item.id} className="rounded-2xl border border-stone-200 bg-stone-100/60 p-4">
                   <div className="flex items-center justify-between">
                     <p className="font-medium text-stone-800">{item.name}</p>
-                    <p className="font-semibold text-stone-800">
-                      {item.splits[0]?.splitType === 'quantity'
-                        ? `${formatCurrency(item.amount, bill.currency)}/each`
-                        : formatCurrency(item.amount, bill.currency)}
-                    </p>
+                    <div className="text-right">
+                      <p className="font-semibold text-stone-800">
+                        {item.splits[0]?.splitType === 'quantity'
+                          ? `${formatCurrency(item.amount, bill.currency)}/each`
+                          : formatCurrency(item.amount, bill.currency)}
+                      </p>
+                      {paidIn(item.originalAmount) && (
+                        <p className="text-xs text-stone-400">{paidIn(item.originalAmount)}</p>
+                      )}
+                    </div>
                   </div>
                   {item.splits.length > 0 && (
                     <div className="mt-3 border-t border-stone-200 pt-3">
@@ -325,10 +348,18 @@ export function BillDetailPage() {
                                 <span className="font-medium text-stone-800">
                                   {formatCurrency(split.computedAmount, bill.currency)}
                                 </span>
+                                {paidIn(split.originalAmount) && (
+                                  <span className="text-xs text-stone-400">({paidIn(split.originalAmount)})</span>
+                                )}
                               </span>
                             ) : (
-                              <span className="font-medium text-stone-800">
-                                {formatCurrency(split.computedAmount, bill.currency)}
+                              <span className="text-right">
+                                <span className="font-medium text-stone-800">
+                                  {formatCurrency(split.computedAmount, bill.currency)}
+                                </span>
+                                {paidIn(split.originalAmount) && (
+                                  <span className="block text-xs text-stone-400">{paidIn(split.originalAmount)}</span>
+                                )}
                               </span>
                             )}
                           </div>
@@ -365,10 +396,18 @@ export function BillDetailPage() {
                       <span className="font-medium text-stone-800">
                         {formatCurrency(split.computedAmount, bill.currency)}
                       </span>
+                      {paidIn(split.originalAmount) && (
+                        <span className="text-xs text-stone-400">({paidIn(split.originalAmount)})</span>
+                      )}
                     </span>
                   ) : (
-                    <span className="font-medium text-stone-800">
-                      {formatCurrency(split.computedAmount, bill.currency)}
+                    <span className="text-right">
+                      <span className="font-medium text-stone-800">
+                        {formatCurrency(split.computedAmount, bill.currency)}
+                      </span>
+                      {paidIn(split.originalAmount) && (
+                        <span className="block text-xs text-stone-400">{paidIn(split.originalAmount)}</span>
+                      )}
                     </span>
                   )}
                 </div>
