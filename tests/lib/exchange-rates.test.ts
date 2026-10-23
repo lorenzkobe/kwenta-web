@@ -125,6 +125,44 @@ describe('fetchExchangeRate', () => {
     expect(live!.fromCache).toBe(false)
   })
 
+  it('force: a fresh cache does not answer; one GET returns and caches the live rate', async () => {
+    seedCache(0.0025, HOUR)
+    const fetchImpl = vi.fn(async () => okResponse(SUCCESS))
+
+    const live = await fetchExchangeRate('VND', 'PHP', {
+      now,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      force: true,
+    })
+
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
+    expect(live).toEqual({ rate: 1 / VND_PER_PHP, fetchedAt: new Date(NOW).toISOString(), fromCache: false })
+    expect(JSON.parse(localStorage.getItem(KEY) ?? 'null')).toEqual({
+      rate: 1 / VND_PER_PHP,
+      fetchedAt: new Date(NOW).toISOString(),
+    })
+  })
+
+  it('force: a failed fetch still falls back to the cache and leaves it as it was', async () => {
+    seedCache(0.0025, HOUR)
+    const fetchImpl = vi.fn(async () => {
+      throw new TypeError('Failed to fetch')
+    })
+
+    const live = await fetchExchangeRate('VND', 'PHP', {
+      now,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      force: true,
+    })
+
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
+    expect(live).toEqual({ rate: 0.0025, fetchedAt: new Date(NOW - HOUR).toISOString(), fromCache: true })
+    expect(JSON.parse(localStorage.getItem(KEY) ?? 'null')).toEqual({
+      rate: 0.0025,
+      fetchedAt: new Date(NOW - HOUR).toISOString(),
+    })
+  })
+
   const failures: [string, () => Promise<Response>][] = [
     ['offline (fetch rejects)', async () => { throw new TypeError('Failed to fetch') }],
     ['a timeout (AbortSignal.timeout fires)', async () => { throw new DOMException('signal timed out', 'TimeoutError') }],

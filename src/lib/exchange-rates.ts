@@ -31,17 +31,18 @@ export function readCachedExchangeRate(from: string, to: string): LiveRate | nul
  * Prefill for the rate field: how many `to` units one `from` unit buys. The quote is requested
  * with the balance currency as BASE (6+ significant digits; the direct VND quote carries 4) and
  * inverted. Never throws and never gates a save: any failure serves the last cached rate or null.
+ * `force` skips a fresh cached rate (the form's "Refresh rate"); a failure still falls back to it.
  */
 export async function fetchExchangeRate(
   from: string,
   to: string,
-  opts: { now?: () => number; fetchImpl?: typeof fetch } = {},
+  opts: { now?: () => number; fetchImpl?: typeof fetch; force?: boolean } = {},
 ): Promise<LiveRate | null> {
   const nowMs = (opts.now ?? Date.now)()
   if (from === to) return { rate: 1, fetchedAt: new Date(nowMs).toISOString(), fromCache: false }
 
   const cached = readCachedExchangeRate(from, to)
-  if (cached) {
+  if (cached && !opts.force) {
     const age = nowMs - Date.parse(cached.fetchedAt)
     if (age >= 0 && age < FRESH_MS) return cached
   }

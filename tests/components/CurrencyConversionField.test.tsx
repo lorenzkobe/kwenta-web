@@ -6,6 +6,9 @@ const mocks = vi.hoisted(() => ({
   rate: { live: null, loading: false } as {
     live: { rate: number; fetchedAt: string; fromCache: boolean } | null
     loading: boolean
+    refreshing?: boolean
+    refreshFailed?: boolean
+    refresh?: () => void
   },
 }))
 vi.mock('@/hooks/useExchangeRate', () => ({ useExchangeRate: () => mocks.rate }))
@@ -77,7 +80,9 @@ async function type(input: HTMLInputElement, text: string) {
 }
 
 function button(text: string): HTMLButtonElement | undefined {
-  return [...container.querySelectorAll('button')].find((b) => b.textContent?.trim() === text)
+  return [...container.querySelectorAll('button')].find(
+    (b) => b.textContent?.trim() === text || (b.textContent?.trim() === '' && b.getAttribute('aria-label') === text),
+  )
 }
 
 describe('CurrencyConversionField', () => {
@@ -343,6 +348,142 @@ describe('CurrencyConversionField rate sanity', () => {
 
     await type(rateInput()!, '420')
     expect(container.textContent).not.toContain('far from today')
+  })
+})
+
+describe('CurrencyConversionField refresh', () => {
+  const NEWER = { rate: 1 / 410, fetchedAt: '2026-10-24T00:00:00.000Z', fromCache: false }
+
+  function rateWith(live: typeof LIVE, extra: { refreshing?: boolean; refreshFailed?: boolean } = {}) {
+    return { live, loading: false, refreshing: false, refreshFailed: false, refresh: vi.fn(), ...extra }
+  }
+
+  async function refreshTo(next: ReturnType<typeof rateWith>, rerender: () => void) {
+    const refresh = mocks.rate.refresh
+    await act(async () => button('Refresh rate')!.click())
+    expect(refresh).toHaveBeenCalledTimes(1)
+    mocks.rate = next
+    await act(async () => rerender())
+  }
+
+  it('an untouched online prefill follows the refreshed rate', async () => {
+    mocks.rate = rateWith(LIVE)
+    let latest: ConversionValue | undefined
+    const render = () =>
+      root.render(<Harness initial={{ currency: 'VND', rate: null, source: 'online' }} onValue={(v) => (latest = v)} />)
+    await act(async () => render())
+    expect(latest).toEqual({ currency: 'VND', rate: LIVE.rate, source: 'online' })
+
+    await refreshTo(rateWith(NEWER), render)
+    expect(latest).toEqual({ currency: 'VND', rate: NEWER.rate, source: 'online' })
+    expect(rateInput()!.value).toBe('410')
+    expect(button('Use this')).toBeUndefined()
+  })
+
+  it('says when a freshly fetched rate was updated, and how old a cached one is', async () => {
+    const fetchedAt = '2026-10-24T03:42:00.000Z'
+    const clock = new Date(fetchedAt).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })
+    mocks.rate = rateWith({ ...NEWER, fetchedAt })
+    await act(async () =>
+      root.render(<Harness initial={{ currency: 'VND', rate: null, source: 'online' }} />),
+    )
+    expect(container.textContent).toContain(`Rate updated ${clock}`)
+    expect(container.textContent).not.toContain('Rate from')
+
+    mocks.rate = rateWith({ ...NEWER, fetchedAt: new Date(Date.now() - 3.5 * 3_600_000).toISOString(), fromCache: true })
+    await act(async () =>
+      root.render(<Harness initial={{ currency: 'VND', rate: null, source: 'online' }} />),
+    )
+    expect(container.textContent).toContain('Rate from 3 h ago')
+    expect(container.textContent).not.toContain('Rate updated')
+  })
+
+  it('a typed rate is kept; the refreshed rate is offered through Use this', async () => {
+    mocks.rate = rateWith(LIVE)
+    let latest: ConversionValue | undefined
+    const render = () =>
+      root.render(<Harness initial={{ currency: 'VND', rate: 0.0025, source: 'manual' }} onValue={(v) => (latest = v)} />)
+    await act(async () => render())
+
+    await refreshTo(rateWith(NEWER), render)
+    expect(latest).toEqual({ currency: 'VND', rate: 0.0025, source: 'manual' })
+    expect(container.textContent).toContain('Today: 1 PHP = 410 VND')
+    await act(async () => button('Use this')!.click())
+    expect(latest).toEqual({ currency: 'VND', rate: NEWER.rate, source: 'online' })
+  })
+
+  it('the saved rate of an edited bill is kept even when it was saved from an online rate', async () => {
+    mocks.rate = rateWith(LIVE)
+    let latest: ConversionValue | undefined
+    const render = () =>
+      root.render(
+        <Harness
+          initial={{ currency: 'VND', rate: LIVE.rate, source: 'online' }}
+          saved={{ currency: 'VND', rate: LIVE.rate, source: 'online' }}
+          onValue={(v) => (latest = v)}
+        />,
+      )
+    await act(async () => render())
+
+    await refreshTo(rateWith(NEWER), render)
+    expect(latest).toEqual({ currency: 'VND', rate: LIVE.rate, source: 'online' })
+    expect(button('Use this')).toBeDefined()
+  })
+
+  it('a rate typed while the refresh runs is not replaced when it lands', async () => {
+    mocks.rate = rateWith(LIVE)
+    let latest: ConversionValue | undefined
+    const render = () =>
+      root.render(<Harness initial={{ currency: 'VND', rate: null, source: 'online' }} onValue={(v) => (latest = v)} />)
+    await act(async () => render())
+
+    await act(async () => button('Refresh rate')!.click())
+    await type(rateInput()!, '400')
+    mocks.rate = rateWith(NEWER)
+    await act(async () => render())
+    expect(latest!.source).toBe('manual')
+    expect(latest!.rate).toBeCloseTo(1 / 400, 12)
+  })
+
+  it('spins and is disabled during the first fetch, then offers Refresh rate as a retry when no rate came back', async () => {
+    mocks.rate = { live: null, loading: true, refreshing: false, refreshFailed: false, refresh: vi.fn() }
+    await act(async () =>
+      root.render(<Harness initial={{ currency: 'VND', rate: null, source: 'online' }} />),
+    )
+    expect(button('Refresh rate')).toBeUndefined()
+    const loadingButton = button('Fetching rate…')!
+    expect(loadingButton.disabled).toBe(true)
+    expect(loadingButton.querySelector('svg')!.getAttribute('class')).toContain('animate-spin')
+
+    mocks.rate = { live: null, loading: false, refreshing: false, refreshFailed: false, refresh: vi.fn() }
+    await act(async () =>
+      root.render(<Harness initial={{ currency: 'VND', rate: null, source: 'online' }} />),
+    )
+    await act(async () => button('Refresh rate')!.click())
+    expect(mocks.rate.refresh).toHaveBeenCalledTimes(1)
+  })
+
+  it('is a compact icon in the rate row that spins and is disabled while in flight, and says so when it fails', async () => {
+    mocks.rate = rateWith(LIVE, { refreshing: true })
+    await act(async () =>
+      root.render(<Harness initial={{ currency: 'VND', rate: 0.0025, source: 'manual' }} />),
+    )
+    const busy = button('Fetching rate…')!
+    expect(busy.disabled).toBe(true)
+    expect(busy.getAttribute('aria-busy')).toBe('true')
+    expect(busy.querySelector('svg')!.getAttribute('class')).toContain('animate-spin')
+    expect(container.textContent).not.toContain('Rate updated')
+    expect(busy.className).toContain('h-10 w-10')
+    expect(busy.parentElement).toBe(rateInput()!.parentElement)
+
+    mocks.rate = rateWith(LIVE, { refreshFailed: true })
+    await act(async () =>
+      root.render(<Harness initial={{ currency: 'VND', rate: 0.0025, source: 'manual' }} />),
+    )
+    expect(container.textContent).toContain("Couldn't get a newer rate")
+    const idle = button('Refresh rate')!
+    expect(idle.disabled).toBe(false)
+    expect(idle.querySelector('svg')!.getAttribute('class')).not.toContain('animate-spin')
   })
 })
 

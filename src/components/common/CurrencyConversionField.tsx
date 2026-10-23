@@ -1,4 +1,5 @@
-import { useEffect, useId, useState } from 'react'
+import { useEffect, useId, useRef, useState } from 'react'
+import { RotateCw } from 'lucide-react'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
@@ -15,7 +16,7 @@ import {
   type RateSource,
 } from '@/lib/currency-conversion'
 import { filterDecimalInput } from '@/lib/amount-input'
-import { formatCurrency } from '@/lib/utils'
+import { cn, formatCurrency } from '@/lib/utils'
 
 /** What the bill forms keep for "paid in": the currency amounts are typed in and its locked-at-save rate. */
 export interface ConversionValue {
@@ -58,6 +59,10 @@ function ageText(fetchedAt: string, nowMs: number): string {
   return `${days} day${days === 1 ? '' : 's'} ago`
 }
 
+function clockText(fetchedAt: string): string {
+  return new Date(fetchedAt).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })
+}
+
 export function CurrencyConversionField({
   targetCurrency,
   value,
@@ -68,7 +73,7 @@ export function CurrencyConversionField({
   const selectId = useId()
   const rateId = useId()
   const converting = value.currency !== targetCurrency
-  const { live, loading } = useExchangeRate(value.currency, targetCurrency)
+  const { live, loading, refreshing, refreshFailed, refresh } = useExchangeRate(value.currency, targetCurrency)
 
   // The age of a cached rate is read against when the form opened, so a render never reads the clock.
   const [mountedAt] = useState(() => Date.now())
@@ -91,20 +96,28 @@ export function CurrencyConversionField({
     }
   }
 
+  const isSaved = saved !== null && saved.currency === value.currency && sameRate(saved.rate, value.rate)
+
+  // Judged when a new rate lands, not when Refresh is tapped: a rate typed (or a saved one restored)
+  // while the request runs must survive it. Only a field still showing the previous live rate follows.
+  const previousLiveRate = useRef<number | null>(null)
   useEffect(() => {
-    if (converting && value.rate === null && value.source === 'online' && live) {
+    const previous = previousLiveRate.current
+    previousLiveRate.current = live?.rate ?? null
+    if (!converting || value.source !== 'online' || !live || sameRate(value.rate, live.rate)) return
+    if (value.rate === null || (!isSaved && previous !== null && sameRate(value.rate, previous))) {
       onChange({ ...value, rate: live.rate, source: 'online' })
     }
-  }, [converting, value, live, onChange])
+  }, [converting, value, live, isSaved, onChange])
 
   const quote = displayBase === value.currency ? targetCurrency : value.currency
+  const fetching = loading || refreshing
   const showToday = converting && live !== null && !sameRate(live.rate, value.rate)
   const farFromToday =
     converting &&
     live !== null &&
     isValidRate(value.rate) &&
     (value.rate > live.rate * FAR_FROM_TODAY_RATIO || value.rate < live.rate / FAR_FROM_TODAY_RATIO)
-  const isSaved = saved !== null && saved.currency === value.currency && sameRate(saved.rate, value.rate)
   const options = CURRENCIES.some((c) => c.code === value.currency)
     ? CURRENCIES
     : [...CURRENCIES, { code: value.currency, name: '' }]
@@ -163,6 +176,19 @@ export function CurrencyConversionField({
               className="min-w-0 flex-1"
             />
             <span className="shrink-0 text-sm text-stone-700">{quote}</span>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="h-10 w-10 shrink-0 disabled:opacity-90"
+              aria-label={fetching ? 'Fetching rate…' : 'Refresh rate'}
+              aria-busy={fetching}
+              title="Refresh rate"
+              disabled={fetching}
+              onClick={refresh}
+            >
+              <RotateCw aria-hidden className={cn('size-4', fetching && 'animate-spin motion-reduce:animate-none')} />
+            </Button>
           </div>
 
           {isValidRate(value.rate) && total > 0 && (
@@ -180,15 +206,17 @@ export function CurrencyConversionField({
             </p>
           )}
 
-          {!showToday && live?.fromCache && (
+          {!refreshing && live?.fromCache && (
             <p className="text-xs text-amber-600">Rate from {ageText(live.fetchedAt, mountedAt)}</p>
+          )}
+          {!refreshing && live && !live.fromCache && (
+            <p className="text-xs text-stone-500">Rate updated {clockText(live.fetchedAt)}</p>
           )}
 
           {showToday && live && (
             <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
               <p className="text-xs text-stone-500">
                 Today: {formatLockedRate(live.rate, value.currency, targetCurrency)}
-                {live.fromCache && ` · Rate from ${ageText(live.fetchedAt, mountedAt)}`}
               </p>
               <Button
                 type="button"
@@ -209,6 +237,10 @@ export function CurrencyConversionField({
           )}
           {!loading && !isValidRate(value.rate) && (
             <p className="text-xs text-amber-600">Enter an exchange rate to save this bill.</p>
+          )}
+
+          {refreshFailed && !refreshing && (
+            <p className="text-xs text-amber-600">Couldn&apos;t get a newer rate. Try again in a moment.</p>
           )}
         </div>
       )}

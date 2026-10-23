@@ -591,7 +591,8 @@ typed, never an input to a balance.** A bill is converted only when `isConverted
 (`src/lib/currency-conversion.ts`) says so (the bill has `original_currency` AND every live item has
 `original_amount`); anything else hydrates as plain, so a re-save can never convert twice. The rate
 prefill comes from `fetchExchangeRate` (open.er-api.com, cached 12 h, never throws, never on the
-save path); editing keeps the saved rate and offers today's as "Use this". Editing a group bill keeps
+save path); "Refresh rate" re-asks past the cache (`force`), and only a field still showing the previous
+live rate follows the answer; editing keeps the saved rate and offers today's as "Use this". Editing a group bill keeps
 the bill's own stored currency as target. Detail: migration `079`'s header.
 
 ---
