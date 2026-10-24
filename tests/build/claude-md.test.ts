@@ -17,8 +17,8 @@ const coverage = read('docs/testing-coverage.md')
 const CLAUDE_MD_CHAR_BUDGET = 110_000
 
 describe('CLAUDE.md reflects the sync realignment', () => {
-  it('C30: rule 3 names 080 as the next migration', () => {
-    expect(doc).toMatch(/Next number: \*\*`080`\*\*/)
+  it('C30: rule 3 names 081 as the next migration', () => {
+    expect(doc).toMatch(/Next number: \*\*`081`\*\*/)
     expect(doc).not.toMatch(/Next number: \*\*`076`\*\*/)
   })
 

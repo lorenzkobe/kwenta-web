@@ -106,6 +106,15 @@ vi.mock('@/lib/supabase', async () => {
       auth: { getSession: async () => ({ data: { session: { user: { id: cloudCalls.sessionUserId } } } }) },
       rpc: async (fn: string, args?: Record<string, unknown>) => {
         if (fn === 'kwenta_sync' || fn === 'kwenta_write') cloudCalls.writeRoundTrips += 1
+        // These tests seed the server's state into Dexie, so the server's roster IS the mirror's.
+        if (fn === 'kwenta_fetch_group_bundle') {
+          const { db } = await import('@/db/db')
+          const groupId = String(args?.p_group_id)
+          const group = await db.groups.get(groupId)
+          if (!group) return { data: null, error: null }
+          const members = await db.group_members.where('group_id').equals(groupId).toArray()
+          return { data: { group, group_members: members }, error: null }
+        }
         return base.rpc(fn, args)
       },
     },
@@ -855,10 +864,11 @@ describe('deleteGroup', () => {
     expect(members.every((m) => m.is_deleted)).toBe(true)
   })
 
-  it('does nothing for a non-creator', async () => {
+  // This used to resolve silently, so the page navigated away as if the group had been deleted.
+  it('refuses a non-creator and deletes nothing', async () => {
     await db.profiles.add(makeProfile({ id: 'ME' }))
     const groupId = await createGroup('G', 'PHP', 'ME')
-    await deleteGroup(groupId, 'OTHER')
+    await expect(deleteGroup(groupId, 'OTHER')).rejects.toThrow(/only the group creator/i)
     expect((await db.groups.get(groupId))?.is_deleted).toBe(false)
   })
 })

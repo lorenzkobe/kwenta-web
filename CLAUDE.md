@@ -335,6 +335,7 @@ Current version: **16** (v16 added the foreign-currency fields, null-backfilled:
 - `src/sync/write-errors.ts` — `classifyWriteFailure` (`transport | rejected | inactive`)
 - `src/sync/cloud-first-mutations.ts` — queue-entry and "not applied" record helpers
 - `src/sync/session-epoch.ts` — the guard against responses landing after a wipe
+- `src/sync/group-mirror.ts` — loads a group and its whole roster into the mirror on a miss (`kwenta_fetch_group_bundle`)
 - `src/sync/realtime-events.ts` — Supabase Realtime subscription + per-entity reconcile
 
 ### syncRoundTrip vs fullSync
@@ -609,6 +610,8 @@ Key operations:
 - `getBillWithDetails(billId)` — returns bill + items + splits with resolved display names; uses `group_members.display_name` fallback for local contacts
 - `renameSelf(userId, name)` — the account's own profile row plus its live roster rows, one cloud-first write (it replaced AuthProvider's write-then-sync `updateDisplayName`)
 
+**Group writes judge membership and existence from a mirror that may lag.** `createBill` checks its people against the Dexie roster and, only on a miss, refreshes the roster once (`refreshGroupIntoMirror`, `src/sync/group-mirror.ts`; unreachable → submit and let the server decide, still missing after a successful refresh → the non-member error). `updateGroup`, `removeGroupMember` and `addExistingGroupMembers` load the group first (`ensureGroupInMirror`) and throw rather than return silently; a cascade (`collect`) never fetches. `deleteGroup` does not load on demand: its cascade reads bills and settlements from the mirror, so on a miss it refuses ("tap Refresh") and sends nothing. Migration `080` makes `kwenta_write` refuse a group bill that ADDS someone with no membership row in that group (people a bill already named are not re-judged).
+
 ---
 
 ## Auth Flow (`src/hooks/AuthProvider.tsx`)
@@ -833,7 +836,7 @@ Each of these reflects a real past correction in this repo:
 2. **Deletion is server-authoritative.** A device is sent only its own profile plus its own
    local contacts, so it can never conclude that a person/bill/group does not exist. No
    client-side soft-delete driven by a missing row — ever.
-3. **Migrations are append-only.** Next number: **`080`**. Never edit a past migration.
+3. **Migrations are append-only.** Next number: **`081`**. Never edit a past migration.
    **Every migration carries its own explanatory header** — what broke, why the shape is
    what it is, and whether it must be applied before the code that uses it ships. That
    header is the canonical record; read it rather than trusting any summary. A signature or

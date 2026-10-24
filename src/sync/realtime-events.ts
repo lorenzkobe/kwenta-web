@@ -9,20 +9,16 @@ import type {
   Bill,
   BillItem,
   ItemSplit,
-  Group,
-  GroupMember,
   Settlement,
 } from '@/types'
 import {
   EVENT_LOG_TRUST_MS,
   PULL_SINCE_EPOCH,
-  compareTimestamps,
   fullSync,
   getMillisecondsSinceUpToDate,
   isFullSyncInFlight,
   newestUserEventSince,
   pullChanges,
-  shouldApplyPulledRow,
   syncErrMessage,
   syncRoundTrip,
   type SyncRoundTripResult,
@@ -39,6 +35,8 @@ import {
 } from '@/sync/realtime-batch'
 import { waitForInFlightCloudWrites } from '@/sync/in-flight-writes'
 import { currentSessionEpoch, isSessionEpochCurrent } from '@/sync/session-epoch'
+import { upsertRemoteRow } from '@/sync/mirror-upsert'
+import { applyGroupBundle } from '@/sync/group-mirror'
 type ReconcileBundle = Partial<
   Record<
     | 'profiles'
@@ -86,28 +84,6 @@ function isRecord(v: unknown): v is Record<string, unknown> {
   return Boolean(v) && typeof v === 'object'
 }
 
-/**
- * Mirrors `row`; returns whether its content moved — `sync-service`'s `contentMoved` rule. A row
- * this device staged and has not pushed keeps its edit unless the server copy is strictly newer
- * (`shouldApplyPulledRow`, the pull's own rule): overwriting it lost the edit and marked it synced.
- */
-async function upsertRemoteRow<T extends SyncFields>(tableName: keyof typeof db, row: T, epoch: number): Promise<boolean> {
-  // Dexie tables are defined on db instance; index signature is fine here.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const table = (db as any)[tableName] as { get: (id: string) => Promise<T | undefined>; add: (v: T) => Promise<void>; update: (id: string, v: Partial<T>) => Promise<void> }
-  const existing = await table.get(row.id)
-  // The mirror was wiped (sign-out, account switch) after the request that fetched `row` began:
-  // never write the ended session's rows into the next one's mirror.
-  if (!isSessionEpochCurrent(epoch)) return false
-  if (existing) {
-    if (!shouldApplyPulledRow(existing, row.updated_at)) return false
-    await table.update(row.id, { ...(row as unknown as Partial<T>), synced_at: row.updated_at } as Partial<T>)
-    return compareTimestamps(existing.updated_at, row.updated_at) !== 0
-  }
-  await table.add({ ...(row as T), synced_at: row.updated_at })
-  return true
-}
-
 /** Each apply* returns how many rows MOVED (see `upsertRemoteRow`), not how many it wrote. */
 async function applyBillBundle(bundle: unknown, epoch: number): Promise<number> {
   if (!isRecord(bundle)) return 0
@@ -118,16 +94,6 @@ async function applyBillBundle(bundle: unknown, epoch: number): Promise<number> 
   if (bill && (await upsertRemoteRow('bills', bill, epoch))) moved++
   for (const it of items) if (await upsertRemoteRow('bill_items', it, epoch)) moved++
   for (const sp of splits) if (await upsertRemoteRow('item_splits', sp, epoch)) moved++
-  return moved
-}
-
-async function applyGroupBundle(bundle: unknown, epoch: number): Promise<number> {
-  if (!isRecord(bundle)) return 0
-  const group = bundle.group as Group | undefined
-  const members = (bundle.group_members as GroupMember[] | undefined) ?? []
-  let moved = 0
-  if (group && (await upsertRemoteRow('groups', group, epoch))) moved++
-  for (const m of members) if (await upsertRemoteRow('group_members', m, epoch)) moved++
   return moved
 }
 

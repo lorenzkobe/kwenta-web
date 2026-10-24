@@ -15,6 +15,7 @@ import { generateId, getDeviceId, now, roundMoney } from '@/lib/utils'
 import { normalizePaymentMethod } from '@/lib/payment-method'
 import { commitCloudFirstWrite, type CloudWritePayload } from '@/sync/cloud-write'
 import { loadBillIntoMirror } from '@/sync/bill-mirror'
+import { ensureGroupInMirror, GroupUnavailableError, refreshGroupIntoMirror } from '@/sync/group-mirror'
 import {
   notifyAddedToGroup,
   notifyBillParticipantsCreated,
@@ -103,6 +104,34 @@ export async function resolveGroupMemberUserId(
   }
 
   return chosenProfileId // (5) no exact-identity match
+}
+
+/** Each chosen id mapped to its roster id, and the resolved ids that are not active members. */
+async function resolveGroupParticipants(
+  groupId: string,
+  chosenIds: string[],
+): Promise<{ byId: Map<string, string>; offenders: string[] }> {
+  const byId = new Map<string, string>()
+  for (const id of chosenIds) byId.set(id, await resolveGroupMemberUserId(groupId, id))
+  const memberIds = new Set(
+    (await db.group_members.where('group_id').equals(groupId).toArray())
+      .filter((m) => !m.is_deleted)
+      .map((m) => m.user_id),
+  )
+  const offenders = [...new Set(byId.values())].filter((id) => !memberIds.has(id))
+  return { byId, offenders }
+}
+
+async function describeParticipants(groupId: string, ids: string[]): Promise<string> {
+  const names = await Promise.all(
+    ids.map(async (id) => {
+      const profile = await db.profiles.get(id)
+      if (profile?.display_name) return profile.display_name
+      const member = await db.group_members.where('[group_id+user_id]').equals([groupId, id]).first()
+      return member?.display_name ?? id
+    }),
+  )
+  return names.join(', ')
 }
 
 function syncFields(overrides?: Partial<{ id: string }>) {
@@ -267,34 +296,30 @@ export async function createBill(input: CreateBillInput): Promise<string> {
   let resolvedPaidBy = input.paidBy ?? input.createdBy
   const resolvedSplitUserId = new Map<string, string>()
   if (groupId) {
-    resolvedPaidBy = await resolveGroupMemberUserId(groupId, resolvedPaidBy)
-    const distinctSplitIds = new Set<string>()
-    for (const item of input.items) {
-      for (const sp of item.splits) distinctSplitIds.add(sp.userId)
+    const chosenIds = [
+      ...new Set([resolvedPaidBy, ...input.items.flatMap((item) => item.splits.map((sp) => sp.userId))]),
+    ]
+    // Restrict group-bill participants to roster members: a non-member (orphan local-contact) id
+    // in item_splits.user_id / bills.paid_by is invisible to every other member (pull-bundle
+    // privacy boundary) and renders as "Unknown" in balances and settle-up. The dialog offers the
+    // SERVER's roster, so a miss here usually means this device's mirror has not caught up: refresh
+    // it once before refusing. Unreachable, the server judges membership itself (080).
+    let resolved = await resolveGroupParticipants(groupId, chosenIds)
+    if (resolved.offenders.length > 0) {
+      const outcome = await refreshGroupIntoMirror(groupId)
+      if (outcome === 'not_found') throw new GroupUnavailableError('not_found')
+      if (outcome === 'present') {
+        resolved = await resolveGroupParticipants(groupId, chosenIds)
+        if (resolved.offenders.length > 0) {
+          const names = await describeParticipants(groupId, resolved.offenders)
+          throw new Error(
+            `Cannot create a group bill with non-member participant(s): ${names}. Add them to the group first.`,
+          )
+        }
+      }
     }
-    for (const uid of distinctSplitIds) {
-      resolvedSplitUserId.set(uid, await resolveGroupMemberUserId(groupId, uid))
-    }
-
-    // Restrict group-bill participants to roster members. The add-bill UI only
-    // offers current members, so this never fires for UI-created bills; it is a
-    // backstop that keeps a non-member (orphan local-contact) id out of
-    // item_splits.user_id / bills.paid_by. Such an id is invisible to every
-    // other member (pull-bundle privacy boundary) and renders as "Unknown" in
-    // balances and settle-up. Adding someone new must go through the group roster.
-    const memberIds = new Set(
-      (await db.group_members.where('group_id').equals(groupId).toArray())
-        .filter((m) => !m.is_deleted)
-        .map((m) => m.user_id),
-    )
-    const offenders = [...new Set([resolvedPaidBy, ...resolvedSplitUserId.values()])].filter(
-      (id) => !memberIds.has(id),
-    )
-    if (offenders.length > 0) {
-      throw new Error(
-        `Cannot create a group bill with non-member participant(s): ${offenders.join(', ')}. Add them to the group first.`,
-      )
-    }
+    resolvedPaidBy = resolved.byId.get(resolvedPaidBy) ?? resolvedPaidBy
+    for (const [chosen, rosterId] of resolved.byId) resolvedSplitUserId.set(chosen, rosterId)
   }
 
   // BUILD — pure, in memory. Nothing touches Dexie until the server has accepted these rows
@@ -721,9 +746,10 @@ export async function updateGroup(
   patch: { name?: string; currency?: string },
   userId: string,
 ): Promise<void> {
-  const group = await db.groups.get(groupId)
-  if (!group || group.is_deleted) return
-  if (group.created_by !== userId) return
+  // Every refusal throws: a silent return closed the dialog as if the change had been saved.
+  const group = await ensureGroupInMirror(groupId)
+  if (group.is_deleted) throw new GroupUnavailableError('not_found')
+  if (group.created_by !== userId) throw new Error('Only the group creator can edit this group.')
 
   const timestamp = now()
   const nextName = patch.name?.trim() ?? group.name
@@ -972,8 +998,8 @@ export async function addExistingGroupMembers(
   memberUserIds: string[],
   addedBy: string,
 ): Promise<void> {
-  const targetGroup = await db.groups.get(groupId)
-  if (!targetGroup || targetGroup.is_deleted) throw new Error('Group not found')
+  const targetGroup = await ensureGroupInMirror(groupId)
+  if (targetGroup.is_deleted) throw new GroupUnavailableError('not_found')
   if (targetGroup.created_by !== addedBy) {
     throw new Error('Only the group creator can add members.')
   }
@@ -1295,15 +1321,31 @@ export async function removeGroupMember(
   removedBy: string,
   options?: { force?: boolean; collect?: MutationRowCollector },
 ): Promise<void> {
-  const group = await db.groups.get(groupId)
-  if (!group || group.is_deleted) return
+  // A cascade (`collect`) walks rows this device holds, so it never fetches or throws for one it lacks.
+  const cascade = Boolean(options?.collect)
+  const group = cascade ? await db.groups.get(groupId) : await ensureGroupInMirror(groupId)
+  if (!group || group.is_deleted) {
+    if (cascade) return
+    throw new GroupUnavailableError('not_found')
+  }
   if (!options?.force && group.created_by !== removedBy) {
     throw new Error('Only the group creator can remove members.')
   }
 
-  const allMembers = await db.group_members.where('group_id').equals(groupId).toArray()
-  const membership = allMembers.find((m) => m.user_id === memberUserId && !m.is_deleted)
-  if (!membership) return
+  const activeMembership = async () =>
+    (await db.group_members.where('group_id').equals(groupId).toArray()).find(
+      (m) => m.user_id === memberUserId && !m.is_deleted,
+    )
+  let membership = await activeMembership()
+  if (!membership && !cascade) {
+    const outcome = await refreshGroupIntoMirror(groupId)
+    if (outcome !== 'present') throw new GroupUnavailableError(outcome)
+    membership = await activeMembership()
+  }
+  if (!membership) {
+    if (cascade) return
+    throw new Error('This person is no longer a member of this group.')
+  }
 
   // Block removal unless fully settled (owes no one and is owed by no one).
   //
@@ -1532,9 +1574,11 @@ export async function deletePerson(personId: string, actorUserId: string): Promi
 }
 
 export async function deleteGroup(groupId: string, userId: string) {
+  // Not loaded on demand: the cascade below reads bills and settlements from the mirror, so loading
+  // only the roster would delete the group on the server and leave its bills live.
   const group = await db.groups.get(groupId)
-  if (!group) return
-  if (group.created_by !== userId) return
+  if (!group) throw new Error("This group hasn't finished loading on this device. Tap Refresh, then try again.")
+  if (group.created_by !== userId) throw new Error('Only the group creator can delete this group.')
 
   const timestamp = now()
 
