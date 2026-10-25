@@ -73,7 +73,7 @@ BEGIN
     'caller_is_participant_on_personal_bill', 'is_admin',
     'kwenta_balances_overview', 'kwenta_bill_detail', 'kwenta_bill_settled_for_me',
     'kwenta_bill_settlement_history', 'kwenta_caller_is_active', 'kwenta_contacts_with_balances',
-    'kwenta_fetch_bill_bundle', 'kwenta_fetch_group_bundle', 'kwenta_fetch_profile_for_linking',
+    'kwenta_delete_group', 'kwenta_fetch_bill_bundle', 'kwenta_fetch_group_bundle', 'kwenta_fetch_profile_for_linking',
     'kwenta_fetch_settlement', 'kwenta_group_detail', 'kwenta_group_member_breakdown',
     'kwenta_group_settlement_history', 'kwenta_group_spending', 'kwenta_groups_with_balances',
     'kwenta_lookup_profile_id_by_email', 'kwenta_my_account_status', 'kwenta_owed_in_group',

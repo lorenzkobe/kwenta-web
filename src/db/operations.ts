@@ -14,7 +14,10 @@ import type {
 } from '@/types'
 import { generateId, getDeviceId, now, roundMoney } from '@/lib/utils'
 import { normalizePaymentMethod } from '@/lib/payment-method'
-import { commitCloudFirstWrite, type ClientWriteKeys, type CloudWritePayload } from '@/sync/cloud-write'
+import { commitCloudFirstWrite, submitGroupDelete, type ClientWriteKeys, type CloudWritePayload } from '@/sync/cloud-write'
+import { refreshOnlineStatus } from '@/lib/online-status'
+import { trackCloudWrite } from '@/sync/in-flight-writes'
+import { useAppStore } from '@/store/app-store'
 import { loadBillIntoMirror, loadedRowsSyncedSince, type LoadedBillVersion } from '@/sync/bill-mirror'
 import { fullSync, rowKey } from '@/sync/sync-service'
 import { ensureGroupInMirror, GroupUnavailableError, refreshGroupIntoMirror } from '@/sync/group-mirror'
@@ -618,6 +621,33 @@ export async function deleteBill(
 // ── Groups ───────────────────────────────────────────
 
 /**
+ * (group_id, user_id) is unique, so a person removed from a group can only come back on the row
+ * that removed them: a second row would be refused with a unique violation. The row sits under the
+ * membership id (the account, once a contact is linked) or, if it predates the link, under the
+ * contact's own id.
+ */
+function findRemovedMembership(roster: GroupMember[], ...userIds: string[]): GroupMember | undefined {
+  for (const userId of userIds) {
+    const row = roster.find((m) => m.is_deleted && m.user_id === userId)
+    if (row) return row
+  }
+  return undefined
+}
+
+function reviveMembership(row: GroupMember, userId: string, displayName: string): GroupMember {
+  const timestamp = now()
+  return {
+    ...row,
+    user_id: userId,
+    display_name: displayName,
+    joined_at: timestamp,
+    is_deleted: false,
+    updated_at: timestamp,
+    synced_at: null,
+  }
+}
+
+/**
  * Membership rows for adding existing profiles to a group, built without reading the group row so
  * `createGroup` can use it for a group that does not exist yet. Skips a missing or deleted profile,
  * anyone whose local id or membership id is in `activeMemberIds`, and a second pick that resolves
@@ -628,8 +658,9 @@ async function buildExistingMemberRows(input: {
   memberUserIds: string[]
   addedBy: string
   activeMemberIds: Set<string>
+  roster: GroupMember[]
 }): Promise<{ members: GroupMember[]; activity: ActivityLog[]; pickedIds: string[] }> {
-  const { groupId, addedBy, activeMemberIds } = input
+  const { groupId, addedBy, activeMemberIds, roster } = input
   const members: GroupMember[] = []
   const activity: ActivityLog[] = []
   const pickedIds: string[] = []
@@ -645,14 +676,19 @@ async function buildExistingMemberRows(input: {
     if (taken.has(pickedId) || taken.has(memberRowUserId)) continue
     taken.add(memberRowUserId)
 
-    const memberId = generateId()
-    members.push({
-      ...syncFields({ id: memberId }),
-      group_id: groupId,
-      user_id: memberRowUserId,
-      display_name: p.display_name,
-      joined_at: now(),
-    })
+    const removed = findRemovedMembership(roster, memberRowUserId, pickedId)
+    const memberId = removed?.id ?? generateId()
+    members.push(
+      removed
+        ? reviveMembership(removed, memberRowUserId, p.display_name)
+        : {
+            ...syncFields({ id: memberId }),
+            group_id: groupId,
+            user_id: memberRowUserId,
+            display_name: p.display_name,
+            joined_at: now(),
+          },
+    )
     activity.push({
       ...syncFields(),
       group_id: groupId,
@@ -729,6 +765,7 @@ export async function createGroup(
     memberUserIds,
     addedBy: createdBy,
     activeMemberIds: new Set([createdBy]),
+    roster: [],
   })
   await Promise.all(added.members.map((m) => fetchRemoteProfileIntoDexie(m.user_id)))
 
@@ -817,6 +854,10 @@ export async function addGroupMember(
   displayName: string,
   addedBy: string,
 ): Promise<string> {
+  if (!(await db.groups.get(groupId))) throw new Error('Group not found')
+  // A removal made on another device must be known before judging who is already a member and
+  // which removed row to bring back; if the refresh fails the mirror's roster stands in.
+  await refreshGroupIntoMirror(groupId)
   const targetGroup = await db.groups.get(groupId)
   if (!targetGroup || targetGroup.is_deleted) throw new Error('Group not found')
   if (targetGroup.created_by !== addedBy) {
@@ -859,8 +900,6 @@ export async function addGroupMember(
     if (already && !already.is_deleted) return userId
   }
 
-  const memberId = generateId()
-
   // A brand-new contact and their membership row are built together and submitted as one unit:
   // a membership pointing at a profile the server never stored would render as "Unknown".
   const newProfiles: Profile[] = []
@@ -881,13 +920,22 @@ export async function addGroupMember(
 
   const existing = newProfiles[0] ?? (await db.profiles.get(userId))
   const memberRowUserId = existing ? membershipUserIdForProfile(existing) : userId
-  const member: GroupMember = {
-    ...syncFields({ id: memberId }),
-    group_id: groupId,
-    user_id: memberRowUserId,
-    display_name: existing?.display_name ?? trimmed,
-    joined_at: now(),
-  }
+  const removed = findRemovedMembership(
+    await db.group_members.where('group_id').equals(groupId).toArray(),
+    memberRowUserId,
+    userId,
+  )
+  const memberId = removed?.id ?? generateId()
+  const memberDisplayName = existing?.display_name ?? trimmed
+  const member: GroupMember = removed
+    ? reviveMembership(removed, memberRowUserId, memberDisplayName)
+    : {
+        ...syncFields({ id: memberId }),
+        group_id: groupId,
+        user_id: memberRowUserId,
+        display_name: memberDisplayName,
+        joined_at: now(),
+      }
 
   const { mode, submissionId } = await commitCloudFirstWrite({
     actorUserId: addedBy,
@@ -952,11 +1000,15 @@ export async function renameSelf(userId: string, displayName: string): Promise<v
   const existing = await db.profiles.get(userId)
   if (!existing || !trimmed) return
   const timestamp = now()
-  const memberships = await db.group_members
+  const liveMemberships = await db.group_members
     .where('user_id')
     .equals(userId)
     .filter((m) => !m.is_deleted)
     .toArray()
+  // A membership in a group that is deleted (or not on this device) is refused by the server (082)
+  // and, with group_members all-or-nothing, would sink the profile rename with it.
+  const groups = await db.groups.bulkGet(liveMemberships.map((m) => m.group_id))
+  const memberships = liveMemberships.filter((_, i) => groups[i] && !groups[i].is_deleted)
   await commitCloudFirstWrite({
     actorUserId: userId,
     payload: {
@@ -1027,6 +1079,10 @@ export async function addExistingGroupMembers(
   memberUserIds: string[],
   addedBy: string,
 ): Promise<void> {
+  // A removal made on another device must be known before deciding who is already a member and
+  // which removed row to bring back. A group loaded just now already carries its whole roster; a
+  // held one is refreshed, and if that fails the mirror's roster stands in (the server judges).
+  if (await db.groups.get(groupId)) await refreshGroupIntoMirror(groupId)
   const targetGroup = await ensureGroupInMirror(groupId)
   if (targetGroup.is_deleted) throw new GroupUnavailableError('not_found')
   if (targetGroup.created_by !== addedBy) {
@@ -1039,6 +1095,7 @@ export async function addExistingGroupMembers(
     memberUserIds,
     addedBy,
     activeMemberIds: new Set(roster.filter((m) => !m.is_deleted).map((m) => m.user_id)),
+    roster,
   })
   if (added.members.length === 0) return
 
@@ -1449,14 +1506,31 @@ async function removePersonFromPersonalBills(
   })
 }
 
+async function liveProfile(id: string): Promise<Profile | undefined> {
+  const profile = await db.profiles.get(id)
+  return profile && !profile.is_deleted ? profile : undefined
+}
+
 /**
  * Remove someone from all groups (splits recomputed per group), personal bills, payments, then soft-delete their profile.
  */
 export async function deletePerson(personId: string, actorUserId: string): Promise<void> {
   if (personId === actorUserId) return
 
-  const p = await db.profiles.get(personId)
-  if (!p || p.is_deleted) return
+  if (!(await liveProfile(personId))) return
+
+  // The cascade is built from this device's mirror, which holds only part of what it must touch (a
+  // membership or payment made elsewhere, a group's other bills). Online, bring in the complete
+  // bundle first, and send nothing if that fails: a cascade built from a partial copy would leave
+  // real rows pointing at a profile that is gone. Offline, the bases checked on replay guard it.
+  if (typeof navigator === 'undefined' || navigator.onLine) {
+    const refreshed = await fullSync(actorUserId).catch(() => null)
+    if (!refreshed || refreshed.errors.length > 0) {
+      throw new Error("Couldn't refresh your data. Check your connection and try again.")
+    }
+  }
+  const p = await liveProfile(personId)
+  if (!p) return
 
   const displayName = p.display_name
 
@@ -1527,69 +1601,17 @@ export async function deletePerson(personId: string, actorUserId: string): Promi
 }
 
 export async function deleteGroup(groupId: string, userId: string) {
-  // Not loaded on demand: the cascade below reads bills and settlements from the mirror, so loading
-  // only the roster would delete the group on the server and leave its bills live.
-  const group = await db.groups.get(groupId)
-  if (!group) throw new Error("This group hasn't finished loading on this device. Tap Refresh, then try again.")
-  if (group.created_by !== userId) throw new Error('Only the group creator can delete this group.')
-
-  const timestamp = now()
-
-  // BUILD the whole cascade — group, memberships, bills, their items and splits, and the
-  // group's settlements — then submit it as ONE unit. A partially-applied group deletion is
-  // especially bad: a bill whose group row is gone renders nowhere but still moves balances.
-  const deletedBills: Bill[] = []
-  const deletedItems: BillItem[] = []
-  const deletedSplits: ItemSplit[] = []
-  const groupBills = await db.bills.where('group_id').equals(groupId).toArray()
-  for (const bill of groupBills) {
-    if (bill.is_deleted) continue
-    deletedBills.push({ ...bill, is_deleted: true, updated_at: timestamp, synced_at: null })
-    const children = await buildBillChildSoftDeletes(bill.id, timestamp)
-    deletedItems.push(...children.items)
-    deletedSplits.push(...children.splits)
+  // The server walks the group's bills, payments and roster itself (082), so nothing here needs to
+  // be on this device. That cascade cannot be queued: it is derived from rows the server holds.
+  if (typeof navigator !== 'undefined' && !navigator.onLine) {
+    throw new Error('Connect to the internet to delete a group.')
   }
+  const group = await db.groups.get(groupId)
+  if (group && group.created_by !== userId) throw new Error('Only the group creator can delete this group.')
 
-  const groupSettlements = (await db.settlements.where('group_id').equals(groupId).toArray())
-    .filter((s) => !s.is_deleted)
-    .map((s) => ({ ...s, is_deleted: true, updated_at: timestamp, synced_at: null }))
-
-  const members = (await db.group_members.where('group_id').equals(groupId).toArray()).map((m) => ({
-    ...m,
-    is_deleted: true,
-    updated_at: timestamp,
-    synced_at: null,
-  }))
-
-  await commitCloudFirstWrite({
-    actorUserId: userId,
-    payload: {
-      groups: [{ ...group, is_deleted: true, updated_at: timestamp, synced_at: null }],
-      ...(members.length > 0 && { group_members: members }),
-      ...(deletedBills.length > 0 && { bills: deletedBills }),
-      ...(deletedItems.length > 0 && { bill_items: deletedItems }),
-      ...(deletedSplits.length > 0 && { item_splits: deletedSplits }),
-      ...(groupSettlements.length > 0 && { settlements: groupSettlements }),
-      activity_log: [
-        {
-          ...syncFields(),
-          group_id: groupId,
-          user_id: userId,
-          action: 'deleted',
-          entity_type: 'group',
-          entity_id: groupId,
-          description: `Deleted group "${group.name}"`,
-        },
-      ],
-    },
-    pending: {
-      operation: 'delete_group',
-      entityType: 'group',
-      entityId: groupId,
-      payload: { groupId },
-      routeHint: '/app/groups',
-    },
-  })
+  await trackCloudWrite(submitGroupDelete({ actorUserId: userId, groupId }))
+  refreshOnlineStatus()
+  useAppStore.getState().bumpDataVersion()
 }
 
 // ── Settlements ─────────────────────────────────────

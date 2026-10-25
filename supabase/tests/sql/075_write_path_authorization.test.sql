@@ -432,21 +432,21 @@ BEGIN
     AND jsonb_array_length(res -> 'applied' -> 'item_splits') = 2,
     'createBill (group, member): all rows stored');
 
-  -- A member edits another member's group bill, its item and a split.
-  PERFORM test.as_owner();
-  res := jsonb_build_object(
-    'bills', jsonb_build_array(test.row_of('bills', gb) || jsonb_build_object('paid_by', bob, 'title', 'Bob paid')),
-    'bill_items', jsonb_build_array(test.row_of('bill_items', test.item_of(gb)) || '{"amount": 120}'),
-    'item_splits', jsonb_build_array(test.row_of('item_splits', test.split_of(gb, bob)) || '{"computed_amount": 60}'));
+  -- A member edits another member's group bill, its item and a split: REFUSED since 082.
+  -- This used to be pinned as accepted. User decision 2026-10-25: only a group bill's creator may
+  -- edit it (082; the group creator may still soft-delete it, see 082's suite C12). Intended change.
   PERFORM test.as_user(bob);
-  res := test.w(res);
-  PERFORM test.as_owner();
-  PERFORM test.assert_eq((SELECT paid_by FROM public.bills WHERE id = gb), bob,
-    'a member can edit a group bill someone else created');
-  PERFORM test.assert_money((SELECT amount FROM public.bill_items WHERE id = test.item_of(gb)), 120,
-    'and its item');
-  PERFORM test.assert_money((SELECT computed_amount FROM public.item_splits WHERE id = test.split_of(gb, bob)), 60,
-    'and its split');
+  PERFORM test.assert_refused('bills',
+    test.row_of('bills', gb) || jsonb_build_object('paid_by', bob, 'title', 'Bob paid'),
+    'a member cannot edit a group bill someone else created (creator-only, 082)');
+  PERFORM test.assert_refused('bill_items', test.row_of('bill_items', test.item_of(gb)) || '{"amount": 120}',
+    'nor its item');
+  PERFORM test.assert_refused('item_splits', test.row_of('item_splits', test.split_of(gb, bob)) || '{"computed_amount": 60}',
+    'nor its split');
+  -- The bill's creator still edits it.
+  PERFORM test.as_user(alice);
+  PERFORM test.assert_applied('bills', test.row_of('bills', gb) || jsonb_build_object('paid_by', bob, 'title', 'Bob paid'),
+    'the bill''s creator edits their group bill');
 
   -- The creator adds a member, then removes them.
   PERFORM test.as_user(alice);
@@ -468,7 +468,7 @@ BEGIN
     AND jsonb_array_length(res -> 'applied' -> 'group_members') = 2,
     'createGroup: group, creator and member stored together');
 
-  PERFORM test.note('075 C3: createBill, member edits, roster changes and createGroup still apply');
+  PERFORM test.note('075 C3: createBill, creator edits, roster changes and createGroup still apply; member edits of others'' group bills are refused (082)');
 END;
 $$;
 

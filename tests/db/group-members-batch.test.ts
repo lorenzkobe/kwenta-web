@@ -152,12 +152,14 @@ describe('addExistingGroupMembers', () => {
   it('C15: re-adding a member whose membership row was soft-deleted adds them again', async () => {
     await seedGroup()
     await db.group_members.add(
-      makeMember({ group_id: 'G', user_id: 'ANN', display_name: 'Ann', is_deleted: true }),
+      makeMember({ id: 'gm-old', group_id: 'G', user_id: 'ANN', display_name: 'Ann', is_deleted: true }),
     )
 
     await addExistingGroupMembers('G', ['ANN'], 'ME')
 
     expect(cloud.pushes).toHaveLength(1)
+    // (group_id, user_id) is unique: the removed row is revived under its own id (082), never a second row.
+    expect(pushedMembers().map((m) => m.id)).toEqual(['gm-old'])
     expect(await activeMemberIds('G')).toEqual(['ANN', 'ME'])
   })
 

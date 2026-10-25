@@ -28,6 +28,9 @@ const server = vi.hoisted(() => ({
   fetchError: null as { message: string } | null,
   /** Runs while the fetch is in flight (e.g. a wipe landing mid-request). */
   onFetch: null as null | (() => void),
+  deleteCalls: [] as Record<string, unknown>[],
+  deleteEcho: null as Record<string, unknown[]> | null,
+  deleteError: null as { message: string; code: string } | null,
   cloud: { mode: 'ok' as const, calls: 0, pushes: [] as Record<string, { id: string }[]>[] },
 }))
 
@@ -44,6 +47,12 @@ vi.mock('@/lib/supabase', async () => {
           server.onFetch?.()
           if (server.fetchError) return { data: null, error: server.fetchError }
           return { data: server.groups.get(id) ?? null, error: null }
+        }
+        // 082: deleteGroup is one server call whose answer is the cascade it applied.
+        if (fn === 'kwenta_delete_group') {
+          server.deleteCalls.push(args ?? {})
+          if (server.deleteError) return { data: null, error: { ...server.deleteError, details: '', hint: '' }, status: 400 }
+          return { data: server.deleteEcho, error: null }
         }
         return base.rpc(fn, args)
       },
@@ -132,6 +141,9 @@ beforeEach(async () => {
   server.fetchCalls = []
   server.fetchError = null
   server.onFetch = null
+  server.deleteCalls = []
+  server.deleteEcho = null
+  server.deleteError = null
   setOnline(true)
   server.cloud.mode = 'ok'
   server.cloud.calls = 0
@@ -291,24 +303,53 @@ describe('group actions on a group the mirror does not hold', () => {
     expect(server.cloud.pushes).toHaveLength(0)
   })
 
-  it('C14: deleteGroup on a group the mirror lacks refuses, fetching and sending nothing', async () => {
-    asCreator()
-
-    await expect(deleteGroup('G', ME)).rejects.toThrow(/refresh/i)
-
-    expect(server.fetchCalls).toEqual([])
-    expect(server.cloud.pushes).toHaveLength(0)
-  })
-
-  it('deleteGroup submits the cascade for a group the mirror holds', async () => {
+  // 082: the server walks the group's bills, payments and roster itself, so the mirror no longer
+  // needs the group before a delete. The old "tap Refresh" refusal is gone with the mirror cascade.
+  it('C14: deleteGroup on a group the mirror lacks is still sent to the server, fetching nothing', async () => {
     const bundle = asCreator()
-    await mirrorWithout(bundle, [])
+    const deletedAt = '2026-10-25T03:00:00.123456+00:00'
+    server.deleteEcho = {
+      profiles: [],
+      groups: [{ ...bundle.group, is_deleted: true, updated_at: deletedAt, synced_at: deletedAt }],
+      group_members: [],
+      bills: [],
+      bill_items: [],
+      item_splits: [],
+      settlements: [],
+      activity_log: [],
+      profile_peer_links: [],
+    }
 
     await deleteGroup('G', ME)
 
     expect(server.fetchCalls).toEqual([])
-    expect(pushed<{ id: string; is_deleted: boolean }>('groups')[0]).toMatchObject({ id: 'G', is_deleted: true })
-    expect(pushed<{ is_deleted: boolean }>('group_members').every((m) => m.is_deleted)).toBe(true)
+    expect(server.deleteCalls).toEqual([{ p_group_id: 'G' }])
+    expect((await db.groups.get('G'))?.is_deleted).toBe(true)
+  })
+
+  it('deleteGroup for a group the mirror holds sends one kwenta_delete_group and no cascade push', async () => {
+    const bundle = asCreator()
+    await mirrorWithout(bundle, [])
+    const deletedAt = '2026-10-25T03:00:00.123456+00:00'
+    server.deleteEcho = {
+      profiles: [],
+      groups: [{ ...bundle.group, is_deleted: true, updated_at: deletedAt, synced_at: deletedAt }],
+      group_members: bundle.group_members.map((m) => ({ ...m, is_deleted: true, updated_at: deletedAt, synced_at: deletedAt })),
+      bills: [],
+      bill_items: [],
+      item_splits: [],
+      settlements: [],
+      activity_log: [],
+      profile_peer_links: [],
+    }
+
+    await deleteGroup('G', ME)
+
+    expect(server.fetchCalls).toEqual([])
+    expect(server.deleteCalls).toEqual([{ p_group_id: 'G' }])
+    expect(server.cloud.pushes).toHaveLength(0)
+    expect((await db.groups.get('G'))?.is_deleted).toBe(true)
+    expect((await activeMirrorMemberIds())).toEqual([])
   })
 
   it('C14: deleteGroup by a non-creator throws and deletes nothing', async () => {
@@ -341,7 +382,9 @@ describe('group actions on a group the mirror does not hold', () => {
   it('C8: an unknown group is reported, not silently ignored', async () => {
     await expect(removeGroupMember('G', ANN, ME)).rejects.toThrow(GroupUnavailableError)
     await expect(updateGroup('G', { name: 'x' }, ME)).rejects.toThrow(/no longer exists/i)
-    await expect(deleteGroup('G', ME)).rejects.toThrow(/refresh/i)
+    // The server is the one that knows the group is gone (082), so its refusal is what is reported.
+    server.deleteError = { code: 'P0001', message: 'This group no longer exists, or you no longer have access to it.' }
+    await expect(deleteGroup('G', ME)).rejects.toThrow(/no longer exists/i)
   })
 
   it('C8: an unreachable server reads as a connection problem, not a missing group', async () => {

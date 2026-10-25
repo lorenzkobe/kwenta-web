@@ -22,7 +22,7 @@ import {
   rowKey,
   resolveSettlementPartyIdForPush,
   resolveSplitUserIdForPush,
-  shouldApplyPulledRow,
+  selectServerRowsToApply,
   syncErrMessage,
 } from '@/sync/sync-service'
 import type {
@@ -434,28 +434,15 @@ export async function submitCloudWrite(input: {
     )
     const rows = unechoed.length > 0 ? [...echoed, ...unechoed] : echoed
     stored += rows.length
-    if (rows.length === 0) continue
-    const localTable = getLocalTable(table)
-    const mine = submittedIds.get(table)!
-    const existingRows = await localTable.bulkGet(rows.map((r) => r.id))
-    const toPut: SyncFields[] = []
-    for (let i = 0; i < rows.length; i++) {
-      const row = rows[i]
-      const existing = existingRows[i] as
-        | { updated_at: string; synced_at: string | null }
-        | undefined
+    await mirrorServerRows(table, rows, epoch, {
       // Rows this call just submitted are written unconditionally: the server's copy IS the
-      // record, and it has just been confirmed stored above. The freshness guard below exists
-      // to protect concurrent *local* edits, and would otherwise drop our own confirmed write
-      // whenever the device clock runs ahead of the server clock — the row would be saved in
-      // the cloud but never appear on the device that saved it.
-      if (input.preserveLocalKeys?.has(rowKey(table, row.id))) continue
-      if (!mine.has(row.id) && !shouldApplyPulledRow(existing, row.updated_at)) continue
-      toPut.push({ ...(existing ?? {}), ...stripClientWriteKeys(row), synced_at: row.updated_at })
-    }
-    if (toPut.length === 0) continue
-    assertSessionEpoch(epoch)
-    await localTable.bulkPut(toPut)
+      // record, and it has just been confirmed stored above. The freshness guard exists to protect
+      // concurrent *local* edits, and would otherwise drop our own confirmed write whenever the
+      // device clock runs ahead of the server clock — the row would be saved in the cloud but
+      // never appear on the device that saved it.
+      submittedIds: submittedIds.get(table)!,
+      preserveLocalKeys: input.preserveLocalKeys,
+    })
   }
   assertSessionEpoch(epoch)
 
@@ -471,6 +458,73 @@ export async function submitCloudWrite(input: {
     markRefreshed()
   }
   return { stored, versions }
+}
+
+/**
+ * Mirror one table's server rows into Dexie. A row in `submittedIds` is written unconditionally;
+ * any other row follows the pull rule (`selectServerRowsToApply`): a staged local edit survives
+ * unless the server copy is strictly newer. Nothing is written once the session has ended.
+ */
+async function mirrorServerRows(
+  table: TableName,
+  rows: SyncFields[],
+  epoch: number,
+  options?: { submittedIds?: ReadonlySet<string>; preserveLocalKeys?: ReadonlySet<string> },
+): Promise<void> {
+  if (rows.length === 0) return
+  const localTable = getLocalTable(table)
+  const existingRows = (await localTable.bulkGet(rows.map((r) => r.id))) as (
+    | { updated_at: string; synced_at: string | null }
+    | undefined
+  )[]
+  const candidates = rows
+    .map((row, i) => ({ row, existing: existingRows[i] }))
+    .filter(({ row }) => !options?.preserveLocalKeys?.has(rowKey(table, row.id)))
+  const foreign = candidates.filter(({ row }) => !options?.submittedIds?.has(row.id))
+  const foreignApply = await selectServerRowsToApply(
+    table,
+    foreign.map(({ row }) => row),
+    foreign.map(({ existing }) => existing),
+  )
+  const skipped = new Set(foreign.filter((_, i) => !foreignApply[i]).map(({ row }) => row.id))
+  const toPut: SyncFields[] = candidates
+    .filter(({ row }) => !skipped.has(row.id))
+    .map(({ row, existing }) => ({ ...(existing ?? {}), ...stripClientWriteKeys(row), synced_at: row.updated_at }))
+  if (toPut.length === 0) return
+  assertSessionEpoch(epoch)
+  await localTable.bulkPut(toPut)
+}
+
+/**
+ * Delete a group on the server (migration 082) and mirror the rows it touched. The server derives
+ * the cascade from its own rows, so nothing about the group needs to be on this device first; a
+ * cascade cannot be queued, so there is no offline path and a failure is always thrown.
+ */
+export async function submitGroupDelete(input: { actorUserId: string; groupId: string }): Promise<void> {
+  const epoch = currentSessionEpoch()
+  const {
+    data: { session },
+  } = await supabase.auth.getSession()
+  if (!session?.user?.id) throw new CloudWriteFailedError('You are signed out. Sign in and try again.', 'transport')
+  if (session.user.id !== input.actorUserId) throw new WriteSessionMismatchError()
+
+  const answer = await callWriteRpc('kwenta_delete_group', { p_group_id: input.groupId }, { rpc: 'kwenta_delete_group' })
+  if (answer.error) {
+    const error = errorWithStatus(answer)
+    const kind = classifyWriteFailure(error)
+    if (kind === 'rejected') throw new CloudWriteRejectedError(syncErrMessage(error), 'RPC_ERROR')
+    const message =
+      kind === 'inactive' ? syncErrMessage(error) : "Couldn't delete the group. Check your connection and try again."
+    throw new CloudWriteFailedError(message, kind)
+  }
+  if (!isPullBundle(answer.data)) {
+    throw new CloudWriteFailedError('Cloud returned an unexpected response.', 'transport')
+  }
+  const echo = answer.data
+
+  assertSessionEpoch(epoch)
+  for (const table of TABLE_NAMES) await mirrorServerRows(table, echo[table] as SyncFields[], epoch)
+  assertSessionEpoch(epoch)
 }
 
 /** How long a save may wait on older queued writes before it queues behind them instead. */

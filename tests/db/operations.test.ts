@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { db } from '@/db/db'
 import {
   addExistingGroupMembers,
@@ -95,6 +95,23 @@ import { notifyPaymentsRecorded } from '@/lib/kwenta-notifications'
  */
 const cloudCalls = vi.hoisted(() => ({ mode: 'ok' as const, writeRoundTrips: 0, calls: 0, sessionUserId: 'ME' }))
 
+// deletePerson refreshes the complete bundle before it builds its cascade. The cascade test below
+// counts write round trips, so it stubs that refresh (asserted separately) instead of running a
+// real sync against the fake server.
+const refresh = vi.hoisted(() => ({ stubbed: false }))
+vi.mock('@/sync/sync-service', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/sync/sync-service')>()
+  return {
+    ...actual,
+    fullSync: vi.fn((userId: string) =>
+      refresh.stubbed
+        ? Promise.resolve({ pushed: 0, pulled: 0, changed: 0, errors: [] as string[] })
+        : actual.fullSync(userId),
+    ),
+  }
+})
+import { fullSync } from '@/sync/sync-service'
+
 vi.mock('@/lib/supabase', async () => {
   const { makeSupabaseCloudMock } = await import('../helpers/cloud-sync-mock')
   const base = makeSupabaseCloudMock(cloudCalls)
@@ -106,6 +123,32 @@ vi.mock('@/lib/supabase', async () => {
       auth: { getSession: async () => ({ data: { session: { user: { id: cloudCalls.sessionUserId } } } }) },
       rpc: async (fn: string, args?: Record<string, unknown>) => {
         if (fn === 'kwenta_sync' || fn === 'kwenta_write') cloudCalls.writeRoundTrips += 1
+        // 082: the server walks the group itself. Its state IS the mirror here, so the cascade it
+        // answers with is built from Dexie, stamped later than anything local.
+        if (fn === 'kwenta_delete_group') {
+          const { db } = await import('@/db/db')
+          const groupId = String(args?.p_group_id)
+          const stamp = new Date(Date.now() + 60_000).toISOString()
+          const gone = <T extends object>(rows: T[]) =>
+            rows.map((r) => ({ ...r, is_deleted: true, updated_at: stamp, synced_at: stamp }))
+          const bills = await db.bills.where('group_id').equals(groupId).toArray()
+          const items = await db.bill_items.where('bill_id').anyOf(bills.map((b) => b.id)).toArray()
+          const group = await db.groups.get(groupId)
+          return {
+            data: {
+              profiles: [],
+              groups: gone(group ? [group] : []),
+              group_members: gone(await db.group_members.where('group_id').equals(groupId).toArray()),
+              bills: gone(bills),
+              bill_items: gone(items),
+              item_splits: gone(await db.item_splits.where('item_id').anyOf(items.map((i) => i.id)).toArray()),
+              settlements: gone(await db.settlements.where('group_id').equals(groupId).toArray()),
+              activity_log: [],
+              profile_peer_links: [],
+            },
+            error: null,
+          }
+        }
         // These tests seed the server's state into Dexie, so the server's roster IS the mirror's.
         if (fn === 'kwenta_fetch_group_bundle') {
           const { db } = await import('@/db/db')
@@ -850,15 +893,20 @@ describe('linkProfileToRemote', () => {
 })
 
 describe('deleteGroup', () => {
-  it('cascades soft-delete to bills, settlements, and members for the creator', async () => {
+  // Since 082 the cascade is the server's (kwenta_delete_group): one call, no kwenta_write push,
+  // and the mirror takes the rows it answers with.
+  it('mirrors the server cascade to bills, settlements, and members for the creator', async () => {
     await db.profiles.add(makeProfile({ id: 'ME' }))
     const groupId = await createGroup('G', 'PHP', 'ME')
     await db.bills.add(makeBill({ id: 'B', group_id: groupId, paid_by: 'ME' }))
     await db.settlements.add(
       makeSettlement({ id: 'SET', group_id: groupId, from_user_id: 'ME', to_user_id: 'X', amount: 5 }),
     )
+    const before = cloudCalls.writeRoundTrips
 
     await deleteGroup(groupId, 'ME')
+
+    expect(cloudCalls.writeRoundTrips).toBe(before)
 
     expect((await db.groups.get(groupId))?.is_deleted).toBe(true)
     expect((await db.bills.get('B'))?.is_deleted).toBe(true)
@@ -970,6 +1018,14 @@ describe('resolveGroupMemberUserId', () => {
 })
 
 describe('deletePerson atomic cascade', () => {
+  beforeEach(() => {
+    refresh.stubbed = true
+    vi.mocked(fullSync).mockClear()
+  })
+  afterEach(() => {
+    refresh.stubbed = false
+  })
+
   it('fires exactly one sync for a person spanning a group, a personal bill, and a settlement', async () => {
     // The cascade is now submitted directly, so "exactly one sync" is counted as kwenta_sync
     // round trips: every affected row lands in a single transaction, not one call per entity.
@@ -987,6 +1043,7 @@ describe('deletePerson atomic cascade', () => {
 
     await deletePerson('P', 'ME')
 
+    expect(vi.mocked(fullSync)).toHaveBeenCalledTimes(1)
     expect(cloudCalls.writeRoundTrips - before).toBe(1)
     expect((await db.profiles.get('P'))?.is_deleted).toBe(true)
     const m = await db.group_members.where('[group_id+user_id]').equals(['G', 'P']).first()
