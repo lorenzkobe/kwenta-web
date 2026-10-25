@@ -338,6 +338,7 @@ Current version: **16** (v16 added the foreign-currency fields, null-backfilled:
 - `src/sync/cloud-first-mutations.ts` — queue-entry and "not applied" record helpers
 - `src/sync/session-epoch.ts` — the guard against responses landing after a wipe
 - `src/sync/group-mirror.ts` — loads a group and its whole roster into the mirror on a miss (`kwenta_fetch_group_bundle`)
+- `src/sync/settlement-mirror.ts` — `applySettlementBundle` (shared with realtime) and `loadSettlementIntoMirror`: one `kwenta_fetch_settlement` for a payment the device lacks
 - `src/sync/realtime-events.ts` — Supabase Realtime subscription + per-entity reconcile
 
 ### syncRoundTrip vs fullSync
@@ -489,7 +490,7 @@ Notifications are queued in `localStorage` (`kwenta_notification_outbox_v1`) and
 
 ### Key Functions
 
-**`resolveProfileDisplay(profileId, viewerUserId?)`** — display name + subtitle for UI
+**`resolveProfileDisplay(profileId, viewerUserId?)`** — display name + subtitle for UI. READ-ONLY: it runs inside `useLiveQuery`, where a Dexie write throws and blanks the screen. `getBillWithDetails` is read-only for the same reason. A caller outside a live query loads what it needs first with `loadProfilesIntoMirror(ids)`
 - Follows `linked_profile_id` chain
 - Falls back to `resolveSharedGroupMemberFallbackIdentity` if profile is missing/deleted
 - Returns `{ displayName: 'Unknown' }` as last resort
@@ -500,7 +501,7 @@ Notifications are queued in `localStorage` (`kwenta_notification_outbox_v1`) and
 
 **`findRemoteProfileIdForLinking(input)`** — accepts UUID or email; looks up locally, then calls `kwenta_lookup_profile_id_by_email` RPC if needed
 
-**`fetchRemoteProfileIntoDexie(profileId)`** — returns `Promise<boolean>`; fetches via `kwenta_fetch_profile_for_linking` RPC and upserts into Dexie (RPC allows co-members’ rows, including `is_local`, when you share a group — see migration `029`)
+**`fetchRemoteProfileIntoDexie(profileId)`** — returns `'present' | 'not_found' | 'unreachable'` (offline, a failed request or a wipe mid-fetch is `unreachable`, never "gone"); fetches via `kwenta_fetch_profile_for_linking` RPC and upserts into Dexie (RPC allows co-members’ rows, including `is_local`, when you share a group — see migration `029`)
 
 **`listCanonicalRelatedProfileIds(meId)`** — the contact picker's phonebook: one row per real
 person, deduped across local contact, linked account and manual merges. Deliberately still LOCAL
@@ -618,6 +619,8 @@ Key operations:
 - `renameSelf(userId, name)` — the account's own profile row plus its live roster rows, one cloud-first write (it replaced AuthProvider's write-then-sync `updateDisplayName`)
 
 **Group writes judge membership and existence from a mirror that may lag.** `createBill` checks its people against the Dexie roster and, only on a miss, refreshes the roster once (`refreshGroupIntoMirror`, `src/sync/group-mirror.ts`; unreachable → submit and let the server decide, still missing after a successful refresh → the non-member error). `updateGroup`, `removeGroupMember` and `addExistingGroupMembers` load the group first (`ensureGroupInMirror`) and throw rather than return silently; a cascade (`collect`) never fetches. `deleteGroup` is the server's: online it calls `kwenta_delete_group(p_group_id)` (082), which soft-deletes the group, every membership, every bill with its items and splits (leftovers under already-deleted bills too) and every payment in one transaction and returns the touched rows to mirror, so it needs no mirror copy of the group and cannot miss a bill this device never held; offline it refuses (a server cascade cannot be queued). `deletePerson` runs a `fullSync` first for the same reason (its cascade is still built client-side). Migration `080` makes `kwenta_write` refuse a group bill that ADDS someone with no membership row in that group (people a bill already named are not re-judged).
+
+**No operation returns silently on a device miss: it loads what it lacks or throws a message that says which.** A group (`addGroupMember`, `createBundledGroupSettlement`, `recordDecomposedSettlement`: `ensureGroupInMirror`, and a held group's roster refreshes only when a payment's party is not on it), a payment (`updateSettlement`: one `kwenta_fetch_settlement` through `settlement-mirror.ts`; a NULL answer is "couldn't load", never "gone", because 013 misses payments filed under a linked contact) and picked people (`buildExistingMemberRows` fetches the profiles the device lacks first; unreachable → a connection message, gone → a count; nothing is sent) are loaded; `updateBundledPaymentDetails`, `removeProfilePeerLink`, `mergeProfileIdentity` and `renameSelf` throw on every early exit. "Offline" and "unreachable" read as a connection problem, "the server said no" as gone. After the write queue applies a `link_profile` entry it runs ONE background `fullSync`: 045's server-side id rewrite is in rows no `kwenta_write` response returns. The group, bill-popup, notification-tap and person screens ask the server online (roster, `loadBillIntoMirror` fresh, `refreshGroupIntoMirror`, the person fetch) and keep the device copy only offline or on an unreachable answer.
 
 **A group bill is writable only by its creator** (082), while they are an active member: another member's edit, re-payer or delete is refused, as is the group creator's edit. Two narrow exceptions keep older clients working: the group's creator may write a soft-delete of another member's bill, items and splits only once the group row itself is deleted and only changing `is_deleted` (an old `deleteGroup` cascade, a queued delete), and an active member may re-point `paid_by` / a split's `user_id` at `kwenta_canonical_user_id(stored)` with nothing else changed, the server choosing the version (a pre-081 contact link). No live bill, item, split or payment can be written into a deleted group (`kwenta_group_open` locks the group row `FOR SHARE`, so it also serialises with a concurrent delete), and marking a group deleted by ANY path (`kwenta_write`, a `kwenta_sync` replay, `kwenta_delete_group`) fires a trigger that sweeps every live child and membership. Personal bills are creator-only, as before.
 

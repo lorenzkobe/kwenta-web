@@ -1,14 +1,24 @@
 import { useEffect, useState } from 'react'
 import { useLiveQuery } from 'dexie-react-hooks'
 import { Loader2, Pencil, ReceiptText, Trash2, Users, X } from 'lucide-react'
+import { db } from '@/db/db'
+import { loadProfilesIntoMirror } from '@/lib/people'
 import { deleteBill, getBillWithDetails } from '@/db/operations'
-import { loadBillIntoMirror } from '@/sync/bill-mirror'
+import { BillUnavailableError, loadBillIntoMirror } from '@/sync/bill-mirror'
 import { toast } from 'sonner'
 import { describeError, formatCurrency } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { ConfirmDialog } from '@/components/common/ConfirmDialog'
 import { PaidInSummary } from '@/components/common/CurrencyConversionField'
 import { isConvertedBill } from '@/lib/currency-conversion'
+
+async function loadBillPeopleIntoMirror(billId: string): Promise<void> {
+  const bill = await db.bills.get(billId)
+  if (!bill) return
+  const items = await db.bill_items.where('bill_id').equals(billId).toArray()
+  const splits = await db.item_splits.where('item_id').anyOf(items.map((i) => i.id)).toArray()
+  await loadProfilesIntoMirror([bill.created_by, bill.paid_by, ...splits.map((s) => s.user_id)])
+}
 
 type BillDetails = NonNullable<Awaited<ReturnType<typeof getBillWithDetails>>>
 
@@ -26,6 +36,7 @@ export function BillDetailModal({
   const [billState, setBillState] = useState<BillDetails | null>(null)
   const [loadingState, setLoadingState] = useState(true)
   const [loadError, setLoadError] = useState<string | null>(null)
+  const [gone, setGone] = useState(false)
   const [deleting, setDeleting] = useState(false)
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false)
   const liveBill = useLiveQuery(async () => getBillWithDetails(billId), [billId])
@@ -36,17 +47,23 @@ export function BillDetailModal({
     async function load() {
       setLoadingState(true)
       setLoadError(null)
-      let data = await getBillWithDetails(billId)
-      if (!data && !cancelled) {
-        // One bill, not the whole dataset: this used to run a full sync to find a single row.
-        try {
-          await loadBillIntoMirror(billId)
-          if (!cancelled) data = await getBillWithDetails(billId)
-        } catch (err) {
-          // Keep WHY it could not be loaded: a connection failure must not read as "not found".
-          if (!cancelled) setLoadError(err instanceof Error ? err.message : "Couldn't load this bill.")
-        }
+      setGone(false)
+      // Online this asks the server on every open, so another device's edit shows; offline, or
+      // when the server cannot be reached, a bill already on this device is shown as it is.
+      let reachable = true
+      try {
+        await loadBillIntoMirror(billId, { fresh: true })
+      } catch (err) {
+        reachable = false
+        if (cancelled) return
+        if (err instanceof BillUnavailableError && err.kind === 'not_found') setGone(true)
+        // Keep WHY it could not be loaded: a connection failure must not read as "not found".
+        setLoadError(err instanceof Error ? err.message : "Couldn't load this bill.")
       }
+      // getBillWithDetails only reads (it runs in a live query), so a co-member's contact the device
+      // lacks is loaded here, once, for the people the bill names.
+      if (reachable) await loadBillPeopleIntoMirror(billId).catch(() => {})
+      const data = await getBillWithDetails(billId)
       if (!cancelled) {
         setBillState(data)
         setLoadingState(false)
@@ -73,8 +90,9 @@ export function BillDetailModal({
 
   // A live `null` only means "not on this device yet": the load effect may still be fetching it,
   // so "not found" waits for that answer instead of flashing first.
-  const bill = liveBill ?? billState
-  const loading = liveBill ? false : loadingState
+  // A bill the server answered "no such bill" for is gone, whatever stale copy this device holds.
+  const bill = gone ? null : (liveBill ?? billState)
+  const loading = gone ? false : liveBill ? false : loadingState
   const converted = bill ? isConvertedBill(bill, bill.items) : false
   // The amount as paid, shown quietly beside the balance amount every total and balance uses.
   const paidIn = (amount: number | null | undefined) =>

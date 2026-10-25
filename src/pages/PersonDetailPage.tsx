@@ -17,6 +17,7 @@ import {
   fetchRemoteProfileIntoDexie,
   findRemoteProfileIdForLinking,
   formatPairwiseSummary,
+  loadProfilesIntoMirror,
   resolveFallbackIdentityForViewer,
   resolveProfileDisplay,
 } from '@/lib/people'
@@ -348,16 +349,56 @@ export function PersonDetailPage() {
   const profile = useLiveQuery(
     async (): Promise<Profile | null | undefined> => {
       if (!personId) return null
-      let p = await db.profiles.get(personId)
-      if (p && !p.is_deleted) return p
-      if (p?.is_deleted) return null
-      await fetchRemoteProfileIntoDexie(personId)
-      p = await db.profiles.get(personId)
-      if (p && !p.is_deleted) return p
-      return null
+      const p = await db.profiles.get(personId)
+      return p && !p.is_deleted ? p : null
     },
     [personId],
   )
+
+  // The server's answer for a person this device does not hold. It runs here, not in a live
+  // query: the fetch writes the profile into Dexie, which a live query's read-only transaction
+  // refuses (the page stayed blank when the server returned the profile).
+  const [lookup, setLookup] = useState<{ personId: string; outcome: 'present' | 'not_found' | 'unreachable' } | null>(null)
+  const [lookupAttempt, setLookupAttempt] = useState(0)
+  useEffect(() => {
+    if (!personId) return
+    let cancelled = false
+    void (async () => {
+      // A contact deleted on this device stays deleted: asking the server would put its live copy
+      // back over a delete that may still be queued.
+      const held = await db.profiles.get(personId)
+      let outcome: 'present' | 'not_found' | 'unreachable' = held?.is_deleted
+        ? 'not_found'
+        : await fetchRemoteProfileIntoDexie(personId)
+      if (outcome === 'present') {
+        const stored = await db.profiles.get(personId)
+        if (!stored || stored.is_deleted) outcome = 'not_found'
+      }
+      if (!cancelled) setLookup({ personId, outcome })
+    })().catch(() => {
+      if (!cancelled) setLookup({ personId, outcome: 'unreachable' })
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [personId, lookupAttempt])
+  const lookupOutcome = lookup && lookup.personId === personId ? lookup.outcome : null
+
+  // A profile that went away after the lookup said it was here (a realtime delete, or deleting
+  // this person) would otherwise leave the spinner up for good.
+  useEffect(() => {
+    if (!personId || profile !== null || lookupOutcome !== 'present') return
+    let cancelled = false
+    void db.profiles
+      .get(personId)
+      .then((p) => {
+        if (!cancelled && (!p || p.is_deleted)) setLookup({ personId, outcome: 'not_found' })
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [personId, profile, lookupOutcome])
 
   const display = useLiveQuery(async () => {
     if (!personId) return null
@@ -477,6 +518,16 @@ export function PersonDetailPage() {
       .filter((l) => !l.is_deleted)
       .toArray()
   }, [userId, personId])
+
+  // A merged peer's profile may not be on this device; the label reads the mirror only.
+  const peerIdsKey = (peerLinksForAnchor ?? [])
+    .map((l) => l.peer_profile_id)
+    .sort()
+    .join(',')
+  useEffect(() => {
+    if (!peerIdsKey) return
+    void loadProfilesIntoMirror(peerIdsKey.split(',')).catch(() => {})
+  }, [peerIdsKey])
 
   const peerLinkCandidates = useLiveQuery(async () => {
     if (!userId || !personId) return []
@@ -648,7 +699,7 @@ export function PersonDetailPage() {
     )
   }
 
-  if (profile === null && fallbackIdentity === undefined) {
+  if (profile === null && (fallbackIdentity === undefined || lookupOutcome === null || lookupOutcome === 'present')) {
     return (
       <div className="flex justify-center py-20">
         <Loader2 className="size-5 animate-spin text-teal-800" />
@@ -656,10 +707,7 @@ export function PersonDetailPage() {
     )
   }
 
-  if (profile === null) {
-    if (fallbackIdentity) {
-      // Render fallback identity state below.
-    } else {
+  if (profile === null && !fallbackIdentity) {
     return (
       <div className="space-y-4">
         <Button asChild variant="ghost" size="sm" className="rounded-full gap-1">
@@ -668,10 +716,20 @@ export function PersonDetailPage() {
             People
           </Link>
         </Button>
-        <p className="text-center text-sm text-stone-500">Person not found</p>
+        {lookupOutcome === 'unreachable' ? (
+          <div className="space-y-3 text-center">
+            <p className="text-sm text-stone-500">
+              Couldn't load this person. Check your connection and try again.
+            </p>
+            <Button type="button" variant="outline" className="min-h-11 rounded-lg px-5" onClick={() => setLookupAttempt((n) => n + 1)}>
+              Retry
+            </Button>
+          </div>
+        ) : (
+          <p className="text-center text-sm text-stone-500">Person not found</p>
+        )}
       </div>
     )
-    }
   }
 
   const canLink = Boolean(profile?.is_local && !profile.linked_profile_id)

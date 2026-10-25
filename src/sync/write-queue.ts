@@ -278,6 +278,7 @@ type DrainResult = { applied: number; refused: number; lockHeld?: boolean }
 async function runDrain(actorUserId: string, ignoreBackoff: boolean): Promise<DrainResult> {
   const result: DrainResult = { applied: 0, refused: 0 }
   const attempted = new Set<string>()
+  let linkApplied = false
   // A wipe mid-drain ends it: the entries (and the mirror) it was draining are gone, and nothing it
   // learns afterwards may be written into the next session's database.
   const epoch = currentSessionEpoch()
@@ -331,6 +332,7 @@ async function runDrain(actorUserId: string, ignoreBackoff: boolean): Promise<Dr
         assertSessionEpoch(epoch)
         await removeAppliedEntry(head, entries, versions)
         result.applied++
+        if (head.operation === 'link_profile') linkApplied = true
       } catch (err) {
         if (err instanceof SessionEndedError || err instanceof WriteSessionMismatchError || !isSessionEpochCurrent(epoch)) {
           break
@@ -361,6 +363,10 @@ async function runDrain(actorUserId: string, ignoreBackoff: boolean): Promise<Dr
     // One invalidation for the whole drain, however many entries it moved.
     if (result.applied + result.refused > 0) useAppStore.getState().bumpDataVersion()
   }
+  // The server's link rewrites the contact's splits, payers and payments (045) in rows no
+  // `kwenta_write` response returns; only a pull carries them to this mirror. A failed pull is
+  // retried by the next refresh, so it is not reported here.
+  if (linkApplied && isSessionEpochCurrent(epoch)) void fullSync(actorUserId).catch(() => {})
   return result
 }
 

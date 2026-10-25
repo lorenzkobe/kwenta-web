@@ -91,32 +91,60 @@ async function expandCached(
   return ids
 }
 
+export type RemoteProfileOutcome = 'present' | 'not_found' | 'unreachable'
+
 /**
- * Fetch a profile from the server and insert it into local Dexie if missing.
- * Needed when RPC lookup finds a profile that hasn't been synced to this device.
- *
- * After sign-out / sign-in, normal sync pulls your own rows and owned local contacts, but not other
- * users' account rows (RLS). Linked contacts still need the remote row for display — this RPC is
+ * Fetch a profile from the server and insert it into local Dexie if missing. Needed when RPC lookup
+ * finds a profile that hasn't been synced to this device: after sign-out / sign-in, normal sync pulls
+ * your own rows and owned local contacts, but not other users' account rows (RLS), and this RPC is
  * allowed to return that for linking.
+ *
+ * `present`: the row is on this device (already, or just loaded). `not_found`: the server answered
+ * with no row. `unreachable`: offline, a failed request, or a wipe during the fetch; none of those
+ * says anything about whether the profile exists.
  */
-/** Returns true if a row was loaded into Dexie (or was already present). */
-export async function fetchRemoteProfileIntoDexie(profileId: string): Promise<boolean> {
+export async function fetchRemoteProfileIntoDexie(profileId: string): Promise<RemoteProfileOutcome> {
   const existing = await db.profiles.get(profileId)
-  if (existing && !existing.is_deleted) return true
+  if (existing && !existing.is_deleted) return 'present'
+  if (typeof navigator !== 'undefined' && !navigator.onLine) return 'unreachable'
 
   const epoch = currentSessionEpoch()
-  const { data, error } = await supabase.rpc('kwenta_fetch_profile_for_linking', {
-    p_id: profileId,
-  })
-  // The mirror was wiped (sign-out, account switch) meanwhile: this profile was the ended session's.
-  if (!isSessionEpochCurrent(epoch)) return false
-  if (error || !data) {
-    console.warn('[linkLookup] Failed to fetch profile for local cache:', error?.message)
-    return false
+  let data: unknown
+  let error: { message: string } | null
+  try {
+    ;({ data, error } = await supabase.rpc('kwenta_fetch_profile_for_linking', { p_id: profileId }))
+  } catch {
+    return 'unreachable'
   }
+  // The mirror was wiped (sign-out, account switch) meanwhile: this profile was the ended session's.
+  if (!isSessionEpochCurrent(epoch)) return 'unreachable'
+  if (error) {
+    console.warn('[linkLookup] Failed to fetch profile for local cache:', error.message)
+    return 'unreachable'
+  }
+  if (!data) return 'not_found'
   const row = data as Record<string, unknown>
   await db.profiles.put({ ...row, synced_at: row.updated_at } as import('@/types').Profile)
-  return true
+  return 'present'
+}
+
+/**
+ * Brings the profiles `resolveProfileDisplay` will read, and the accounts they link to, onto this
+ * device: one bulk read per layer, then one fetch per profile that is missing. For callers outside a
+ * live query, which cannot write; an unreachable server leaves the fallback names in place.
+ */
+export async function loadProfilesIntoMirror(ids: string[]): Promise<void> {
+  const unique = [...new Set(ids)]
+  if (unique.length === 0) return
+  const first = await db.profiles.bulkGet(unique)
+  await Promise.all(unique.filter((_, i) => !first[i]).map((id) => fetchRemoteProfileIntoDexie(id)))
+
+  const linked = (await db.profiles.bulkGet(unique))
+    .map((p) => p?.linked_profile_id)
+    .filter((id): id is string => Boolean(id))
+  const linkedUnique = [...new Set(linked)]
+  const present = await db.profiles.bulkGet(linkedUnique)
+  await Promise.all(linkedUnique.filter((_, i) => !present[i]).map((id) => fetchRemoteProfileIntoDexie(id)))
 }
 
 /** After pull/sync, load remote rows for any owned local contacts that reference `linked_profile_id`. */
@@ -219,16 +247,16 @@ export async function resolveFallbackIdentityForViewer(
   return resolveSharedGroupMemberFallbackIdentity(viewerUserId, profileId)
 }
 
-/** Resolved label for UI (linked accounts show remote name). */
+/**
+ * Resolved label for UI (linked accounts show remote name). Reads only: it runs inside live queries,
+ * where a Dexie write throws and blanks the screen. A caller that wants a missing profile shown
+ * loads it first with `loadProfilesIntoMirror`.
+ */
 export async function resolveProfileDisplay(
   profileId: string,
   viewerUserId?: string,
 ): Promise<ProfileDisplay> {
-  let p = await db.profiles.get(profileId)
-  if (!p) {
-    await fetchRemoteProfileIntoDexie(profileId)
-    p = await db.profiles.get(profileId)
-  }
+  const p = await db.profiles.get(profileId)
   if (!p || p.is_deleted) {
     if (viewerUserId) {
       const fallback = await resolveSharedGroupMemberFallbackIdentity(viewerUserId, profileId)
@@ -237,11 +265,7 @@ export async function resolveProfileDisplay(
     return { displayName: 'Unknown' }
   }
   if (p.linked_profile_id) {
-    let linked = await db.profiles.get(p.linked_profile_id)
-    if (!linked) {
-      await fetchRemoteProfileIntoDexie(p.linked_profile_id)
-      linked = await db.profiles.get(p.linked_profile_id)
-    }
+    const linked = await db.profiles.get(p.linked_profile_id)
     if (linked && !linked.is_deleted) {
       return {
         displayName: p.display_name,
@@ -269,19 +293,24 @@ export type PhonebookRow = { id: string; displayName: string; subtitle?: string 
  * IndexedDB reads before it could paint, twice over, from two copies of the same loop.
  *
  * The common case (a profile that is present and not deleted) is answered from one bulk read.
- * Only the rows that genuinely need the slow path — a missing profile, which may have to be
- * fetched over RPC, or a deleted one needing the shared-group fallback — fall back to
- * `resolveProfileDisplay`, so no resolution rule is duplicated here.
+ * Missing profiles are fetched first, in one parallel pass; only the rows that still need the
+ * slow path — a profile the server does not return, or a deleted one needing the shared-group
+ * fallback — fall back to `resolveProfileDisplay`, so no resolution rule is duplicated here.
  */
 export async function loadPhonebookRows(meId: string): Promise<PhonebookRow[]> {
   const ids = await listCanonicalRelatedProfileIds(meId)
   if (ids.length === 0) return []
 
-  const profiles = await db.profiles.bulkGet(ids)
+  let profiles = await db.profiles.bulkGet(ids)
+  const missing = ids.filter((_, i) => !profiles[i])
+  if (missing.length > 0) {
+    await Promise.all(missing.map((id) => fetchRemoteProfileIntoDexie(id)))
+    profiles = await db.profiles.bulkGet(ids)
+  }
   const byId = new Map<string, Profile>()
   for (const p of profiles) if (p) byId.set(p.id, p)
 
-  // Linked targets are usually already in `byId`; fetch the few that are not in one more pass.
+  // Linked targets are usually already in `byId`; read the few that are not in one more pass.
   const linkedIds = [...byId.values()]
     .map((p) => p.linked_profile_id)
     .filter((id): id is string => Boolean(id) && !byId.has(id!))

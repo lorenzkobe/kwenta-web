@@ -64,8 +64,8 @@ describe('mergeProfileIdentity', () => {
 
   it('refuses when the source is not a viewer-owned local contact', async () => {
     await seedJelloDuplicate()
-    // jello-real is a real account, not the viewer's local contact -> no-op
-    await mergeProfileIdentity('jello-real', ME, ME)
+    // jello-real is a real account, not the viewer's local contact -> refused with a message
+    await expect(mergeProfileIdentity('jello-real', ME, ME)).rejects.toThrow(/own contacts/i)
     expect((await db.profiles.get('jello-real'))?.linked_profile_id).toBeNull()
   })
 })

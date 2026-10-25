@@ -1,5 +1,5 @@
 import { db } from '@/db/db'
-import { resolveProfileDisplay } from '@/lib/people'
+import { loadProfilesIntoMirror, resolveProfileDisplay } from '@/lib/people'
 
 export type ExportBillItem = {
   id: string
@@ -35,6 +35,7 @@ export async function loadBillExportItems(
 
   // One resolve per distinct person for the whole export, not per split row.
   const names = new Map<string, string>()
+  await loadProfilesIntoMirror(splits.map((s) => s.user_id))
   for (const userId of new Set(splits.map((s) => s.user_id))) {
     names.set(userId, (await resolveProfileDisplay(userId, viewerUserId)).displayName)
   }

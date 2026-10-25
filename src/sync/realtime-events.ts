@@ -9,7 +9,6 @@ import type {
   Bill,
   BillItem,
   ItemSplit,
-  Settlement,
 } from '@/types'
 import {
   EVENT_LOG_TRUST_MS,
@@ -37,6 +36,7 @@ import { waitForInFlightCloudWrites } from '@/sync/in-flight-writes'
 import { currentSessionEpoch, isSessionEpochCurrent } from '@/sync/session-epoch'
 import { upsertRemoteRow } from '@/sync/mirror-upsert'
 import { applyGroupBundle } from '@/sync/group-mirror'
+import { applySettlementBundle } from '@/sync/settlement-mirror'
 type ReconcileBundle = Partial<
   Record<
     | 'profiles'
@@ -95,13 +95,6 @@ async function applyBillBundle(bundle: unknown, epoch: number): Promise<number> 
   for (const it of items) if (await upsertRemoteRow('bill_items', it, epoch)) moved++
   for (const sp of splits) if (await upsertRemoteRow('item_splits', sp, epoch)) moved++
   return moved
-}
-
-async function applySettlementBundle(bundle: unknown, epoch: number): Promise<number> {
-  if (!isRecord(bundle)) return 0
-  const settlement = bundle.settlement as Settlement | undefined
-  if (settlement && (await upsertRemoteRow('settlements', settlement, epoch))) return 1
-  return 0
 }
 
 function bundleRows<T extends SyncFields>(bundle: ReconcileBundle, key: keyof ReconcileBundle): T[] {

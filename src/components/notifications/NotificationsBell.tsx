@@ -10,6 +10,7 @@ import {
 } from '@/lib/kwenta-notifications'
 import { captureMetric, withMetric } from '@/lib/client-metrics'
 import { fullSync } from '@/sync/sync-service'
+import { refreshGroupIntoMirror } from '@/sync/group-mirror'
 import { supabase } from '@/lib/supabase'
 import { useAppStore } from '@/store/app-store'
 import { cn } from '@/lib/utils'
@@ -177,27 +178,30 @@ export function NotificationsBell({ userId }: { userId: string }) {
       }
       navigate('/app/people')
     } else if (row.kind === 'added_to_group' && row.group_id) {
-      let syncErrors: string[] = []
-      if (isOnline) {
-        const syncResult = await withMetric('notifications.syncBeforeGroupNav', () => fullSync(userId), {
-          groupId: row.group_id,
-        })
-        syncErrors = syncResult.errors
-      }
-
-      const hasGroupAccess = await canOpenGroup(row.group_id)
-      if (hasGroupAccess) {
-        navigate(`/app/groups/${row.group_id}`)
+      // The store flag can lag a dropped connection; the mirror paths read navigator.onLine.
+      const online = isOnline && navigator.onLine
+      if (!online) {
+        if (await canOpenGroup(row.group_id)) {
+          navigate(`/app/groups/${row.group_id}`)
+          return
+        }
+        toast.info('You are offline. Reconnect to load this group.')
+        navigate('/app/groups')
         return
       }
 
-      if (!isOnline) {
-        toast.info('You are offline. Reconnect to load this group.')
-      } else if (syncErrors.length > 0) {
-        toast.info('This group is still syncing. Try again in a moment.')
-      } else {
-        toast.info('This group is no longer available.')
+      const outcome = await withMetric('notifications.refreshGroupBeforeNav', () => refreshGroupIntoMirror(row.group_id!), {
+        groupId: row.group_id,
+      })
+      if (outcome === 'present' && (await canOpenGroup(row.group_id))) {
+        navigate(`/app/groups/${row.group_id}`)
+        return
       }
+      toast.info(
+        outcome === 'unreachable'
+          ? "Couldn't load this group. Check your connection."
+          : 'This group is no longer available.',
+      )
       navigate('/app/groups')
     } else {
       navigate('/app/people')

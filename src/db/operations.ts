@@ -21,6 +21,7 @@ import { useAppStore } from '@/store/app-store'
 import { loadBillIntoMirror, loadedRowsSyncedSince, type LoadedBillVersion } from '@/sync/bill-mirror'
 import { fullSync, rowKey } from '@/sync/sync-service'
 import { ensureGroupInMirror, GroupUnavailableError, refreshGroupIntoMirror } from '@/sync/group-mirror'
+import { loadSettlementIntoMirror } from '@/sync/settlement-mirror'
 import {
   notifyAddedToGroup,
   notifyBillParticipantsCreated,
@@ -125,6 +126,24 @@ async function resolveGroupParticipants(
   )
   const offenders = [...new Set(byId.values())].filter((id) => !memberIds.has(id))
   return { byId, offenders }
+}
+
+/**
+ * The group a payment is recorded in. A group this device lacks is loaded (its roster comes with
+ * it); a held one refreshes its roster only when a party is not on it, so a payment between people
+ * the device already knows costs no request. Unreachable, the server judges the parties itself.
+ */
+async function groupForPayment(groupId: string, partyIds: string[]): Promise<Group> {
+  const held = Boolean(await db.groups.get(groupId))
+  const group = await ensureGroupInMirror(groupId)
+  if (group.is_deleted) throw new GroupUnavailableError('not_found')
+  if (!held) return group
+  const parties = await Promise.all(partyIds.map((id) => resolveSettlementPartyId(id)))
+  if ((await resolveGroupParticipants(groupId, parties)).offenders.length > 0) {
+    const outcome = await refreshGroupIntoMirror(groupId)
+    if (outcome === 'not_found') throw new GroupUnavailableError('not_found')
+  }
+  return group
 }
 
 async function describeParticipants(groupId: string, ids: string[]): Promise<string> {
@@ -648,10 +667,34 @@ function reviveMembership(row: GroupMember, userId: string, displayName: string)
 }
 
 /**
+ * Brings every picked profile this device lacks into the mirror before rows are built from it, so a
+ * person only the server knows is added rather than dropped. Throws, with nothing sent, when a pick
+ * cannot be loaded: a connection message when the server could not be asked, else the count of
+ * picks that are gone.
+ */
+async function loadPickedProfiles(picks: string[]): Promise<void> {
+  const pickedIds = [...new Set(picks)]
+  if (pickedIds.length === 0) return
+  const local = await db.profiles.bulkGet(pickedIds)
+  const outcomes = await Promise.all(
+    pickedIds.map((id, i) => (local[i]?.is_deleted ? 'not_found' : fetchRemoteProfileIntoDexie(id))),
+  )
+  if (outcomes.includes('unreachable')) {
+    throw new Error("Couldn't load everyone you picked. Check your connection and try again.")
+  }
+  const gone = outcomes.filter((o) => o === 'not_found').length
+  if (gone > 0) {
+    throw new Error(
+      `Couldn't add ${gone} of the people you picked: they no longer exist, or you no longer have access to them.`,
+    )
+  }
+}
+
+/**
  * Membership rows for adding existing profiles to a group, built without reading the group row so
- * `createGroup` can use it for a group that does not exist yet. Skips a missing or deleted profile,
- * anyone whose local id or membership id is in `activeMemberIds`, and a second pick that resolves
- * to the same membership id (a linked contact and its account are one member).
+ * `createGroup` can use it for a group that does not exist yet. Skips anyone whose local id or
+ * membership id is in `activeMemberIds`, and a second pick that resolves to the same membership id
+ * (a linked contact and its account are one member).
  */
 async function buildExistingMemberRows(input: {
   groupId: string
@@ -666,6 +709,7 @@ async function buildExistingMemberRows(input: {
   const pickedIds: string[] = []
   if (input.memberUserIds.length === 0) return { members, activity, pickedIds }
 
+  await loadPickedProfiles(input.memberUserIds.filter((id) => !activeMemberIds.has(id)))
   const profiles = await db.profiles.bulkGet(input.memberUserIds)
   const taken = new Set(activeMemberIds)
   for (let i = 0; i < input.memberUserIds.length; i++) {
@@ -854,12 +898,12 @@ export async function addGroupMember(
   displayName: string,
   addedBy: string,
 ): Promise<string> {
-  if (!(await db.groups.get(groupId))) throw new Error('Group not found')
   // A removal made on another device must be known before judging who is already a member and
-  // which removed row to bring back; if the refresh fails the mirror's roster stands in.
-  await refreshGroupIntoMirror(groupId)
-  const targetGroup = await db.groups.get(groupId)
-  if (!targetGroup || targetGroup.is_deleted) throw new Error('Group not found')
+  // which removed row to bring back; if the refresh fails the mirror's roster stands in. Loading a
+  // missing group already brings the roster, so only a group on the device needs the refresh.
+  if (await db.groups.get(groupId)) await refreshGroupIntoMirror(groupId)
+  const targetGroup = await ensureGroupInMirror(groupId)
+  if (targetGroup.is_deleted) throw new GroupUnavailableError('not_found')
   if (targetGroup.created_by !== addedBy) {
     throw new Error('Only the group creator can add members.')
   }
@@ -992,13 +1036,14 @@ export type CreateLocalProfileResult =
 
 /**
  * Rename the signed-in user: their own profile row plus their live membership rows (the roster
- * name other members see), in one cloud-first write. Resolves without doing anything when the
+ * name other members see), in one cloud-first write. Throws when the name is blank or the
  * profile is not on this device yet.
  */
 export async function renameSelf(userId: string, displayName: string): Promise<void> {
   const trimmed = displayName.trim()
+  if (!trimmed) throw new Error('Enter a name.')
   const existing = await db.profiles.get(userId)
-  if (!existing || !trimmed) return
+  if (!existing) throw new Error('Your profile is not loaded on this device yet. Refresh and try again.')
   const timestamp = now()
   const liveMemberships = await db.group_members
     .where('user_id')
@@ -1222,10 +1267,12 @@ export async function mergeProfileIdentity(
   targetId: string,
   actorUserId: string,
 ): Promise<void> {
-  if (sourceLocalId === targetId) return
+  if (sourceLocalId === targetId) throw new Error('Cannot merge a contact into itself.')
   const source = await db.profiles.get(sourceLocalId)
-  if (!source || source.is_deleted || !source.is_local || source.owner_id !== actorUserId) return
-  if (source.linked_profile_id) return // already resolved
+  if (!source || source.is_deleted || !source.is_local || source.owner_id !== actorUserId) {
+    throw new Error('Only your own contacts can be merged.')
+  }
+  if (source.linked_profile_id) throw new Error('This contact is already linked to an account.')
 
   let target = await db.profiles.get(targetId)
   if (!target || target.is_deleted) {
@@ -1304,10 +1351,12 @@ export async function addProfilePeerLink(
 
 export async function removeProfilePeerLink(linkId: string, actorUserId: string): Promise<void> {
   const row = await db.profile_peer_links.get(linkId)
-  if (!row || row.is_deleted || row.owner_user_id !== actorUserId) return
+  if (!row || row.is_deleted || row.owner_user_id !== actorUserId) {
+    throw new Error('This link no longer exists on this device. Refresh and try again.')
+  }
   const anchor = await db.profiles.get(row.anchor_profile_id)
   const isPrimaryAccountLink = Boolean(anchor?.linked_profile_id && anchor.linked_profile_id === row.peer_profile_id)
-  if (isPrimaryAccountLink) return
+  if (isPrimaryAccountLink) throw new Error('This is the contact’s linked account and can’t be removed here.')
 
   const timestamp = now()
   await commitCloudFirstWrite({
@@ -1865,8 +1914,10 @@ export async function createBundledGroupSettlement(params: {
     throw new Error('No payment recipients found for this bundled payment.')
   }
 
-  const group = await db.groups.get(params.groupId)
-  if (!group || group.is_deleted) throw new Error('Group not found')
+  const group = await groupForPayment(params.groupId, [
+    params.fromUserId,
+    ...cleanedRecipients.map((r) => r.toUserId),
+  ])
 
   const bundleId = generateId()
   const settlementIds = cleanedRecipients.map(() => generateId())
@@ -2031,8 +2082,10 @@ export async function recordDecomposedSettlement(params: {
     throw new Error('No payments to record for this settle-up.')
   }
 
-  const group = await db.groups.get(params.groupId)
-  if (!group || group.is_deleted) throw new Error('Group not found')
+  const group = await groupForPayment(
+    params.groupId,
+    cleaned.flatMap((leg) => [leg.fromUserId, leg.toUserId]),
+  )
 
   const bundleId = generateId()
   const resolved = await Promise.all(
@@ -2287,8 +2340,12 @@ export async function updateSettlement(
   },
   editorUserId: string,
 ): Promise<void> {
+  // Every refusal throws: a silent return closed the edit dialog as if the change had been saved.
+  const outcome = await loadSettlementIntoMirror(settlementId)
+  if (outcome === 'unreachable') throw new Error("Couldn't load this payment. Check your connection and try again.")
+  if (outcome === 'missing') throw new Error("Couldn't load this payment. Refresh and try again.")
   const s = await db.settlements.get(settlementId)
-  if (!s || s.is_deleted) return
+  if (!s || s.is_deleted) throw new Error('This payment no longer exists, or you no longer have access to it.')
 
   const timestamp = now()
   const labelTrim = patch.label.trim()
@@ -2350,7 +2407,7 @@ export async function updateBundledPaymentDetails(
 ): Promise<void> {
   const rows = await db.settlements.where('bundle_id').equals(bundleId).toArray()
   const activeRows = rows.filter((row) => !row.is_deleted)
-  if (activeRows.length === 0) return
+  if (activeRows.length === 0) throw new Error('This payment no longer exists, or you no longer have access to it.')
 
   const timestamp = now()
   const labelTrim = patch.label.trim()
@@ -2503,6 +2560,11 @@ export async function deleteBundledPayment(
 
 // ── Queries ──────────────────────────────────────────
 
+/**
+ * Reads only: the Bill detail popup runs it inside `useLiveQuery`, where a Dexie write throws and
+ * blanks the screen. A name the device lacks falls back to the roster's, then `Unknown`; a caller
+ * that wants it shown loads the profiles first with `loadProfilesIntoMirror`.
+ */
 export async function getBillWithDetails(billId: string) {
   const bill = await db.bills.get(billId)
   if (!bill || bill.is_deleted) return null
@@ -2517,11 +2579,7 @@ export async function getBillWithDetails(billId: string) {
 
       const splitsWithNames = await Promise.all(
         activeSplits.map(async (split) => {
-          let profile = await db.profiles.get(split.user_id)
-          if (!profile) {
-            await fetchRemoteProfileIntoDexie(split.user_id)
-            profile = await db.profiles.get(split.user_id)
-          }
+          const profile = await db.profiles.get(split.user_id)
           let displayName = profile?.display_name
           if (!displayName && bill.group_id) {
             const member = await db.group_members
@@ -2538,11 +2596,7 @@ export async function getBillWithDetails(billId: string) {
     }),
   )
 
-  let creator = await db.profiles.get(bill.created_by)
-  if (!creator) {
-    await fetchRemoteProfileIntoDexie(bill.created_by)
-    creator = await db.profiles.get(bill.created_by)
-  }
+  const creator = await db.profiles.get(bill.created_by)
   let creatorName = creator?.display_name
   if (!creatorName && bill.group_id) {
     const member = await db.group_members
@@ -2556,11 +2610,7 @@ export async function getBillWithDetails(billId: string) {
   if (bill.paid_by === bill.created_by) {
     payorName = creatorName
   } else {
-    let payor = await db.profiles.get(bill.paid_by)
-    if (!payor) {
-      await fetchRemoteProfileIntoDexie(bill.paid_by)
-      payor = await db.profiles.get(bill.paid_by)
-    }
+    const payor = await db.profiles.get(bill.paid_by)
     payorName = payor?.display_name
     if (!payorName && bill.group_id) {
       const member = await db.group_members

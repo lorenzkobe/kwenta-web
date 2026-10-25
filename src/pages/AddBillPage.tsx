@@ -53,6 +53,7 @@ import { BILL_BACK_QUERY, parseSafeAppPath, withBillBackQuery } from '@/lib/bill
 import { listCanonicalRelatedProfileIds, personalPickerIdFor } from '@/lib/people'
 import { announceBillOffset } from '@/lib/bill-offset-notice'
 import { captureBillVersion, loadBillIntoMirror, type LoadedBillVersion } from '@/sync/bill-mirror'
+import { refreshGroupIntoMirror } from '@/sync/group-mirror'
 import { normalizeAmountInput, stripLeadingZerosAmount } from '@/lib/amount-input'
 import { cn, formatCurrency } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
@@ -172,6 +173,14 @@ export function AddBillPage() {
     )
     return withProfiles
   }, [groupId, userId])
+
+  // The roster above is a live read of the mirror, which lags a member added or removed on another
+  // device; one refresh per group brings it up to date. Offline it makes no request and the device
+  // roster stands; an unreachable server leaves the device roster as it is.
+  useEffect(() => {
+    if (!groupId) return
+    void refreshGroupIntoMirror(groupId).catch(() => {})
+  }, [groupId])
 
   const personalSplitMembers = useLiveQuery(async () => {
     if (!userId) return []
