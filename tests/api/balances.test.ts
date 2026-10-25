@@ -22,6 +22,7 @@ import {
   totalsToMap,
 } from '@/api/balances'
 import { readCache, writeCache } from '@/api/cache'
+import { useAppStore } from '@/store/app-store'
 
 /** happy-dom reports navigator.onLine as true; these flip it for the offline paths. */
 function setOnline(value: boolean) {
@@ -37,6 +38,17 @@ describe('balance API wrappers', () => {
   afterEach(() => {
     vi.restoreAllMocks()
     setOnline(true)
+  })
+
+  it('C6: a fresh server answer corrects a store flag stuck at offline', async () => {
+    useAppStore.setState({ isOnline: false })
+    rpc.mockResolvedValue({ data: { personalReceive: {}, personalPay: {}, groupReceive: {}, groupPay: {} }, error: null })
+
+    const result = await fetchBalancesOverview('u1')
+
+    expect(result.fromCache).toBe(false)
+    expect(useAppStore.getState().isOnline).toBe(true)
+    useAppStore.setState({ isOnline: true })
   })
 
   describe('numeric coercion', () => {

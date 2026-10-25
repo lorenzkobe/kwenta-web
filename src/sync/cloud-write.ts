@@ -2,6 +2,7 @@ import { supabase } from '@/lib/supabase'
 import { withMetric } from '@/lib/client-metrics'
 import { generateId } from '@/lib/utils'
 import { useAppStore } from '@/store/app-store'
+import { refreshOnlineStatus } from '@/lib/online-status'
 import { mountedReadSpecs, primeReads, type ReadSpec } from '@/api/primed-reads'
 import { trackCloudWrite } from '@/sync/in-flight-writes'
 import { SessionEndedError, assertSessionEpoch, currentSessionEpoch } from '@/sync/session-epoch'
@@ -480,6 +481,8 @@ export async function commitCloudFirstWrite(input: {
     }
     return queue({ kind: 'transport', message: err instanceof Error ? err.message : String(err) })
   }
+  // The server just answered: a flag still saying "offline" is stale.
+  refreshOnlineStatus()
   // Balances are computed on the server now, so a saved bill only reaches the screen when the
   // server-backed reads run again. Without this the user saves and nothing visibly changes.
   useAppStore.getState().bumpDataVersion()

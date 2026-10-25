@@ -427,6 +427,11 @@ Pushed rows are stamped `synced_at` only for ids the server reports in `applied`
 
 - `startSyncManager()` initializes on `useSync` hook mount; `useSync` restarts it on reconnect
   (there is no separate `online` handler)
+- **Online state** (`src/lib/online-status.ts`): the store's `isOnline` (banner, sync manager, realtime,
+  Refresh, outbox) mirrors `navigator.onLine`, re-read at the app root on mount, `online`/`offline`,
+  `visibilitychange`, `pageshow`, `focus` and after any server answer. Listening to events alone left
+  it stuck "offline" (sync and realtime off) after a transition on /login or a resume with no event.
+  Offline-session recovery follows the flag's false→true transition, not the raw event.
 - Startup, activation and the 5-minute backup tick go through `refreshIfNeeded` (above)
 - `triggerSync` (400 ms debounce, drains in the background, then a full sync) is called only by
   `ensureProfile` for a new-account stub; operations no longer trigger a sync — a write is
@@ -719,7 +724,7 @@ client) is **`docs/migrations.md`**. Read the migration's own header before rely
 | `src/lib/supabase.ts` | Supabase client (PKCE auth, session persistence) |
 | `src/lib/utils.ts` | `cn`, `generateId`, `getDeviceId`, `now`, `formatCurrency`, `timeAgo` |
 | `src/store/app-store.ts` | Zustand: online status, sync status, runtime flags |
-| `src/hooks/` | `useAuth`, `useCurrentUser`, `useSync`, `useRealtime`, `useOnlineStatus` |
+| `src/hooks/` | `useAuth`, `useCurrentUser`, `useSync`, `useRealtime`, `useOnlineStatusTracking` |
 | `src/pages/` | Route-level page components |
 | `src/components/` | Shared UI: common dialogs, layout, notifications bell, landing |
 | `supabase/migrations/` | All DB schema, RLS policies, sync RPCs |

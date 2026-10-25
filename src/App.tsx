@@ -7,6 +7,7 @@ import { RequireAuth } from '@/components/auth/RequireAuth'
 import { RequireGuest } from '@/components/auth/RequireGuest'
 import { RequireAdmin } from '@/components/auth/RequireAdmin'
 import { AuthProvider } from '@/hooks/AuthProvider'
+import { useOnlineStatusTracking } from '@/hooks/useOnlineStatusTracking'
 
 // Lazy like every route: the landing page is for signed-out visitors, and as a static import it
 // put ~100 kB of marketing components into the entry chunk every signed-in user downloads.
@@ -88,6 +89,7 @@ function PageLoader() {
 }
 
 function App() {
+  useOnlineStatusTracking()
   return (
     <BrowserRouter>
       <AuthProvider>

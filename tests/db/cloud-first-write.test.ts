@@ -82,6 +82,14 @@ beforeEach(async () => {
 })
 
 describe('cloud-first write contract', () => {
+  it('C6: a write the cloud confirmed corrects a store flag stuck at offline', async () => {
+    useAppStore.setState({ isOnline: false })
+
+    await createBill(BILL_INPUT)
+
+    expect(useAppStore.getState().isOnline).toBe(true)
+  })
+
   it('persists the bill when the cloud accepts it', async () => {
     const billId = await createBill(BILL_INPUT)
 

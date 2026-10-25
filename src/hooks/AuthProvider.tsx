@@ -328,6 +328,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // Sync and realtime stay off until the token is refreshed.
       setAuthReady(!offlineSession)
       if (!offlineSession) void runGate(u.id)
+      // A reconnect during the awaits above found no offline session to end; end it now.
+      else if (isOnline()) void onBackOnline()
     }
 
     async function onBackOnline() {
@@ -386,13 +388,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       })
     })
 
-    const handleOnline = () => void onBackOnline()
-    window.addEventListener('online', handleOnline)
+    // The store flag, not the raw `online` event: it is also corrected by re-reads on focus,
+    // visibility, pageshow and server answers (src/lib/online-status.ts), so a reconnect that fired
+    // no event still ends offline session mode.
+    const unsubscribeOnline = useAppStore.subscribe((state, prev) => {
+      if (state.isOnline && !prev.isOnline) void onBackOnline()
+    })
 
     return () => {
       cancelled = true
       subscription.unsubscribe()
-      window.removeEventListener('online', handleOnline)
+      unsubscribeOnline()
     }
   }, [setCurrentUserId])
 

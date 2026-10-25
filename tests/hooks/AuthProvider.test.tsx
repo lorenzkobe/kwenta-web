@@ -107,6 +107,7 @@ vi.mock('@/lib/supabase', () => {
 
 import { AuthProvider } from '@/hooks/AuthProvider'
 import { useAuth } from '@/hooks/useAuth'
+import { refreshOnlineStatus } from '@/lib/online-status'
 
 type Seen = { userId: string | null; loading: boolean; billsAtFirstRender?: Promise<number> }
 
@@ -394,6 +395,46 @@ describe('AuthProvider — offline session mode (C26)', () => {
 
     expect(h.refreshSession).toHaveBeenCalled()
     expect(h.signOut).toHaveBeenCalled()
+  })
+
+  it('C7: the session is recovered when a re-read finds the device online, with no online event', async () => {
+    await seedReturningUser('ME')
+    setOnline(false)
+    h.session = sessionFor('ME', true)
+
+    await mount()
+    await waitFor(() => rendered('ME'))
+
+    Object.defineProperty(navigator, 'onLine', { configurable: true, get: () => true })
+    await act(async () => {
+      refreshOnlineStatus()
+    })
+    await waitFor(() => h.refreshSession.mock.calls.length > 0)
+    await act(async () => {
+      window.dispatchEvent(new Event('online'))
+      refreshOnlineStatus()
+    })
+    await waitFor(() => false, 100)
+
+    expect(h.refreshSession).toHaveBeenCalledTimes(1)
+  })
+
+  it('C9: a reconnect that lands while offline session mode is still being set up still recovers', async () => {
+    await seedReturningUser('ME')
+    setOnline(false)
+    h.session = sessionFor('ME', true)
+    // The network returns between the offline decision and the moment it is recorded.
+    const realGet = db.profiles.get.bind(db.profiles)
+    const spy = vi.spyOn(db.profiles, 'get').mockImplementation(((id: string) => {
+      setOnline(true)
+      return realGet(id)
+    }) as typeof db.profiles.get)
+
+    await mount()
+    await waitFor(() => h.refreshSession.mock.calls.length > 0)
+    spy.mockRestore()
+
+    expect(h.refreshSession).toHaveBeenCalled()
   })
 
   it('C26 refused side: offline with an expired token for a user who does NOT own the device does not open', async () => {

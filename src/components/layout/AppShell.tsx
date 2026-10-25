@@ -4,14 +4,12 @@ import { AppHeader } from './AppHeader'
 import { InitialAppLoader } from '@/components/common/InitialAppLoader'
 import { InstallPrompt } from '@/components/common/InstallPrompt'
 import { OfflineBanner } from '@/components/common/OfflineBanner'
-import { useOnlineStatus } from '@/hooks/useOnlineStatus'
 import { useAuth } from '@/hooks/useAuth'
 import { useSync } from '@/hooks/useSync'
 import { useRealtime } from '@/hooks/useRealtime'
 import { useAppStore } from '@/store/app-store'
 
 export function AppShell() {
-  useOnlineStatus()
   const { user, authReady } = useAuth()
   const initialCloudHydration = useAppStore((s) => s.initialCloudHydration)
   const isOnline = useAppStore((s) => s.isOnline)

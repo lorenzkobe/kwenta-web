@@ -1,5 +1,6 @@
 import { supabase } from '@/lib/supabase'
 import { now } from '@/lib/utils'
+import { refreshOnlineStatus } from '@/lib/online-status'
 import { toCurrencyCode } from '@/lib/currency-conversion'
 import { readCache, writeCache } from '@/api/cache'
 import { currentSessionEpoch } from '@/sync/session-epoch'
@@ -226,6 +227,7 @@ async function fetchEndpoint<T>(
       const data = map(raw)
       const at = now()
       writeCache(endpoint, userId, data, at, epoch)
+      refreshOnlineStatus()
       return { data, fromCache: false, fetchedAt: at }
     } catch (err) {
       // A refusal is the server's ANSWER, not a transport failure; falling back to a cached copy
