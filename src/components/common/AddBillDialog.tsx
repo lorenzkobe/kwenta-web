@@ -34,7 +34,7 @@ import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@
 import { SplitPersonSelector, type SplitMemberOption } from '@/components/common/SplitPersonSelector'
 import { ConfirmDialog } from '@/components/common/ConfirmDialog'
 import { CurrencyConversionField, type ConversionValue } from '@/components/common/CurrencyConversionField'
-import { loadBillIntoMirror } from '@/sync/bill-mirror'
+import { captureBillVersion, loadBillIntoMirror, type LoadedBillVersion } from '@/sync/bill-mirror'
 
 type BillMode = 'simple' | 'itemized'
 
@@ -96,6 +96,7 @@ export function AddBillDialog({
   // re-run the load and clobber the user's in-progress edits with the original
   // bill data while they are still editing.
   const onCloseRef = useRef(onClose)
+  const loadedVersionRef = useRef<LoadedBillVersion | undefined>(undefined)
   onCloseRef.current = onClose
 
   const [mode, setMode] = useState<BillMode>('simple')
@@ -225,7 +226,12 @@ export function AddBillDialog({
     setLoadingEdit(true)
     // Load a bill this device has not received yet before filling the form: a blank edit form
     // would otherwise save its emptiness over the real items.
-    loadBillIntoMirror(editBillId).then(() => getBillWithDetails(editBillId)).then(async (d) => {
+    loadedVersionRef.current = undefined
+    loadBillIntoMirror(editBillId, { fresh: true }).then(async () => {
+      const version = await captureBillVersion(editBillId)
+      if (!cancelled) loadedVersionRef.current = version
+      return getBillWithDetails(editBillId)
+    }).then(async (d) => {
       if (cancelled) return
       if (!d) {
         setLoadingEdit(false)
@@ -692,6 +698,7 @@ export function AddBillDialog({
           category: input.category,
           items: input.items,
           conversion,
+          loadedVersion: loadedVersionRef.current,
         })
       } else {
         await createBill(input)

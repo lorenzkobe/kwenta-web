@@ -4,7 +4,7 @@ import { dropQueuedKwentaNotifications } from '@/lib/kwenta-notifications'
 import { now } from '@/lib/utils'
 import { useAppStore } from '@/store/app-store'
 import { enqueuePendingMutation, recordNotAppliedChange } from '@/sync/cloud-first-mutations'
-import { submitCloudWrite, type CloudWritePayload } from '@/sync/cloud-write'
+import { stripClientWriteKeys, submitCloudWrite, type ClientWriteKeys, type CloudWritePayload } from '@/sync/cloud-write'
 import { trackCloudWrite } from '@/sync/in-flight-writes'
 import { SessionEndedError, assertSessionEpoch, currentSessionEpoch, isSessionEpochCurrent } from '@/sync/session-epoch'
 import {
@@ -73,7 +73,9 @@ export async function enqueueWrite(input: {
 }): Promise<string> {
   const tables = tablesIn(input.payload)
   const id = await db.transaction('rw', [...tables.map(getLocalTable), db.pending_mutations], async () => {
-    for (const t of tables) await getLocalTable(t).bulkPut(input.payload[t] as SyncFields[])
+    for (const t of tables) {
+      await getLocalTable(t).bulkPut((input.payload[t] as SyncFields[]).map(stripClientWriteKeys))
+    }
     return enqueuePendingMutation({
       actorUserId: input.actorUserId,
       operation: input.pending.operation,
@@ -145,6 +147,51 @@ export async function hasPendingQueuedWrites(actorUserId: string): Promise<boole
   return pending.some((m) => m.push != null)
 }
 
+/**
+ * The base a refused write holds for rows still staged by it. The refusal proved the server moved
+ * past that base, so a new save of those rows must carry it and be refused again rather than go out
+ * unbased and overwrite the newer server row. Earliest entry first: it holds the original base.
+ */
+export async function refusedBaseVersions(keys: readonly string[]): Promise<Map<string, string>> {
+  const bases = new Map<string, string>()
+  if (keys.length === 0) return bases
+  const wanted = new Set(keys)
+  const owners = await db.pending_mutations.where('row_keys').anyOf(keys).toArray()
+  owners.sort((a, b) => a.seq - b.seq)
+  for (const entry of owners) {
+    if ((entry.status !== 'conflict' && entry.status !== 'blocked_by_earlier') || entry.push == null) continue
+    for (const t of tablesIn(entry.push as CloudWritePayload)) {
+      for (const row of (entry.push as CloudWritePayload)[t] as (SyncFields & ClientWriteKeys)[]) {
+        const key = rowKey(t, row.id)
+        if (wanted.has(key) && row._base_updated_at !== undefined && !bases.has(key)) {
+          bases.set(key, row._base_updated_at)
+        }
+      }
+    }
+  }
+  return bases
+}
+
+/**
+ * Of `keys`, the rows staged ONLY by a refused or blocked write: no pending write also owns them.
+ * The refusal proved the server moved past what that write was built on, so its staged copy must
+ * not shield the row from the server's version (the entry itself stays, for Retry and Settings).
+ * One `row_keys` index query for the batch.
+ */
+export async function keysOwnedOnlyByRefusedWrites(keys: readonly string[]): Promise<Set<string>> {
+  const refused = new Set<string>()
+  if (keys.length === 0) return refused
+  const wanted = new Set(keys)
+  const pending = new Set<string>()
+  for (const entry of await db.pending_mutations.where('row_keys').anyOf(keys).toArray()) {
+    const target = entry.status === 'pending' ? pending : entry.status === 'conflict' || entry.status === 'blocked_by_earlier' ? refused : null
+    if (!target) continue
+    for (const k of entry.row_keys) if (wanted.has(k)) target.add(k)
+  }
+  for (const k of pending) refused.delete(k)
+  return refused
+}
+
 function parsePayload(json: string): unknown {
   try {
     return JSON.parse(json)
@@ -158,7 +205,11 @@ function parsePayload(json: string): unknown {
  * rows (transitively) `blocked_by_earlier` — those edits build on a change the server never stored.
  * Their notifications are dropped: they describe writes that did not happen.
  */
-async function markRefused(head: PendingMutation, message: string, entries: PendingMutation[]): Promise<void> {
+async function markRefused(
+  head: PendingMutation,
+  message: string,
+  entries: PendingMutation[],
+): Promise<PendingMutation[]> {
   const keys = new Set(head.row_keys)
   const blocked: PendingMutation[] = []
   for (const e of entries) {
@@ -192,6 +243,33 @@ async function markRefused(head: PendingMutation, message: string, entries: Pend
     })
   })
   dropQueuedKwentaNotifications([head.submission_id, ...blocked.map((b) => b.submission_id)])
+  return [head, ...blocked]
+}
+
+/**
+ * Drop an entry the server stored. A later pending entry that edits the same row was built on a
+ * staged copy and so carries no base; the version the server just gave the row becomes its base,
+ * persisted with the entry so a restart or another tab sends it too.
+ */
+async function removeAppliedEntry(
+  head: PendingMutation,
+  entries: PendingMutation[],
+  versions: ReadonlyMap<string, string>,
+): Promise<void> {
+  const rebased = entries.filter((e) => e.seq > head.seq && e.status === 'pending' && e.push != null && sharesRows(new Set(head.row_keys), e))
+  await db.transaction('rw', db.pending_mutations, async () => {
+    await db.pending_mutations.delete(head.id)
+    for (const e of rebased) {
+      const push = { ...e.push }
+      for (const t of tablesIn(push as CloudWritePayload)) {
+        push[t] = (push[t] as (SyncFields & ClientWriteKeys)[]).map((row) => {
+          const version = versions.get(rowKey(t, row.id))
+          return version !== undefined && row._overwrite !== true ? { ...row, _base_updated_at: version } : row
+        })
+      }
+      await db.pending_mutations.update(e.id, { push })
+    }
+  })
 }
 
 /** `lockHeld`: another tab was draining, so this call sent nothing. */
@@ -210,6 +288,7 @@ async function runDrain(actorUserId: string, ignoreBackoff: boolean): Promise<Dr
     data: { session },
   } = await supabase.auth.getSession()
   if (session?.user?.id !== actorUserId) return result
+  await completePendingRestores()
   try {
     while (isOnline() && isSessionEpochCurrent(epoch)) {
       const entries = await entriesFor(actorUserId)
@@ -234,13 +313,14 @@ async function runDrain(actorUserId: string, ignoreBackoff: boolean): Promise<Dr
       if (sharesRows(refusedEarlier, head)) {
         await db.pending_mutations.update(head.id, { status: 'blocked_by_earlier', updated_at: now() })
         dropQueuedKwentaNotifications([head.submission_id])
+        await restoreRefusedRows([head])
         result.refused++
         continue
       }
 
       const laterKeys = new Set(entries.filter((e) => e.id !== head.id).flatMap((e) => e.row_keys))
       try {
-        await trackCloudWrite(
+        const { versions } = await trackCloudWrite(
           submitCloudWrite({
             actorUserId,
             payload: head.push as CloudWritePayload,
@@ -249,7 +329,7 @@ async function runDrain(actorUserId: string, ignoreBackoff: boolean): Promise<Dr
           }),
         )
         assertSessionEpoch(epoch)
-        await db.pending_mutations.delete(head.id)
+        await removeAppliedEntry(head, entries, versions)
         result.applied++
       } catch (err) {
         if (err instanceof SessionEndedError || err instanceof WriteSessionMismatchError || !isSessionEpochCurrent(epoch)) {
@@ -258,7 +338,7 @@ async function runDrain(actorUserId: string, ignoreBackoff: boolean): Promise<Dr
         const kind = classifyWriteFailure(err)
         const message = err instanceof Error ? err.message : syncErrMessage(err)
         if (kind === 'rejected') {
-          await markRefused(head, message, entries)
+          await restoreRefusedRows(await markRefused(head, message, entries))
           result.refused++
           continue
         }
@@ -406,29 +486,17 @@ function reconcileEntityFor(
   }
 }
 
-/**
- * Discard a refused change (and the blocked changes built on it): every row it touched goes back
- * to what the server holds — re-read per entity — and a row the server does not return is removed
- * from this device's mirror (a local cache eviction, never a server delete; a later full sync
- * brings it back if it exists). Online only, and only for `conflict` entries: a pending entry may
- * still land, and discarding it offline could not restore anything.
- */
-export async function dismissQueuedWrite(entryId: string): Promise<void> {
-  const epoch = currentSessionEpoch()
-  const entry = await refusedEntry(entryId)
-  if (!isOnline()) throw new Error('Connect to the internet to discard this change.')
-  const group = await refusedGroup(entry)
-  // A later change to the same rows that is still waiting to be sent would be reverted on screen
-  // and then land anyway. Let it settle first (it is sent, or refused and joins this group).
-  const groupKeys = new Set(group.flatMap((e) => e.row_keys))
-  const waiting = (await entriesFor(entry.actor_user_id)).some(
-    (e) => e.status === 'pending' && e.push != null && sharesRows(groupKeys, e),
-  )
-  if (waiting) {
-    throw new Error('A later change to the same item is still waiting to be sent. Try again once it has synced.')
-  }
+type TouchedRows = Map<string, { table: TableName; row: SyncFields & Record<string, unknown> }>
 
-  const touched = new Map<string, { table: TableName; row: SyncFields & Record<string, unknown> }>()
+async function setRestorePending(entryIds: string[], value: boolean): Promise<void> {
+  for (const id of entryIds) await db.pending_mutations.update(id, { restore_pending: value })
+}
+
+/** What the server holds for every row these entries staged: one `kwenta_reconcile_user_event` per entity. */
+async function readServerState(
+  group: PendingMutation[],
+): Promise<{ touched: TouchedRows; serverRows: Map<string, SyncFields> }> {
+  const touched: TouchedRows = new Map()
   for (const e of group) {
     for (const t of tablesIn(e.push as CloudWritePayload)) {
       for (const row of (e.push as CloudWritePayload)[t] as unknown as (SyncFields & Record<string, unknown>)[]) {
@@ -454,8 +522,7 @@ export async function dismissQueuedWrite(entryId: string): Promise<void> {
     if (entity) entities.set(entity.join(':'), entity)
   }
 
-  // Read everything before changing anything: a failed read leaves the change (and its entry)
-  // exactly as it was.
+  // Read everything before changing anything: a failed read leaves the mirror exactly as it was.
   const serverRows = new Map<string, SyncFields>()
   for (const [entityType, entityId] of entities.values()) {
     const { data, error } = await supabase.rpc('kwenta_reconcile_user_event', {
@@ -470,20 +537,147 @@ export async function dismissQueuedWrite(entryId: string): Promise<void> {
       for (const row of rows as SyncFields[]) serverRows.set(rowKey(t, row.id), row)
     }
   }
+  return { touched, serverRows }
+}
+
+/**
+ * Put every touched row back to the server's copy; a row the server does not return is removed from
+ * this device's mirror (a local cache eviction, never a server delete; a later full sync brings it
+ * back if it exists). Runs inside the caller's transaction over the touched tables.
+ */
+async function writeServerState(
+  touched: TouchedRows,
+  serverRows: Map<string, SyncFields>,
+  skipKeys: ReadonlySet<string> = new Set(),
+): Promise<void> {
+  for (const [key, { table, row }] of touched) {
+    if (skipKeys.has(key)) continue
+    const server = serverRows.get(key)
+    if (server) await getLocalTable(table).put({ ...server, synced_at: server.updated_at })
+    else await getLocalTable(table).delete(row.id)
+  }
+}
+
+function touchedTables(touched: TouchedRows): TableName[] {
+  return [...new Set([...touched.values()].map((r) => r.table))]
+}
+
+/**
+ * Release a refused write's rows as a unit, at refusal time: what it staged goes back to the
+ * server's state (its edited rows restored, the rows it created and the server never stored
+ * evicted), so the mirror and the edit form show one version of the bill, not both. The entries
+ * stay — Settings lists them and Retry sends their rows. A row a pending write also owns is left
+ * alone. If the server cannot be read, the entries are flagged and the restore is completed by the
+ * next drain, Refresh or fresh bill load; until then `keysOwnedOnlyByRefusedWrites` keeps the
+ * server's copy winning where it can.
+ */
+async function restoreRefusedRows(group: PendingMutation[]): Promise<void> {
+  const epoch = currentSessionEpoch()
+  const ids = group.map((e) => e.id)
+  try {
+    const { touched, serverRows } = await readServerState(group)
+    assertSessionEpoch(epoch)
+    await db.transaction('rw', [...touchedTables(touched).map(getLocalTable), db.pending_mutations], async () => {
+      const waiting = await db.pending_mutations.where('status').equals('pending').toArray()
+      const skip = new Set(waiting.filter((e) => e.push != null).flatMap((e) => e.row_keys))
+      await writeServerState(touched, serverRows, skip)
+      await setRestorePending(ids, false)
+    })
+    useAppStore.getState().bumpDataVersion()
+  } catch (err) {
+    if (err instanceof SessionEndedError || !isSessionEpochCurrent(epoch)) return
+    await setRestorePending(ids, true)
+  }
+}
+
+/**
+ * Finish the restores that failed at refusal time. Online only, idempotent, cheap when nothing is
+ * flagged: one read of the (small) set of refused entries.
+ */
+export async function completePendingRestores(): Promise<void> {
+  if (!isOnline()) return
+  const {
+    data: { session },
+  } = await supabase.auth.getSession()
+  if (!session?.user?.id) return
+  const flagged = (await db.pending_mutations.where('status').anyOf(['conflict', 'blocked_by_earlier']).toArray()).filter(
+    (e) => e.actor_user_id === session.user.id && e.push != null && e.restore_pending,
+  )
+  if (flagged.length > 0) await restoreRefusedRows(flagged)
+}
+
+/**
+ * The fresh bill load's share of a pending restore. The bundle it fetched already replaced the
+ * rows the server holds; this evicts what a flagged refused entry staged for THIS bill and the
+ * server did not return (the rows it created, and its audit line), and clears the flag only when
+ * nothing of the entry lies outside the bill. A row a pending entry also owns is left alone.
+ * Runs inside the caller's transaction over the bill tables, `activity_log` and `pending_mutations`.
+ */
+export async function completeBillRestore(billId: string, serverKeys: ReadonlySet<string>): Promise<void> {
+  const flagged = (await db.pending_mutations.where('status').anyOf(['conflict', 'blocked_by_earlier']).toArray()).filter(
+    (e) => e.restore_pending && e.push != null,
+  )
+  if (flagged.length === 0) return
+  const waiting = await db.pending_mutations.where('status').equals('pending').toArray()
+  const pendingKeys = new Set(waiting.filter((e) => e.push != null).flatMap((e) => e.row_keys))
+
+  for (const entry of flagged) {
+    const push = entry.push as CloudWritePayload
+    const itemIds = new Set<string>()
+    for (const key of serverKeys) if (key.startsWith('bill_items:')) itemIds.add(key.slice('bill_items:'.length))
+    for (const item of push.bill_items ?? []) if (item.bill_id === billId) itemIds.add(item.id)
+
+    let outside = false
+    for (const t of tablesIn(push)) {
+      for (const row of push[t] as unknown as (SyncFields & Record<string, unknown>)[]) {
+        const inBill =
+          (t === 'bills' && row.id === billId) ||
+          (t === 'bill_items' && row.bill_id === billId) ||
+          (t === 'item_splits' && itemIds.has(String(row.item_id))) ||
+          (t === 'activity_log' && row.entity_type === 'bill' && row.entity_id === billId)
+        if (!inBill) {
+          outside = true
+          continue
+        }
+        const key = rowKey(t, row.id)
+        if (!serverKeys.has(key) && !pendingKeys.has(key)) await getLocalTable(t).delete(row.id)
+      }
+    }
+    if (!outside) await setRestorePending([entry.id], false)
+  }
+}
+
+/**
+ * Discard a refused change (and the blocked changes built on it): its entries are deleted and every
+ * row it touched goes back to what the server holds (see `writeServerState`). Online only, and
+ * only for `conflict` entries: a pending entry may still land, and discarding it offline could not
+ * restore anything.
+ */
+export async function dismissQueuedWrite(entryId: string): Promise<void> {
+  const epoch = currentSessionEpoch()
+  const entry = await refusedEntry(entryId)
+  if (!isOnline()) throw new Error('Connect to the internet to discard this change.')
+  const group = await refusedGroup(entry)
+  // A later change to the same rows that is still waiting to be sent would be reverted on screen
+  // and then land anyway. Let it settle first (it is sent, or refused and joins this group).
+  const groupKeys = new Set(group.flatMap((e) => e.row_keys))
+  const waiting = (await entriesFor(entry.actor_user_id)).some(
+    (e) => e.status === 'pending' && e.push != null && sharesRows(groupKeys, e),
+  )
+  if (waiting) {
+    throw new Error('A later change to the same item is still waiting to be sent. Try again once it has synced.')
+  }
+
+  const { touched, serverRows } = await readServerState(group)
 
   assertSessionEpoch(epoch)
-  const tables = [...new Set([...touched.values()].map((r) => r.table))]
   const groupIds = group.map((e) => e.id)
   const timestamp = now()
   await db.transaction(
     'rw',
-    [...tables.map(getLocalTable), db.pending_mutations, db.not_applied_changes],
+    [...touchedTables(touched).map(getLocalTable), db.pending_mutations, db.not_applied_changes],
     async () => {
-      for (const [key, { table, row }] of touched) {
-        const server = serverRows.get(key)
-        if (server) await getLocalTable(table).put({ ...server, synced_at: server.updated_at })
-        else await getLocalTable(table).delete(row.id)
-      }
+      await writeServerState(touched, serverRows)
       await db.pending_mutations.bulkDelete(groupIds)
       await db.not_applied_changes
         .where('pending_mutation_id')
@@ -496,6 +690,19 @@ export async function dismissQueuedWrite(entryId: string): Promise<void> {
   useAppStore.getState().bumpDataVersion()
 }
 
+/** "Apply mine": the rows go with `_overwrite` and without the base the server already refused. */
+function asOverwrite(push: CloudWritePayload): CloudWritePayload {
+  const out: CloudWritePayload = { ...push }
+  for (const t of tablesIn(push)) {
+    ;(out as Record<string, unknown>)[t] = (push[t] as (SyncFields & ClientWriteKeys)[]).map((row) => {
+      const overwrite: SyncFields & ClientWriteKeys = { ...row, _overwrite: true }
+      delete overwrite._base_updated_at
+      return overwrite
+    })
+  }
+  return out
+}
+
 /**
  * Send a refused change again (with its blocked dependents behind it), same submission id: the
  * refusal rolled the submission back (078), so nothing of it is recorded. Resolves true when the
@@ -505,14 +712,21 @@ export async function retryQueuedWrite(entryId: string): Promise<boolean> {
   const entry = await refusedEntry(entryId)
   const group = await refusedGroup(entry)
   const timestamp = now()
-  await db.transaction('rw', db.pending_mutations, db.not_applied_changes, async () => {
+  const stagedTables = [...new Set(group.flatMap((e) => tablesIn(e.push as CloudWritePayload)))]
+  await db.transaction('rw', [...stagedTables.map(getLocalTable), db.pending_mutations, db.not_applied_changes], async () => {
     for (const e of group) {
+      const push = e.push as CloudWritePayload
+      // The refusal put the rows back to the server's state; this change is pending again, so its
+      // rows are staged again exactly as when it was first queued.
+      for (const t of tablesIn(push)) await getLocalTable(t).bulkPut((push[t] as SyncFields[]).map(stripClientWriteKeys))
       await db.pending_mutations.update(e.id, {
+        push: asOverwrite(push) as PendingMutation['push'],
         status: 'pending',
         next_attempt_at: null,
         last_error_kind: null,
         updated_at: timestamp,
       })
+      await setRestorePending([e.id], false)
     }
     await db.not_applied_changes
       .where('pending_mutation_id')

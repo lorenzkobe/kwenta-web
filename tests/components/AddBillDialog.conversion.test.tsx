@@ -15,7 +15,10 @@ vi.mock('@/db/operations', () => ({
   getBillWithDetails: vi.fn(async () => mocks.bill),
   resolveGroupMemberUserId: vi.fn(async (_groupId: string, id: string) => id),
 }))
-vi.mock('@/sync/bill-mirror', () => ({ loadBillIntoMirror: vi.fn(async () => {}) }))
+vi.mock('@/sync/bill-mirror', () => ({
+  loadBillIntoMirror: vi.fn(async () => {}),
+  captureBillVersion: vi.fn(async () => ({ versions: {}, itemIds: [], splitIds: [] })),
+}))
 vi.mock('@/hooks/useExchangeRate', () => ({ useExchangeRate: () => mocks.rate }))
 vi.mock('sonner', () => ({ toast: { error: vi.fn(), success: vi.fn(), info: vi.fn() } }))
 

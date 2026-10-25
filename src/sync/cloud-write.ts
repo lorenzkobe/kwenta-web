@@ -7,7 +7,7 @@ import { mountedReadSpecs, primeReads, type ReadSpec } from '@/api/primed-reads'
 import { trackCloudWrite } from '@/sync/in-flight-writes'
 import { SessionEndedError, assertSessionEpoch, currentSessionEpoch } from '@/sync/session-epoch'
 import { CloudWriteFailedError, WriteSessionMismatchError, classifyWriteFailure } from '@/sync/write-errors'
-import { drainWriteQueue, enqueueWrite, hasPendingQueuedWrites, type QueuedWriteMeta } from '@/sync/write-queue'
+import { drainWriteQueue, enqueueWrite, hasPendingQueuedWrites, refusedBaseVersions, type QueuedWriteMeta } from '@/sync/write-queue'
 import {
   PULL_SINCE_EPOCH,
   TABLE_NAMES,
@@ -15,6 +15,7 @@ import {
   compareTimestamps,
   getLocalTable,
   isPullBundle,
+  isMirrorRowSynced,
   isRowApplied,
   markRefreshed,
   resolvePaidByForPush,
@@ -38,22 +39,78 @@ import type {
   WriteFailureKind,
 } from '@/types'
 
+/**
+ * Keys that exist only on the wire (migration 081). `_base_updated_at` is the server version the
+ * row was built from: the server refuses the write if the stored row has moved on. `_overwrite`
+ * is the user's explicit "apply mine" and skips that check. Neither is ever stored in Dexie.
+ */
+export type ClientWriteKeys = { _base_updated_at?: string; _overwrite?: boolean }
+
+type Wire<T> = T & ClientWriteKeys
+
 /** Rows a single mutation implies, grouped by table. Built in memory, never staged in Dexie first. */
 export type CloudWritePayload = {
-  profiles?: Profile[]
-  groups?: Group[]
-  group_members?: GroupMember[]
-  bills?: Bill[]
-  bill_items?: BillItem[]
-  item_splits?: ItemSplit[]
-  settlements?: Settlement[]
-  activity_log?: ActivityLog[]
-  profile_peer_links?: ProfilePeerLink[]
+  profiles?: Wire<Profile>[]
+  groups?: Wire<Group>[]
+  group_members?: Wire<GroupMember>[]
+  bills?: Wire<Bill>[]
+  bill_items?: Wire<BillItem>[]
+  item_splits?: Wire<ItemSplit>[]
+  settlements?: Wire<Settlement>[]
+  activity_log?: Wire<ActivityLog>[]
+  profile_peer_links?: Wire<ProfilePeerLink>[]
 }
 
 /** Rows for one table, erased to the common sync shape for the generic push/confirm loops. */
-function rowsFor(payload: CloudWritePayload, table: TableName): SyncFields[] {
-  return (payload[table] ?? []) as SyncFields[]
+function rowsFor(payload: CloudWritePayload, table: TableName): Wire<SyncFields>[] {
+  return (payload[table] ?? []) as Wire<SyncFields>[]
+}
+
+/** The row as Dexie may hold it: without the wire-only keys. */
+export function stripClientWriteKeys<T extends SyncFields>(row: T): T {
+  if (!('_base_updated_at' in row) && !('_overwrite' in row)) return row
+  const copy = { ...row } as T & ClientWriteKeys
+  delete copy._base_updated_at
+  delete copy._overwrite
+  return copy
+}
+
+/**
+ * Give every row that carries no base the version it was built from, so the server can tell a save
+ * built from current data from one built from a stale copy: the version its mirror copy was synced
+ * at, or, for a row still staged by a REFUSED queued write, the base that write carried (the
+ * server has moved past it, so this save is refused too instead of overwriting). A row staged by a
+ * pending write, edited past its sync, or new gets none. One `bulkGet` per pushed table.
+ */
+async function attachBaseVersions(payload: CloudWritePayload): Promise<CloudWritePayload> {
+  const bases = new Map<string, string>()
+  const staged: string[] = []
+  for (const table of TABLE_NAMES) {
+    const unbased = rowsFor(payload, table).filter((r) => r._base_updated_at === undefined && r._overwrite !== true)
+    if (unbased.length === 0) continue
+    const mirror = await getLocalTable(table).bulkGet(unbased.map((r) => r.id))
+    mirror.forEach((m, i) => {
+      if (!m) return
+      const key = rowKey(table, unbased[i].id)
+      if (isMirrorRowSynced(m)) bases.set(key, m.updated_at)
+      else staged.push(key)
+    })
+  }
+  for (const [key, base] of await refusedBaseVersions(staged)) bases.set(key, base)
+  if (bases.size === 0) return payload
+
+  const out: CloudWritePayload = { ...payload }
+  for (const table of TABLE_NAMES) {
+    const rows = rowsFor(payload, table)
+    if (!rows.some((r) => bases.has(rowKey(table, r.id)))) continue
+    ;(out as Record<string, unknown>)[table] = rows.map((r) => {
+      const base = bases.get(rowKey(table, r.id))
+      return base !== undefined && r._base_updated_at === undefined && r._overwrite !== true
+        ? { ...r, _base_updated_at: base }
+        : r
+    })
+  }
+  return out
 }
 
 /** The server answered and stored nothing. Never replayed: the same rows would be refused again. */
@@ -237,7 +294,7 @@ export async function submitCloudWrite(input: {
    * later entry drains).
    */
   preserveLocalKeys?: ReadonlySet<string>
-}): Promise<{ stored: number }> {
+}): Promise<{ stored: number; versions: Map<string, string> }> {
   if (isCloudWritePayloadEmpty(input.payload)) {
     throw new CloudWriteRejectedError('Nothing to save.', 'EMPTY_PAYLOAD')
   }
@@ -365,11 +422,13 @@ export async function submitCloudWrite(input: {
   // mirror now belongs to the next session, and this response must not be written into it.
   assertSessionEpoch(epoch)
   let stored = 0
+  const versions = new Map<string, string>()
   for (const table of TABLE_NAMES) {
     // A replayed submission (050) answers with its original `applied` map and no rows: the server
     // stored exactly what was submitted, so the submitted rows stand in for the missing echo.
     const echoed = (bundle[table] as SyncFields[]) ?? []
     const echoedIds = new Set(echoed.map((r) => r.id))
+    for (const r of echoed) versions.set(rowKey(table, r.id), r.updated_at)
     const unechoed = rowsFor(payload, table).filter(
       (r) => !echoedIds.has(r.id) && applied !== undefined && isRowApplied(applied, table, r.id),
     )
@@ -392,7 +451,7 @@ export async function submitCloudWrite(input: {
       // the cloud but never appear on the device that saved it.
       if (input.preserveLocalKeys?.has(rowKey(table, row.id))) continue
       if (!mine.has(row.id) && !shouldApplyPulledRow(existing, row.updated_at)) continue
-      toPut.push({ ...(existing ?? {}), ...row, synced_at: row.updated_at })
+      toPut.push({ ...(existing ?? {}), ...stripClientWriteKeys(row), synced_at: row.updated_at })
     }
     if (toPut.length === 0) continue
     assertSessionEpoch(epoch)
@@ -411,7 +470,7 @@ export async function submitCloudWrite(input: {
     // timer's staleness gate and the initial-hydration check, and the mirror would stop refreshing.
     markRefreshed()
   }
-  return { stored }
+  return { stored, versions }
 }
 
 /** How long a save may wait on older queued writes before it queues behind them instead. */
@@ -442,11 +501,11 @@ export async function commitCloudFirstWrite(input: {
 }): Promise<{ mode: 'cloud' | 'queued'; submissionId: string }> {
   const submissionId = input.submissionId ?? generateId()
   const epoch = currentSessionEpoch()
-  const queue = async (failure?: { kind: WriteFailureKind; message: string }) => {
+  const queue = async (payload: CloudWritePayload, failure?: { kind: WriteFailureKind; message: string }) => {
     assertSessionEpoch(epoch)
     await enqueueWrite({
       actorUserId: input.actorUserId,
-      payload: input.payload,
+      payload,
       pending: input.pending,
       submissionId,
       failure,
@@ -458,18 +517,21 @@ export async function commitCloudFirstWrite(input: {
   }
 
   const isOnline = typeof navigator === 'undefined' || navigator.onLine
-  if (!isOnline) return queue()
+  if (!isOnline) return queue(await attachBaseVersions(input.payload))
 
   if (await hasPendingQueuedWrites(input.actorUserId)) {
     await drainWriteQueue(input.actorUserId, { budgetMs: SAVE_DRAIN_BUDGET_MS })
-    if (await hasPendingQueuedWrites(input.actorUserId)) return queue()
+    if (await hasPendingQueuedWrites(input.actorUserId)) return queue(await attachBaseVersions(input.payload))
   }
+
+  // After the drain: a row an older queued write just landed is based on the version it now has.
+  const payload = await attachBaseVersions(input.payload)
 
   try {
     // Tracked so the realtime path can wait for this write's rows to be mirrored before it
     // decides whether their events are this write's own echoes.
     await trackCloudWrite(
-      submitCloudWrite({ actorUserId: input.actorUserId, payload: input.payload, submissionId }),
+      submitCloudWrite({ actorUserId: input.actorUserId, payload, submissionId }),
     )
   } catch (err) {
     if (
@@ -479,7 +541,7 @@ export async function commitCloudFirstWrite(input: {
     ) {
       throw err
     }
-    return queue({ kind: 'transport', message: err instanceof Error ? err.message : String(err) })
+    return queue(payload, { kind: 'transport', message: err instanceof Error ? err.message : String(err) })
   }
   // The server just answered: a flag still saying "offline" is stale.
   refreshOnlineStatus()

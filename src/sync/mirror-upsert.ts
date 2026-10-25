@@ -1,5 +1,5 @@
 import { db } from '@/db/db'
-import { compareTimestamps, shouldApplyPulledRow } from '@/sync/sync-service'
+import { compareTimestamps, selectServerRowsToApply, type TableName } from '@/sync/sync-service'
 import { isSessionEpochCurrent } from '@/sync/session-epoch'
 import type { SyncFields } from '@/types'
 
@@ -7,6 +7,7 @@ import type { SyncFields } from '@/types'
  * Mirrors `row`; returns whether its content moved — `sync-service`'s `contentMoved` rule. A row
  * this device staged and has not pushed keeps its edit unless the server copy is strictly newer
  * (`shouldApplyPulledRow`, the pull's own rule): overwriting it lost the edit and marked it synced.
+ * A row staged only by a refused write is the exception (`selectServerRowsToApply`).
  */
 export async function upsertRemoteRow<T extends SyncFields>(tableName: keyof typeof db, row: T, epoch: number): Promise<boolean> {
   // Dexie tables are defined on db instance; index signature is fine here.
@@ -17,7 +18,7 @@ export async function upsertRemoteRow<T extends SyncFields>(tableName: keyof typ
   // never write the ended session's rows into the next one's mirror.
   if (!isSessionEpochCurrent(epoch)) return false
   if (existing) {
-    if (!shouldApplyPulledRow(existing, row.updated_at)) return false
+    if (!(await selectServerRowsToApply(tableName as TableName, [row], [existing]))[0]) return false
     await table.update(row.id, { ...(row as unknown as Partial<T>), synced_at: row.updated_at } as Partial<T>)
     return compareTimestamps(existing.updated_at, row.updated_at) !== 0
   }

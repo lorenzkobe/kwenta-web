@@ -66,6 +66,8 @@ export type CloudMockState = {
   reconcilePayload?: Record<string, unknown> | null
   /** Every `kwenta_reconcile_user_event` argument object, in order. */
   reconcileCalls?: Record<string, unknown>[]
+  /** While set, `kwenta_reconcile_user_event` fails as a transport error (the restore cannot read). */
+  reconcileError?: boolean
   /** Rows inserted through `from(table).insert(...)`, per call. */
   inserts?: { table: string; rows: unknown }[]
   /** Tables the fake server refuses to store, to simulate a partial server-side drop. */
@@ -147,6 +149,19 @@ function inactive(status: string | undefined) {
 }
 
 export function makeSupabaseCloudMock(state: CloudMockState) {
+  /** What the fake server holds, so a fetch of a bill it was sent answers like the real one. */
+  const stored = (): Map<string, Map<string, unknown>> => (state.server ??= new Map())
+
+  /** `kwenta_fetch_bill_bundle`: the bill with its items and splits, or null when the server has no such bill. */
+  function billBundle(billId: string) {
+    const byTable = (t: string) => [...(stored().get(t)?.values() ?? [])] as Record<string, unknown>[]
+    const bill = byTable('bills').find((b) => b.id === billId)
+    if (!bill) return null
+    const items = byTable('bill_items').filter((i) => i.bill_id === billId)
+    const itemIds = new Set(items.map((i) => i.id))
+    return { bill, bill_items: items, item_splits: byTable('item_splits').filter((sp) => itemIds.has(sp.item_id)) }
+  }
+
   /** Shared by both RPCs: what the fake server stores, and what it says it stored. */
   function applyPush(
     push: Record<string, { id: string }[]>,
@@ -161,14 +176,12 @@ export function makeSupabaseCloudMock(state: CloudMockState) {
         const rows = push[t] ?? []
         storedRows[t] = rows
         if (rows.length > 0) applied[t] = rows.map((r) => r.id)
-        if (state.server) {
-          let byId = state.server.get(t)
-          if (!byId) {
-            byId = new Map()
-            state.server.set(t, byId)
-          }
-          for (const r of rows) byId.set(r.id, r)
+        let byId = stored().get(t)
+        if (!byId) {
+          byId = new Map()
+          stored().set(t, byId)
         }
+        for (const r of rows) byId.set(r.id, r)
       }
     }
     if (submissionId !== undefined && state.mode !== 'drop') state.seen?.set(submissionId, applied)
@@ -216,8 +229,11 @@ export function makeSupabaseCloudMock(state: CloudMockState) {
     rpc: async (fn: string, args?: Record<string, unknown>) => {
       state.rpcNames?.push(fn)
 
+      if (fn === 'kwenta_fetch_bill_bundle') return { data: billBundle(String(args?.p_bill_id)), error: null }
+
       if (fn === 'kwenta_reconcile_user_event') {
         state.reconcileCalls?.push(args ?? {})
+        if (state.reconcileError) return transportFailure(0)
         return { data: state.reconcilePayload ?? null, error: null }
       }
 

@@ -6,6 +6,7 @@ import { isRuntimeFlagEnabled } from '@/lib/runtime-flags'
 import { KWENTA_LAST_REFRESH_STORAGE_KEY, readLastRefreshAt, readLastUpToDateAt } from '@/lib/kwenta-storage-keys'
 import { useAppStore } from '@/store/app-store'
 import { currentSessionEpoch, isSessionEpochCurrent } from '@/sync/session-epoch'
+import { keysOwnedOnlyByRefusedWrites } from '@/sync/write-queue'
 import { describeError, now } from '@/lib/utils'
 import type {
   ActivityLog,
@@ -136,6 +137,11 @@ export function compareTimestamps(a: string, b: string): number {
   return ta === tb ? 0 : ta < tb ? -1 : 1
 }
 
+/** A mirror row holds exactly what the server last stored: synced, and not edited past that sync. */
+export function isMirrorRowSynced(local: { updated_at: string; synced_at: string | null }): boolean {
+  return local.synced_at !== null && compareTimestamps(local.updated_at, local.synced_at) <= 0
+}
+
 /**
  * Decide whether to apply a pulled row over the local row during pull-apply.
  * Prevents mid-round-trip local edits from being clobbered by the pulled snapshot.
@@ -154,10 +160,26 @@ export function shouldApplyPulledRow(
   pulledUpdatedAt: string,
 ): boolean {
   if (!local) return true
-  const localUnsynced = local.synced_at === null || compareTimestamps(local.updated_at, local.synced_at) > 0
-  if (!localUnsynced) return true
+  if (isMirrorRowSynced(local)) return true
   // local has an unsynced edit; only let the server row win if it is strictly newer.
   return compareTimestamps(pulledUpdatedAt, local.updated_at) > 0
+}
+
+/**
+ * `shouldApplyPulledRow` for a batch of one table's server rows, with one exception: a staged row
+ * that only a REFUSED write owns no longer shields the mirror, so the server's copy replaces it.
+ * The rows the plain rule would skip are looked up in the write queue with a single query.
+ */
+export async function selectServerRowsToApply(
+  table: TableName,
+  rows: readonly { id: string; updated_at: string }[],
+  existing: readonly ({ updated_at: string; synced_at: string | null } | undefined)[],
+): Promise<boolean[]> {
+  const apply = rows.map((row, i) => shouldApplyPulledRow(existing[i], row.updated_at))
+  const shielded = rows.filter((_, i) => !apply[i]).map((row) => rowKey(table, row.id))
+  if (shielded.length === 0) return apply
+  const released = await keysOwnedOnlyByRefusedWrites(shielded)
+  return released.size === 0 ? apply : apply.map((a, i) => a || released.has(rowKey(table, rows[i].id)))
 }
 
 /**
@@ -672,11 +694,12 @@ export async function pullChanges(userId: string): Promise<{ pulled: number; err
       // without this an in-flight local edit could vanish depending on which sync path fired.
       // Batched for the same reason as there — this now carries the caller's whole history.
       const existingRows = await table.bulkGet(rows.map((r) => r.id))
+      const applyRow = await selectServerRowsToApply(tableName, rows, existingRows)
       const toPut: SyncFields[] = []
       for (let i = 0; i < rows.length; i++) {
         const row = rows[i]
         const existing = existingRows[i] as { updated_at: string; synced_at: string | null } | undefined
-        if (!shouldApplyPulledRow(existing, row.updated_at)) continue
+        if (!applyRow[i]) continue
         toPut.push({ ...(existing ?? {}), ...row, synced_at: row.updated_at })
       }
       if (!isSessionEpochCurrent(epoch)) return { pulled, errors: [SESSION_ENDED_SYNC_ERROR] }
@@ -1132,6 +1155,7 @@ export async function syncRoundTrip(userId: string, options?: SyncRoundTripOptio
     // the main thread on each trigger (tab activation, backup timer, realtime burst, an offline
     // write replaying) — the UI stalled while the mirror caught up.
     const existingRows = await table.bulkGet(rows.map((r) => r.id))
+    const applyRow = await selectServerRowsToApply(tableName, rows, existingRows)
     const toPut: SyncFields[] = []
     for (let i = 0; i < rows.length; i++) {
       const row = rows[i]
@@ -1139,7 +1163,7 @@ export async function syncRoundTrip(userId: string, options?: SyncRoundTripOptio
       if (sentUpdatedAt !== undefined && compareTimestamps(row.updated_at, sentUpdatedAt) < 0) continue
       const existing = existingRows[i] as { updated_at: string; synced_at: string | null } | undefined
       // Guard: do not clobber a newer unsynced local edit made during the round-trip.
-      if (!shouldApplyPulledRow(existing, row.updated_at)) continue
+      if (!applyRow[i]) continue
       // A complete bundle is mostly rows this device already holds unchanged. Rewriting them costs
       // an IndexedDB put each and — worse — would make `changed` equal the whole dataset on a sync
       // that moved nothing, which is exactly the signal callers need to be able to trust.

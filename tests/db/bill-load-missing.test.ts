@@ -183,21 +183,43 @@ describe('updateBill / deleteBill on a bill this device has not loaded', () => {
     expect(server.cloud.pushes).toHaveLength(0)
   })
 
-  it('makes no fetch when the bill is already on this device', async () => {
-    await storeLocally(serverBill('B4'))
+  // deleteBill loads fresh (081 work): it asks the server even for a bill already on the device, so
+  // it retires items another device added. updateBill still never fetches.
+  it('updateBill makes no fetch for a bill already on this device; deleteBill refreshes it once', async () => {
+    const b = serverBill('B4')
+    await storeLocally(b)
+    server.bundles.set('B4', b)
 
     await updateBill('B4', 'ME', EDIT)
+    expect(server.fetchCalls).toEqual([])
     await deleteBill('B4', 'ME')
 
-    expect(server.fetchCalls).toEqual([])
+    expect(server.fetchCalls).toEqual(['B4'])
     expect(server.cloud.pushes).toHaveLength(2)
   })
 
   it('deleting an already-deleted local bill stays a silent no-op', async () => {
-    await storeLocally(serverBill('B5', { is_deleted: true }))
+    const b = serverBill('B5', { is_deleted: true })
+    await storeLocally(b)
+    server.bundles.set('B5', b)
     await expect(deleteBill('B5', 'ME')).resolves.toBeUndefined()
-    expect(server.fetchCalls).toEqual([])
+    expect(server.fetchCalls).toEqual(['B5'])
     expect(server.cloud.pushes).toHaveLength(0)
+  })
+
+  // C28: a fetch that SUCCEEDS and returns no bill means the server has none for this account, even
+  // when the device still holds a copy; only a failed fetch falls back to the local copy.
+  it('C28: a successful fetch that returns no bill throws not_found for a synced local copy', async () => {
+    await storeLocally(serverBill('B8'))
+    await expect(loadBillIntoMirror('B8', { fresh: true })).rejects.toMatchObject({ name: 'BillUnavailableError', kind: 'not_found' })
+    await expect(deleteBill('B8', 'ME')).rejects.toBeInstanceOf(BillUnavailableError)
+    expect(server.cloud.pushes).toHaveLength(0)
+  })
+
+  it('C28: a bill this device created and has not sent yet is used as it is', async () => {
+    const b = serverBill('B9')
+    await storeLocally({ ...b, bill: { ...b.bill, synced_at: null } })
+    await expect(loadBillIntoMirror('B9', { fresh: true })).resolves.toBeUndefined()
   })
 
   it('in collect mode (a cascade) never fetches and never throws for a missing bill', async () => {
@@ -215,7 +237,9 @@ describe('update/delete by someone who did not add the bill', () => {
   })
 
   it('deleteBill throws instead of silently doing nothing', async () => {
-    await storeLocally(serverBill('B7', { created_by: 'OTHER' }))
+    const b = serverBill('B7', { created_by: 'OTHER' })
+    await storeLocally(b)
+    server.bundles.set('B7', b)
     await expect(deleteBill('B7', 'ME')).rejects.toThrow(/added this bill/i)
     expect(server.cloud.pushes).toHaveLength(0)
   })

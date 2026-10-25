@@ -10,11 +10,13 @@ import type {
   ProfilePeerLink,
   Settlement,
   SplitType,
+  SyncFields,
 } from '@/types'
 import { generateId, getDeviceId, now, roundMoney } from '@/lib/utils'
 import { normalizePaymentMethod } from '@/lib/payment-method'
-import { commitCloudFirstWrite, type CloudWritePayload } from '@/sync/cloud-write'
-import { loadBillIntoMirror } from '@/sync/bill-mirror'
+import { commitCloudFirstWrite, type ClientWriteKeys, type CloudWritePayload } from '@/sync/cloud-write'
+import { loadBillIntoMirror, loadedRowsSyncedSince, type LoadedBillVersion } from '@/sync/bill-mirror'
+import { fullSync, rowKey } from '@/sync/sync-service'
 import { ensureGroupInMirror, GroupUnavailableError, refreshGroupIntoMirror } from '@/sync/group-mirror'
 import {
   notifyAddedToGroup,
@@ -411,27 +413,48 @@ export type UpdateBillItemsInput = CreateBillInput['items']
  * rather than patches because the server upsert takes full records — and because the same
  * rows have to be stage-able locally on the offline path.
  *
- * `updated_at` is bumped without clearing `synced_at`: a row counts as unsynced when
- * `updated_at > synced_at`, so this marks the change for push exactly as the previous
- * per-row `update()` calls did.
+ * `synced_at` is cleared explicitly: since 081 it is the server's stamp, which a slow device clock
+ * can leave AFTER the `updated_at` set here, and a staged retire must never read as synced.
  */
 async function buildBillChildSoftDeletes(
   billId: string,
   timestamp: string,
-): Promise<{ items: BillItem[]; splits: ItemSplit[] }> {
-  const items: BillItem[] = []
-  const splits: ItemSplit[] = []
+  loaded?: LoadedBillVersion,
+): Promise<{ items: (BillItem & ClientWriteKeys)[]; splits: (ItemSplit & ClientWriteKeys)[] }> {
+  const items: (BillItem & ClientWriteKeys)[] = []
+  const splits: (ItemSplit & ClientWriteKeys)[] = []
+  // An edit form retires the rows it showed and nothing else: an item another device added after
+  // the form loaded is not the form's to delete.
+  if (loaded) {
+    for (const item of await db.bill_items.bulkGet(loaded.itemIds)) {
+      if (item && !item.is_deleted) items.push(withLoadedBase('bill_items', { ...item, is_deleted: true, updated_at: timestamp, synced_at: null }, loaded))
+    }
+    for (const s of await db.item_splits.bulkGet(loaded.splitIds)) {
+      if (s && !s.is_deleted) splits.push(withLoadedBase('item_splits', { ...s, is_deleted: true, updated_at: timestamp, synced_at: null }, loaded))
+    }
+    return { items, splits }
+  }
   const existingItems = await db.bill_items.where('bill_id').equals(billId).toArray()
   for (const item of existingItems) {
     if (item.is_deleted) continue
-    items.push({ ...item, is_deleted: true, updated_at: timestamp })
+    items.push({ ...item, is_deleted: true, updated_at: timestamp, synced_at: null })
     const itemSplits = await db.item_splits.where('item_id').equals(item.id).toArray()
     for (const s of itemSplits) {
       if (s.is_deleted) continue
-      splits.push({ ...s, is_deleted: true, updated_at: timestamp })
+      splits.push({ ...s, is_deleted: true, updated_at: timestamp, synced_at: null })
     }
   }
   return { items, splits }
+}
+
+/** The row carrying the version the edit form loaded it at, when it was synced then. */
+function withLoadedBase<T extends SyncFields>(
+  table: 'bills' | 'bill_items' | 'item_splits',
+  row: T,
+  loaded: LoadedBillVersion | undefined,
+): T & ClientWriteKeys {
+  const base = loaded?.versions[rowKey(table, row.id)]
+  return base === undefined ? row : { ...row, _base_updated_at: base }
 }
 
 export async function updateBill(
@@ -446,6 +469,8 @@ export async function updateBill(
     items: UpdateBillItemsInput
     /** Omitted or null: `items` are in `currency` and any previous conversion is cleared. */
     conversion?: BillConversion | null
+    /** What the edit form loaded; the save is refused if the server's bill has moved past it. */
+    loadedVersion?: LoadedBillVersion
   },
 ): Promise<void> {
   const conversion = patch.conversion ?? null
@@ -459,6 +484,9 @@ export async function updateBill(
   if (!bill) throw new Error("This bill isn't loaded on this device yet. Reopen it and try again.")
   if (bill.is_deleted) throw new Error('This bill has been deleted.')
   if (bill.created_by !== editorUserId) throw new Error('Only the person who added this bill can edit it.')
+  if (patch.loadedVersion && (await loadedRowsSyncedSince(patch.loadedVersion))) {
+    throw new Error('This bill was just synced from another change. Reopen it and try again.')
+  }
 
   // Resolve chosen ids to roster member ids before the transaction (see createBill).
   const groupId = bill.group_id
@@ -482,10 +510,11 @@ export async function updateBill(
   const { items: retiredItems, splits: retiredSplits } = await buildBillChildSoftDeletes(
     billId,
     timestamp,
+    patch.loadedVersion,
   )
 
   const children = buildBillChildRows(billId, patch.items, conversion, resolvedSplitUserId)
-  const updatedBill: Bill = {
+  const updatedBill = withLoadedBase('bills', {
     ...bill,
     title: patch.title,
     note: patch.note,
@@ -496,7 +525,7 @@ export async function updateBill(
     ...conversionColumns(conversion, children.originalTotal),
     updated_at: timestamp,
     synced_at: null,
-  }
+  }, patch.loadedVersion)
 
   const activity = {
     ...syncFields(),
@@ -536,7 +565,7 @@ export async function deleteBill(
 ) {
   // A cascade (deletePerson, deleteGroup) walks bills this device already holds and must not turn
   // into one request per bill, or abort the whole cascade over one row it could not load.
-  if (!options?.collect) await loadBillIntoMirror(billId)
+  if (!options?.collect) await loadBillIntoMirror(billId, { fresh: true })
   const bill = await db.bills.get(billId)
   if (!bill || bill.is_deleted) return
   if (bill.created_by !== userId) {
@@ -546,7 +575,7 @@ export async function deleteBill(
 
   const timestamp = now()
 
-  const deletedBill: Bill = { ...bill, is_deleted: true, updated_at: timestamp }
+  const deletedBill: Bill = { ...bill, is_deleted: true, updated_at: timestamp, synced_at: null }
   const { items, splits } = await buildBillChildSoftDeletes(billId, timestamp)
   const activity = {
     ...syncFields(),
@@ -931,8 +960,8 @@ export async function renameSelf(userId: string, displayName: string): Promise<v
   await commitCloudFirstWrite({
     actorUserId: userId,
     payload: {
-      profiles: [{ ...existing, display_name: trimmed, updated_at: timestamp }],
-      group_members: memberships.map((m) => ({ ...m, display_name: trimmed, updated_at: timestamp })),
+      profiles: [{ ...existing, display_name: trimmed, updated_at: timestamp, synced_at: null }],
+      group_members: memberships.map((m) => ({ ...m, display_name: trimmed, updated_at: timestamp, synced_at: null })),
     },
     pending: {
       operation: 'rename_self',
@@ -1076,94 +1105,14 @@ export async function linkProfileToRemote(
 
   const timestamp = now()
 
-  // The link and EVERY id rewrite it implies go in one submission. Landing only some of them
-  // is the failure that produces "Unknown" people and wrong balances: a membership rewritten
-  // to the remote id while the splits still carry the local id (or the reverse) leaves the two
-  // sides of the same person disagreeing on every device.
-  const collect = newRowCollector()
-
-  collect.profiles.push({
-    ...local,
-    linked_profile_id: remoteProfileId,
-    updated_at: timestamp,
-    synced_at: null,
-  })
-
-  const memberships = await db.group_members.where('user_id').equals(localProfileId).toArray()
-  for (const m of memberships) {
-    if (m.is_deleted) continue
-    collect.group_members.push({
-      ...m,
-      user_id: remoteProfileId,
-      updated_at: timestamp,
-      synced_at: null,
-    })
-  }
-
-  // PROFILE ID REWRITE — all Dexie fields that store a profile ID must be rewritten
-  // here from localProfileId → remoteProfileId. If you add a new table/field that
-  // stores a user/profile ID, add it to this list.
-  //
-  // Covered:
-  //   group_members.user_id     — immediate rewrite (membership must match server auth.uid)
-  //   item_splits.user_id       — immediate rewrite (pull filter checks ish.user_id = auth.uid)
-  //   bills.paid_by             — immediate rewrite (payer credit in kwenta_group_pairwise, 053)
-  //   settlements.from_user_id  — immediate rewrite (personal settlement RLS check)
-  //   settlements.to_user_id    — immediate rewrite (personal settlement RLS check)
-  //
-  // NOT covered (by design):
-  //   bills.created_by          — always the logged-in actor; local contacts can't create bills
-  //   groups.created_by         — always the logged-in actor; local contacts can't create groups
-  //   activity_log.user_id      — always the logged-in actor; local contacts can't perform actions
-  //   profile_peer_links        — peer links become redundant after hard-link; expandProfileIds handles both
-
-  const splits = await db.item_splits.where('user_id').equals(localProfileId).toArray()
-  for (const split of splits) {
-    if (split.is_deleted) continue
-    collect.item_splits.push({
-      ...split,
-      user_id: remoteProfileId,
-      updated_at: timestamp,
-      synced_at: null,
-    })
-  }
-
-  // Rewrite bills.paid_by from the local contact to the remote profile so the linked account is
-  // credited correctly as payer by `kwenta_group_pairwise` (migration 053). Without this the
-  // server keeps paid_by = localProfileId and the payer shows as "Unknown" on User B's device
-  // (their profile is not visible due to the privacy boundary).
-  const allBills = await db.bills.toArray()
-  for (const bill of allBills) {
-    if (bill.is_deleted || bill.paid_by !== localProfileId) continue
-    collect.bills.push({
-      ...bill,
-      paid_by: remoteProfileId,
-      updated_at: timestamp,
-      synced_at: null,
-    })
-  }
-
-  // Mark settlements where the local contact is a party as unsynced.
-  // resolveSettlementPartyIdForPush rewrites from/to_user_id at push time;
-  // we also update Dexie immediately so local display is correct before the push.
-  const fromSettlements = await db.settlements.where('from_user_id').equals(localProfileId).toArray()
-  const toSettlements = await db.settlements.where('to_user_id').equals(localProfileId).toArray()
-  const seenSettlementIds = new Set<string>()
-  for (const s of [...fromSettlements, ...toSettlements]) {
-    if (s.is_deleted || seenSettlementIds.has(s.id)) continue
-    seenSettlementIds.add(s.id)
-    collect.settlements.push({
-      ...s,
-      ...(s.from_user_id === localProfileId ? { from_user_id: remoteProfileId } : {}),
-      ...(s.to_user_id === localProfileId ? { to_user_id: remoteProfileId } : {}),
-      updated_at: timestamp,
-      synced_at: null,
-    })
-  }
-
+  // Only the link is sent. Migration 045's trigger rewrites the splits, payers, payments and
+  // memberships that carry the contact's id inside the same transaction, from the server's own
+  // rows: re-sending this device's copies of them could overwrite another device's newer edits.
   const { mode, submissionId } = await commitCloudFirstWrite({
     actorUserId,
-    payload: collectorToPayload(collect),
+    payload: {
+      profiles: [{ ...local, linked_profile_id: remoteProfileId, updated_at: timestamp, synced_at: null }],
+    },
     pending: {
       operation: 'link_profile',
       entityType: 'profile',
@@ -1172,6 +1121,10 @@ export async function linkProfileToRemote(
       routeHint: `/app/people/${localProfileId}`,
     },
   })
+
+  // The rewrites happened on the server; this pulls them into the mirror. A failure is picked up
+  // by the next refresh, so it is not the link's to report.
+  if (mode === 'cloud') void fullSync(actorUserId).catch(() => undefined)
 
   // Notify only after the link is committed — telling someone they were linked to an account
   // when the write was rejected would be a lie the other device cannot verify.
@@ -1454,7 +1407,7 @@ async function removePersonFromPersonalBills(
       const memberSplit = activeSplits.find((s) => s.user_id === memberUserId)
       if (!memberSplit) continue
 
-      collect.item_splits.push({ ...memberSplit, is_deleted: true, updated_at: timestamp })
+      collect.item_splits.push({ ...memberSplit, is_deleted: true, updated_at: timestamp, synced_at: null })
 
       const remaining = activeSplits.filter((s) => s.user_id !== memberUserId)
       if (memberSplit.split_type === 'equal' && remaining.length > 0) {
@@ -1591,7 +1544,7 @@ export async function deleteGroup(groupId: string, userId: string) {
   const groupBills = await db.bills.where('group_id').equals(groupId).toArray()
   for (const bill of groupBills) {
     if (bill.is_deleted) continue
-    deletedBills.push({ ...bill, is_deleted: true, updated_at: timestamp })
+    deletedBills.push({ ...bill, is_deleted: true, updated_at: timestamp, synced_at: null })
     const children = await buildBillChildSoftDeletes(bill.id, timestamp)
     deletedItems.push(...children.items)
     deletedSplits.push(...children.splits)
@@ -1605,12 +1558,13 @@ export async function deleteGroup(groupId: string, userId: string) {
     ...m,
     is_deleted: true,
     updated_at: timestamp,
+    synced_at: null,
   }))
 
   await commitCloudFirstWrite({
     actorUserId: userId,
     payload: {
-      groups: [{ ...group, is_deleted: true, updated_at: timestamp }],
+      groups: [{ ...group, is_deleted: true, updated_at: timestamp, synced_at: null }],
       ...(members.length > 0 && { group_members: members }),
       ...(deletedBills.length > 0 && { bills: deletedBills }),
       ...(deletedItems.length > 0 && { bill_items: deletedItems }),

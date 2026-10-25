@@ -25,6 +25,7 @@ const cloud = vi.hoisted(() => ({
   seen: new Map<string, Record<string, string[]>>(),
   server: new Map<string, Map<string, unknown>>(),
   reconcilePayload: null as Record<string, unknown> | null,
+  reconcileError: false,
   reconcileCalls: [] as Record<string, unknown>[],
   inserts: [] as { table: string; rows: unknown }[],
   hold: null as Promise<void> | null,
@@ -124,6 +125,7 @@ beforeEach(async () => {
   cloud.seen = new Map()
   cloud.server = new Map()
   cloud.reconcilePayload = null
+  cloud.reconcileError = false
   cloud.reconcileCalls = []
   cloud.inserts = []
   cloud.hold = null
@@ -305,7 +307,9 @@ describe('C14: Dismiss and Retry', () => {
     await dismiss(entry.id).catch(() => undefined)
 
     expect((await db.pending_mutations.get(entry.id)) as unknown as Entry).toMatchObject({ status: 'conflict' })
-    expect(await db.bills.get(billId)).toBeTruthy()
+    // Intentional change (C27): a refused write is released at refusal time, so the never-sent bill
+    // it created was already evicted from the mirror then; the entry stays for Retry and Settings.
+    expect(await db.bills.get(billId)).toBeUndefined()
   })
 
   it('C14: dismissing a refused create deletes the never-synced rows it created and its blocked dependents', async () => {
@@ -617,7 +621,12 @@ describe('review H1.2: a backed-off entry is retried without waiting for a focus
 
 describe('review C2.1: Dismiss waits for a later pending change to the same rows', () => {
   it('refuses while a pending entry shares rows with the refused one, and changes nothing', async () => {
+    // The server cannot be read at refusal time, so the refused create's rows are still staged
+    // (C27's restore is pending); an edit queued after the refusal can then build on them.
+    cloud.reconcileError = true
     const { billId, entry } = await conflictedCreate('A')
+    cloud.reconcileError = false
+    cloud.reconcileCalls = []
     // An edit queued AFTER the refusal: pending, not blocked, until the drain reaches it.
     setOnline(false)
     await updateBill(billId, 'ME', { title: 'A2', note: '', currency: 'PHP', items: [{ name: 'Pasta', amount: 200, splits: [] }] })

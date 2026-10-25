@@ -208,6 +208,8 @@ still moved balances. The user, looking at a filled form and an error toast, pre
 — minting a *new* row id — and the next background sync pushed both. That is the duplicate-bill
 bug; `tests/db/cloud-first-write.test.ts` pins it closed.
 
+**Base versions (081).** A device no longer lets its clock decide a conflict. `commitCloudFirstWrite` attaches `_base_updated_at` (the mirror copy's `updated_at`) to each pushed row whose mirror copy is synced (before submit AND enqueue, so a queued replay is checked too; staged rows and new rows get none); the drain rebases a later queued edit of a row to the version the earlier entry's echo returned. `kwenta_write` locks the stored rows, refuses the WHOLE call when a base differs from the stored version (P0001 "This was changed on another device. Refresh and try again.", nothing stored, no marker), and otherwise stamps `updated_at = GREATEST(now(), stored + 1us)` itself; both client-only keys are stripped before the validators, and a replay skips the check. Rows without a base keep the client timestamp and 021b (older installs; 044 records why a blanket server stamp was reverted), and `kwenta_sync` is unchanged. Retry of a refused entry ("apply mine") sends `_overwrite: true` instead (server-stamped, no check). Edit forms load the bill fresh and `updateBill` bases the save on the version the form loaded. A contact link sends only the profile row and 045 rewrites splits, payers, payments and memberships in the same transaction (081 gives that rewrite the 048 stamp so future-dated rows do not discard it). Detail: migration `081`'s header.
+
 **Atomicity.** One RPC is one Postgres transaction, so a mutation's rows land together. Cascades
 and multi-leg writes use a `MutationRowCollector`: sub-operations contribute rows instead of
 writing them, and the parent submits once. This covers bundled payments (one transfer split
@@ -841,7 +843,7 @@ Each of these reflects a real past correction in this repo:
 2. **Deletion is server-authoritative.** A device is sent only its own profile plus its own
    local contacts, so it can never conclude that a person/bill/group does not exist. No
    client-side soft-delete driven by a missing row — ever.
-3. **Migrations are append-only.** Next number: **`081`**. Never edit a past migration.
+3. **Migrations are append-only.** Next number: **`082`**. Never edit a past migration.
    **Every migration carries its own explanatory header** — what broke, why the shape is
    what it is, and whether it must be applied before the code that uses it ships. That
    header is the canonical record; read it rather than trusting any summary. A signature or

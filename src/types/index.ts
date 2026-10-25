@@ -157,6 +157,8 @@ export interface PendingMutation {
   last_error_kind: WriteFailureKind | null
   /** Where the "not applied" notice sends the user if this write is refused. */
   route_hint?: string | null
+  /** A refused entry whose rows are not yet back at the server's state (the restore's read failed). */
+  restore_pending?: boolean
   created_at: string
   updated_at: string
 }

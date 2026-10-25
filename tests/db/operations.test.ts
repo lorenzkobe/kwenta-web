@@ -750,7 +750,11 @@ describe('createSettlement', () => {
 })
 
 describe('linkProfileToRemote', () => {
-  it('rewrites membership, split, paid_by, and settlement ids to the remote profile', async () => {
+  // Intentional change (081 work): the id rewrite moved to the server. Migration 045's trigger
+  // rewrites memberships, splits, payers and settlements in the same transaction as the link, so
+  // the client sends the link alone and a fullSync brings the rewrites back. That rewrite is
+  // pinned in SQL (081_base_version_conflicts C17); tests/db/base-versions.test.ts pins the push.
+  it('stores the link locally and leaves the rows the server rewrites (045) alone until the sync', async () => {
     await db.profiles.bulkAdd([
       makeProfile({ id: 'ME' }),
       makeProfile({ id: 'LOCAL', is_local: true, owner_id: 'ME', linked_profile_id: null }),
@@ -768,10 +772,9 @@ describe('linkProfileToRemote', () => {
     await linkProfileToRemote('LOCAL', 'REMOTE', 'ME')
 
     expect((await db.profiles.get('LOCAL'))?.linked_profile_id).toBe('REMOTE')
-    expect((await db.group_members.where('user_id').equals('REMOTE').first())?.user_id).toBe('REMOTE')
-    expect((await db.item_splits.get('S'))?.user_id).toBe('REMOTE')
-    expect((await db.bills.get('B'))?.paid_by).toBe('REMOTE')
-    expect((await db.settlements.get('SET'))?.from_user_id).toBe('REMOTE')
+    expect((await db.item_splits.get('S'))?.user_id).toBe('LOCAL')
+    expect((await db.bills.get('B'))?.paid_by).toBe('LOCAL')
+    expect((await db.settlements.get('SET'))?.from_user_id).toBe('LOCAL')
   })
 
   it('reports the write mode so the caller can tell a local-only link from a confirmed one', async () => {

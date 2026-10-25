@@ -52,7 +52,7 @@ import { conversionForSave, isConvertedBill } from '@/lib/currency-conversion'
 import { BILL_BACK_QUERY, parseSafeAppPath, withBillBackQuery } from '@/lib/bill-navigation'
 import { listCanonicalRelatedProfileIds, personalPickerIdFor } from '@/lib/people'
 import { announceBillOffset } from '@/lib/bill-offset-notice'
-import { loadBillIntoMirror } from '@/sync/bill-mirror'
+import { captureBillVersion, loadBillIntoMirror, type LoadedBillVersion } from '@/sync/bill-mirror'
 import { normalizeAmountInput, stripLeadingZerosAmount } from '@/lib/amount-input'
 import { cn, formatCurrency } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
@@ -344,6 +344,7 @@ export function AddBillPage() {
   const simpleSplitTypeRef = useRef(simpleSplitType)
   simpleSplitTypeRef.current = simpleSplitType
   const simpleAmountStrRef = useRef(simpleAmount)
+  const loadedVersionRef = useRef<LoadedBillVersion | undefined>(undefined)
   simpleAmountStrRef.current = simpleAmount
 
   useEffect(() => {
@@ -357,7 +358,12 @@ export function AddBillPage() {
     setLoadingEdit(true)
     // A bill added from another device may not be on this one yet. Load it before filling the
     // form: an edit form left blank would otherwise save its emptiness over the real items.
-    loadBillIntoMirror(editBillId).then(() => getBillWithDetails(editBillId)).then(async (d) => {
+    loadedVersionRef.current = undefined
+    loadBillIntoMirror(editBillId, { fresh: true }).then(async () => {
+      const version = await captureBillVersion(editBillId)
+      if (!cancelled) loadedVersionRef.current = version
+      return getBillWithDetails(editBillId)
+    }).then(async (d) => {
       if (cancelled) return
       if (!d) {
         setLoadingEdit(false)
@@ -802,6 +808,7 @@ export function AddBillPage() {
           category: input.category,
           items: input.items,
           conversion,
+          loadedVersion: loadedVersionRef.current,
         })
         navigate(
           returnBack
