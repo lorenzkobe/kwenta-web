@@ -72,6 +72,7 @@ import { makeExportFilename, memberShareNetFromViewerNet } from '@/lib/export-ut
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Input } from '@/components/ui/input'
+import { DetailPageSkeleton, Skeleton } from '@/components/ui/skeleton'
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@/components/ui/select'
 import { AddBillDialog } from '@/components/common/AddBillDialog'
 import { BillDetailModal } from '@/components/common/BillDetailModal'
@@ -520,8 +521,13 @@ function PaymentHistoryDialog({
         </div>
         <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
           {loading ? (
-            <div className="flex items-center justify-center py-8">
-              <Loader2 className="size-4 animate-spin text-teal-800" />
+            <div className="space-y-2" role="status" aria-label="Loading payments">
+              {Array.from({ length: 3 }).map((_, i) => (
+                <div key={i} className="rounded-xl border border-stone-200 bg-stone-100/60 px-4 py-3">
+                  <Skeleton className="h-4 w-1/2" />
+                  <Skeleton className="mt-2 h-3 w-1/3" />
+                </div>
+              ))}
             </div>
           ) : error && items.length === 0 ? (
             <p role="alert" className="py-8 text-center text-sm text-stone-500">{error}</p>
@@ -632,8 +638,13 @@ function TotalSpendingDialog({
           Total Spending
         </p>
         {loading ? (
-          <div className="flex justify-center py-8">
-            <Loader2 className="size-5 animate-spin text-teal-800" />
+          <div className="space-y-3 py-2" role="status" aria-label="Loading spending">
+            {Array.from({ length: 3 }).map((_, i) => (
+              <div key={i} className="flex items-center justify-between">
+                <Skeleton className="h-4 w-1/3" />
+                <Skeleton className="h-4 w-20" />
+              </div>
+            ))}
           </div>
         ) : spending.error && !spending.data ? (
           <p className="py-8 text-center text-sm text-red-600">{spending.error}</p>
@@ -1098,13 +1109,7 @@ export function GroupDetailPage() {
     setDeleteGroupConfirmOpen(true)
   }
 
-  if (groupLoading) {
-    return (
-      <div className="flex justify-center py-20">
-        <Loader2 className="size-5 animate-spin text-teal-800" />
-      </div>
-    )
-  }
+  if (groupLoading) return <DetailPageSkeleton label="Loading group" />
 
   if (!group || group.is_deleted || (userId && membershipLoaded && !currentUserHasActiveMembership)) {
     return (
@@ -1193,9 +1198,11 @@ export function GroupDetailPage() {
               <h1 className="text-2xl font-semibold tracking-tight text-stone-900">{group.name}</h1>
               <p className="mt-1 text-sm text-stone-500">
                 {group.currency} ·{' '}
-                {membersLoading
-                  ? 'Loading members…'
-                  : `${members?.length ?? 0} member${(members?.length ?? 0) !== 1 ? 's' : ''}`}
+                {membersLoading ? (
+                  <Skeleton className="inline-block h-3.5 w-20 align-middle" />
+                ) : (
+                  `${members?.length ?? 0} member${(members?.length ?? 0) !== 1 ? 's' : ''}`
+                )}
               </p>
             </div>
             <Button

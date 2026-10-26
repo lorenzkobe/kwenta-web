@@ -1,7 +1,7 @@
 import { useState, useCallback, useMemo } from 'react'
 import { fetchBillDetail, fetchBillSettlementHistory, fetchPersonalBills } from '@/api/balances'
 import { useServerData } from '@/hooks/useServerData'
-import { ArrowLeft, Clock, Loader2, Pencil, ReceiptText, Share2, Trash2, Users } from 'lucide-react'
+import { ArrowLeft, Clock, Pencil, ReceiptText, Share2, Trash2, Users } from 'lucide-react'
 import { toast } from 'sonner'
 import {
   CATEGORY_COLORS,
@@ -19,6 +19,7 @@ import { makeExportFilename } from '@/lib/export-utils'
 import { generateBillDetailPDF } from '@/lib/export-pdf'
 import { exportBillsToCSV } from '@/lib/export-csv'
 import { Button } from '@/components/ui/button'
+import { DetailPageSkeleton } from '@/components/ui/skeleton'
 import { SettlementHistoryList } from '@/components/common/SettlementHistoryList'
 import { ConfirmDialog } from '@/components/common/ConfirmDialog'
 import { ExportImageDialog } from '@/components/export/ExportImageDialog'
@@ -53,7 +54,7 @@ export function BillDetailPage() {
       return await fetchBillDetail(userId, billId)
     } catch (error) {
       const staged = await loadStagedBillDetail(billId, userId)
-      if (staged) return { data: staged, fromCache: true, fetchedAt: staged.bill.createdAt }
+      if (staged) return { data: staged, fromCache: true, fetchedAt: staged.bill.createdAt, unsent: true }
       throw error
     }
   }, [userId, billId])
@@ -119,13 +120,7 @@ export function BillDetailPage() {
     }
   }
 
-  if (loading) {
-    return (
-      <div className="flex items-center justify-center py-20">
-        <Loader2 className="size-5 animate-spin text-teal-800" />
-      </div>
-    )
-  }
+  if (loading) return <DetailPageSkeleton label="Loading bill" />
 
   if (!bill) {
     return (

@@ -19,7 +19,7 @@ vi.mock('@/hooks/useServerData', () => ({
 vi.mock('@/hooks/useCurrentUser', () => ({ useCurrentUser: () => ({ userId: 'me' }) }))
 vi.mock('@/db/operations', () => ({ deleteBill: vi.fn() }))
 vi.mock('@/lib/staged-rows', () => ({ loadStagedBillDetail: vi.fn() }))
-vi.mock('sonner', () => ({ toast: { error: vi.fn(), success: vi.fn(), info: vi.fn() } }))
+vi.mock('sonner', () => ({ toast: { error: vi.fn(), success: vi.fn(), info: vi.fn(), warning: vi.fn(), dismiss: vi.fn() } }))
 
 import { BillDetailPage } from '@/pages/BillDetailPage'
 

@@ -369,16 +369,23 @@ money: `settled` is false and pairwise nets are empty, because the server has ne
 (`src/components/common/SavedCopyNotice.tsx`) when it is serving one. An authorization failure is
 NOT served from cache at all — losing access must not read as staleness.
 
-**Screens paint their saved copy first (stale-while-revalidate).** `useServerData` seeds its first
-render — and every subject change — from `readCache(endpointKey, currentUserId)` and fetches
-behind it; `revalidating` is true meanwhile. The revalidation is marked in the header, not on the
-page: every online `useServerData` fetch holds one pair on the store's `screenLoadCount`, and
-`useScreenLoading` (true after 200 ms of continuous load, false the moment it ends) drives both
-`TopLoadingBar` and the Refresh button's "Updating…" — a per-page chip pushed each list down on
-every revisit. `SavedCopyNotice` stays reserved for `fromCache && !revalidating` (the FINAL answer
-was the saved copy).
-An access-lost `ApiError` or `ServerDeclinedError` clears the seeded copy. The seed is chosen
-during render, so a subject change never paints the previous subject for a frame.
+**Screens open on a skeleton, not on their saved copy (2026-10-26).** Online, `useServerData`
+loads the saved copy (`readCache(endpointKey, currentUserId)`) on open and on every subject change
+(including a tab, filter or sort change) but HOLDS it: the hook reports no data, so the page shows
+its skeleton, and the server answer appears once instead of the saved numbers jumping to fresh ones.
+If the server has not answered after `SAVED_COPY_FALLBACK_MS` (2 s) the copy is shown
+(`fromCache`, `revalidating`) with an info toast; a fetch that ends on the copy (fetchEndpoint's
+transport fallback, or a rejection while a copy is held or shown) shows it with a warning toast. All
+of these share one sonner id, so several screens show one toast. A fetcher answer flagged `unsent` (a staged row) is not a failure and
+raises none. Offline the copy is painted on the first render as before. An invalidation tick
+(`dataVersion`, Refresh, realtime) refreshes IN PLACE: blanking a screen there would close open
+dialogs and reset scroll. The revalidation is marked in the header, not on the page: every online
+`useServerData` fetch holds one pair on the store's `screenLoadCount`, and `useScreenLoading` (true
+after 200 ms of continuous load) drives `TopLoadingBar` and the Refresh button's "Updating…".
+`SavedCopyNotice` stays reserved for `fromCache && !revalidating` (the FINAL answer was the saved
+copy). An access-lost `ApiError` or `ServerDeclinedError` drops the copy without ever showing it.
+The seed is chosen during render, so a subject change never paints the previous subject for a
+frame. Skeletons use `src/components/ui/skeleton.tsx` (`Skeleton`, `DetailPageSkeleton`).
 
 **Payloads are kept small (083, 085, 086, 087).** Six rules, detail in migrations `083`'s, `085`'s, `086`'s and `087`'s headers:
 - `kwenta_group_detail.rawDebts` is already **netted**: one `{from, to, amount}` per unordered pair of literal ids, in integer cents, zero nets dropped, ordered by from, to — never one edge per split. `buildDebtGraph` over it is a no-op (same pair nets); the order is what keeps the greedy `buildSuggestedPayers` stable across loads. Do not add a per-split list back.

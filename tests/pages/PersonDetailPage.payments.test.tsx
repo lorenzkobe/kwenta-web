@@ -195,7 +195,7 @@ vi.mock('@/lib/export-splits', () => ({ loadBillExportItems: vi.fn(async () => n
 vi.mock('@/lib/export-csv', () => ({ exportPersonToCSV: vi.fn(async () => {}) }))
 vi.mock('@/lib/export-pdf', () => ({ generatePersonPDF: vi.fn(async () => {}) }))
 vi.mock('sonner', () => ({
-  toast: { error: vi.fn(), success: vi.fn(), info: vi.fn(), loading: vi.fn(() => 'toast-id') },
+  toast: { error: vi.fn(), success: vi.fn(), info: vi.fn(), warning: vi.fn(), dismiss: vi.fn(), loading: vi.fn(() => 'toast-id') },
 }))
 
 import * as balances from '@/api/balances'

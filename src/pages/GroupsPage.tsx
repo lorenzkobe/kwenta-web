@@ -12,6 +12,7 @@ import { formatCurrency, cn } from '@/lib/utils'
 import { CURRENCIES, currencyLabel } from '@/lib/currencies'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { Skeleton } from '@/components/ui/skeleton'
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@/components/ui/select'
 import { MemberMultiPicker } from '@/components/common/MemberMultiPicker'
 
@@ -131,9 +132,11 @@ export function GroupsPage() {
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Groups</h1>
           <p className="mt-1 text-sm text-stone-600">
-            {groupsLoading
-              ? 'Loading groups…'
-              : `${groupsWithBalances?.length ?? 0} group${(groupsWithBalances?.length ?? 0) !== 1 ? 's' : ''}`}
+            {groupsLoading ? (
+              <Skeleton className="inline-block h-3.5 w-16 align-middle" />
+            ) : (
+              `${groupsWithBalances?.length ?? 0} group${(groupsWithBalances?.length ?? 0) !== 1 ? 's' : ''}`
+            )}
           </p>
         </div>
         <Button className="h-10 rounded-full" onClick={() => setShowCreate(true)}>

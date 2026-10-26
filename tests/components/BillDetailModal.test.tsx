@@ -36,7 +36,7 @@ vi.mock('@/sync/bill-mirror', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/sync/bill-mirror')>()),
   loadBillIntoMirror: mocks.loadBill,
 }))
-vi.mock('sonner', () => ({ toast: { error: mocks.toastError, success: vi.fn(), info: vi.fn() } }))
+vi.mock('sonner', () => ({ toast: { error: mocks.toastError, success: vi.fn(), info: vi.fn(), warning: vi.fn(), dismiss: vi.fn() } }))
 
 import { BillDetailModal } from '@/components/common/BillDetailModal'
 import { BillUnavailableError } from '@/sync/bill-mirror'

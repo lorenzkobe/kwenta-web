@@ -115,7 +115,7 @@ vi.mock('@/db/operations', () => ({ deleteBill: vi.fn() }))
 vi.mock('@/lib/export-csv', () => ({ exportBillsToCSV: vi.fn(async () => {}) }))
 vi.mock('@/lib/export-pdf', () => ({ generateBillsPDF: vi.fn(async () => {}) }))
 vi.mock('sonner', () => ({
-  toast: { error: vi.fn(), success: vi.fn(), info: vi.fn(), loading: vi.fn(() => 'toast-id') },
+  toast: { error: vi.fn(), success: vi.fn(), info: vi.fn(), warning: vi.fn(), dismiss: vi.fn(), loading: vi.fn(() => 'toast-id') },
 }))
 vi.mock('@/components/ui/select', async () => {
   const React = await import('react')
@@ -130,7 +130,8 @@ vi.mock('@/components/ui/select', async () => {
   }
 })
 
-import { ApiError, fetchPersonalBills, fetchPersonalBillsPage } from '@/api/balances'
+import { ApiError, fetchPersonalBills, fetchPersonalBillsPage, personalBillsPageKey } from '@/api/balances'
+import { writeCache } from '@/api/cache'
 import { db } from '@/db/db'
 import { exportBillsToCSV } from '@/lib/export-csv'
 import { toast } from 'sonner'
@@ -770,5 +771,26 @@ describe('BillsPage, server-paged', () => {
     expect(t.match(/Mine #002/g)).toHaveLength(1)
     expect(button(/My bills/)?.textContent).toContain('45')
     expect(text()).toContain('70 bills')
+  })
+
+  it('C15: changing a filter over a saved copy of that list shows the skeleton, not the saved rows, until the server answers', async () => {
+    await render()
+    writeCache(
+      personalBillsPageKey({ bucket: 'mine', settled: 'settled', category: null, sort: 'date_desc' }),
+      'me',
+      { rows: [row('Mine', 99, { title: 'Saved settled bill' })], matching: 1, mine: 1, shared: 0, categories: [] },
+      '2026-10-01T00:00:00.000Z',
+    )
+    server.gate = { match: (q) => q.settled === 'settled' && !q.after, release: [] }
+    await choose('settled')
+
+    expect(text()).not.toContain('Saved settled bill')
+    expect(text()).not.toContain('Mine #001')
+    expect(container.querySelectorAll('.animate-pulse').length).toBeGreaterThan(0)
+
+    await act(async () => server.gate!.release.forEach((r) => r()))
+    await settle()
+    expect(text()).not.toContain('Saved settled bill')
+    expect(text()).toContain('Mine #002')
   })
 })

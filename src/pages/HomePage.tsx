@@ -1,5 +1,5 @@
 import { useCallback } from 'react'
-import { ChevronRight, Loader2, Plus, ReceiptText, Sparkles } from 'lucide-react'
+import { ChevronRight, Plus, ReceiptText, Sparkles } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { fetchBalancesOverview, fetchRecentBills, totalsToMap } from '@/api/balances'
 import { useServerData } from '@/hooks/useServerData'
@@ -9,6 +9,7 @@ import { OriginalAmountLine } from '@/components/common/CurrencyConversionField'
 import { SavedCopyNotice } from '@/components/common/SavedCopyNotice'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
+import { Skeleton } from '@/components/ui/skeleton'
 
 const EPS = 0.005
 
@@ -149,8 +150,17 @@ export function HomePage() {
         </p>
 
         {balancesLoading ? (
-          <div className="mt-6 flex justify-center py-8">
-            <Loader2 className="size-6 animate-spin text-white/60" aria-label="Loading balances" />
+          <div className="mt-6 grid gap-3 sm:grid-cols-2" role="status" aria-label="Loading balances">
+            {['border-emerald-400/20 bg-emerald-400/10', 'border-amber-400/20 bg-amber-400/10'].map((tone) => (
+              <div key={tone} className={`rounded-2xl border p-4 ${tone}`}>
+                <Skeleton className="h-3 w-16 bg-white/15" />
+                <Skeleton className="mt-3 h-7 w-28 bg-white/20" />
+                <div className="mt-3 space-y-2 border-t border-white/10 pt-3">
+                  <Skeleton className="h-3 w-3/4 bg-white/10" />
+                  <Skeleton className="h-3 w-2/3 bg-white/10" />
+                </div>
+              </div>
+            ))}
           </div>
         ) : overview.error && !overview.data ? (
           // Never fall through to the zero state here: "you are all settled up" and "we could not

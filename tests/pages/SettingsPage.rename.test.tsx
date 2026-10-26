@@ -14,7 +14,7 @@ const h = vi.hoisted(() => ({
   toastError: vi.fn(),
 }))
 
-vi.mock('sonner', () => ({ toast: { error: h.toastError, success: vi.fn(), info: vi.fn() } }))
+vi.mock('sonner', () => ({ toast: { error: h.toastError, success: vi.fn(), info: vi.fn(), warning: vi.fn(), dismiss: vi.fn() } }))
 vi.mock('@/hooks/useAuth', () => ({
   useAuth: () => ({ user: { id: 'ME' }, isAuthenticated: true, updateDisplayName: h.updateDisplayName }),
 }))

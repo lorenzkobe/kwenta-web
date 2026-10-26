@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { toast } from 'sonner'
 import { relevantDataVersion, useAppStore } from '@/store/app-store'
 import { markReadMounted, markReadUnmounted } from '@/api/primed-reads'
 import { readCache } from '@/api/cache'
@@ -31,6 +32,29 @@ type Snapshot<T> = {
   fromCache: boolean
   fetchedAt: string | null
   revalidating: boolean
+  /** A saved copy is loaded but not shown: online, a screen shows its skeleton until the answer. */
+  held: boolean
+}
+
+/** How long an opened screen shows its skeleton before falling back to its saved copy. */
+export const SAVED_COPY_FALLBACK_MS = 2000
+
+const SAVED_COPY_TOAST_ID = 'server-data-saved-copy'
+const SLOW_TOAST = 'Still loading. Showing your saved copy for now.'
+const FAILED_TOAST = "Couldn't load the latest data. Showing your saved copy."
+
+// Hooks currently showing a copy because the server was slow; the shared toast stays until the
+// last of them answers, so one fast screen does not dismiss it while another is still waiting.
+const slowHooks = new Set<symbol>()
+
+function releaseSlow(token: symbol): void {
+  if (!slowHooks.delete(token)) return
+  if (slowHooks.size === 0) toast.dismiss(SAVED_COPY_TOAST_ID)
+}
+
+function warnSavedCopy(token: symbol): void {
+  slowHooks.delete(token)
+  toast.warning(FAILED_TOAST, { id: SAVED_COPY_TOAST_ID })
 }
 
 const EMPTY = {
@@ -40,6 +64,7 @@ const EMPTY = {
   fromCache: false,
   fetchedAt: null,
   revalidating: false,
+  held: false,
 } as const
 
 function isEmpty<T>(s: Snapshot<T>): boolean {
@@ -49,7 +74,8 @@ function isEmpty<T>(s: Snapshot<T>): boolean {
     s.error === null &&
     !s.fromCache &&
     s.fetchedAt === null &&
-    !s.revalidating
+    !s.revalidating &&
+    !s.held
   )
 }
 
@@ -60,13 +86,16 @@ function sameDeps(a: readonly unknown[], b: readonly unknown[]): boolean {
 /**
  * The first answer for a subject: its last saved copy when one exists for THIS user, else
  * nothing. A null user must never be read as a cache key (`<prefix>null:<endpoint>`), and another
- * user's entry on the same device is never a candidate because the key is user-scoped.
+ * user's entry on the same device is never a candidate because the key is user-scoped. Online the
+ * copy is held back, so the screen shows its skeleton instead of jumping from the saved numbers
+ * to the fresh ones; offline it is all there is and shows at once.
  */
 function initialSnapshot<T>(
   subject: readonly unknown[],
   hasFetcher: boolean,
   endpointKey: string | undefined,
   userId: string | null,
+  online: boolean,
 ): Snapshot<T> {
   const cached =
     hasFetcher && endpointKey && typeof userId === 'string' && userId !== ''
@@ -81,6 +110,7 @@ function initialSnapshot<T>(
       fromCache: true,
       fetchedAt: cached.fetchedAt,
       revalidating: true,
+      held: online,
     }
   }
   return { subject, ...EMPTY, loading: hasFetcher }
@@ -111,12 +141,19 @@ function isLostAccess(err: unknown): boolean {
  * `endpointKey` is the api cache key this hook renders (`overview`, `group:<uuid>`, …). Declaring
  * it lets a mutation ask the server to recompute exactly the endpoints that are on screen and
  * return them with the write, so the re-read that follows costs no request. Omit it and the hook
- * behaves as before — it simply fetches again. The same key also seeds the first render from the
- * api cache (stale-while-revalidate), so a screen opened before paints its saved copy instead of
- * a spinner while the server answer is fetched behind it (`revalidating`).
+ * behaves as before — it simply fetches again. The same key also loads the saved copy from the
+ * api cache: offline it is painted on the first render; online it is held back while the screen
+ * shows its skeleton, and shown (with a toast) only when the server takes longer than
+ * `SAVED_COPY_FALLBACK_MS` or the fetch fails. An invalidation tick refreshes in place.
  */
+/**
+ * What a fetcher resolves to. `unsent` marks a device-only answer (a row this device has not sent
+ * yet): it is flagged `fromCache`, but it is not a failed fetch and must not say so.
+ */
+export type ServerDataAnswer<T> = { data: T; fromCache: boolean; fetchedAt: string; unsent?: boolean }
+
 export function useServerData<T>(
-  fetcher: (() => Promise<{ data: T; fromCache: boolean; fetchedAt: string }>) | null,
+  fetcher: (() => Promise<ServerDataAnswer<T>>) | null,
   deps: readonly unknown[],
   endpointKey?: string,
 ): ServerDataState<T> {
@@ -125,7 +162,7 @@ export function useServerData<T>(
   const currentUserId = useAppStore((s) => s.currentUserId)
 
   const [state, setState] = useState<Snapshot<T>>(() =>
-    initialSnapshot<T>(deps, fetcher !== null, endpointKey, currentUserId),
+    initialSnapshot<T>(deps, fetcher !== null, endpointKey, currentUserId, isOnline),
   )
   const [manualTick, setManualTick] = useState(0)
 
@@ -134,6 +171,7 @@ export function useServerData<T>(
 
   // Guards a slow earlier response from overwriting a newer one.
   const runIdRef = useRef(0)
+  const [slowToken] = useState(() => Symbol('server-data'))
 
   // Separates "the subject changed" from "the same subject may have new data". `dataVersion`,
   // `manualTick` and `isOnline` are invalidation ticks: the answer they produce replaces the
@@ -146,9 +184,11 @@ export function useServerData<T>(
   // switched subjects would already have painted the previous subject's payload.
   let view = state
   if (!sameDeps(state.subject, deps)) {
-    view = initialSnapshot<T>(deps, fetcher !== null, endpointKey, currentUserId)
+    view = initialSnapshot<T>(deps, fetcher !== null, endpointKey, currentUserId, isOnline)
     setState(view)
   }
+  const viewRef = useRef(view)
+  viewRef.current = view
 
   // Registered only while this screen is actually rendering the endpoint. A write asks for the
   // registered set, so a key left behind by an unmounted screen would make every mutation pay to
@@ -175,9 +215,12 @@ export function useServerData<T>(
       ...s,
       loading: true,
       revalidating: s.revalidating || (isOnline && s.fromCache && s.data !== undefined),
+      held: s.held && isOnline,
     }))
-    void call()
-      .then((result) => {
+    // Two-argument `then`: a throw from the toast after an answer must not be read as a failed
+    // fetch, which would discard the answer that just arrived.
+    void call().then(
+      (result) => {
         if (cancelled || runId !== runIdRef.current) return
         setState((s) => ({
           ...s,
@@ -187,17 +230,24 @@ export function useServerData<T>(
           error: null,
           loading: false,
           revalidating: false,
+          held: false,
         }))
-      })
-      .catch((err: unknown) => {
+        // Online, a cached answer means the request failed and fetchEndpoint fell back to the copy.
+        if (isOnline && result.fromCache && !result.unsent) warnSavedCopy(slowToken)
+        else releaseSlow(slowToken)
+      },
+      (err: unknown) => {
         if (cancelled || runId !== runIdRef.current) return
         const message = err instanceof Error ? err.message : 'Could not load this screen.'
-        setState((s) =>
-          isLostAccess(err)
-            ? { ...s, ...EMPTY, error: message }
-            : { ...s, error: message, loading: false, revalidating: false },
-        )
-      })
+        const lostAccess = isLostAccess(err)
+        setState((s) => {
+          if (lostAccess) return { ...s, ...EMPTY, error: message }
+          return { ...s, error: message, loading: false, revalidating: false, held: false }
+        })
+        if (!lostAccess && isOnline && viewRef.current.data !== undefined) warnSavedCopy(slowToken)
+        else releaseSlow(slowToken)
+      },
+    )
     return () => {
       cancelled = true
     }
@@ -208,6 +258,22 @@ export function useServerData<T>(
   // invalidation tick mid-fetch keeps the pair it already holds. Offline a fetch is only the cache
   // answering again, which is not an update the header should announce.
   const holdsScreenLoad = view.loading && isOnline
+
+  // Keyed on the subject too, so switching to another held subject restarts the wait for it.
+  const held = view.held
+  const heldSubject = view.subject
+  useEffect(() => {
+    if (!held) return
+    const id = window.setTimeout(() => {
+      setState((s) => (s.held ? { ...s, held: false } : s))
+      slowHooks.add(slowToken)
+      toast.info(SLOW_TOAST, { id: SAVED_COPY_TOAST_ID })
+    }, SAVED_COPY_FALLBACK_MS)
+    return () => window.clearTimeout(id)
+  }, [held, heldSubject, slowToken])
+
+  useEffect(() => () => releaseSlow(slowToken), [slowToken])
+
   useEffect(() => {
     if (!holdsScreenLoad) return
     const { beginScreenLoad, endScreenLoad } = useAppStore.getState()
@@ -217,6 +283,9 @@ export function useServerData<T>(
 
   const refresh = useCallback(() => setManualTick((n) => n + 1), [])
 
+  if (view.held) {
+    return { data: undefined, loading: view.loading, error: view.error, fromCache: false, fetchedAt: null, revalidating: false, refresh }
+  }
   return {
     data: view.data,
     loading: view.loading,

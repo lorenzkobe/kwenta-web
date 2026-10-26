@@ -20,7 +20,7 @@ vi.mock('@/sync/bill-mirror', () => ({
   captureBillVersion: vi.fn(async () => ({ versions: {}, itemIds: [], splitIds: [] })),
 }))
 vi.mock('@/hooks/useExchangeRate', () => ({ useExchangeRate: () => mocks.rate }))
-vi.mock('sonner', () => ({ toast: { error: vi.fn(), success: vi.fn(), info: vi.fn() } }))
+vi.mock('sonner', () => ({ toast: { error: vi.fn(), success: vi.fn(), info: vi.fn(), warning: vi.fn(), dismiss: vi.fn() } }))
 
 import { AddBillDialog } from '@/components/common/AddBillDialog'
 

@@ -149,7 +149,7 @@ vi.mock('@/db/operations', () => ({
 vi.mock('@/lib/export-csv', () => ({ exportGroupToCSV: vi.fn(async () => {}) }))
 vi.mock('@/lib/export-pdf', () => ({ generateGroupPDF: vi.fn(async () => {}) }))
 vi.mock('sonner', () => ({
-  toast: { error: vi.fn(), success: vi.fn(), info: vi.fn(), loading: vi.fn(() => 'toast-id') },
+  toast: { error: vi.fn(), success: vi.fn(), info: vi.fn(), warning: vi.fn(), dismiss: vi.fn(), loading: vi.fn(() => 'toast-id') },
 }))
 
 import * as balances from '@/api/balances'

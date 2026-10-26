@@ -52,6 +52,7 @@ import { useCurrentUser } from '@/hooks/useCurrentUser'
 import { cn, formatCurrency, MONEY_EPSILON } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { DetailPageSkeleton, Skeleton } from '@/components/ui/skeleton'
 import { EditSettlementDialog } from '@/components/common/EditSettlementDialog'
 import {
   RecordPaymentDialog,
@@ -866,11 +867,7 @@ export function PersonDetailPage() {
   }, [exportOpen, exportRetry, userId, personId])
 
   if (!userId || !personId) {
-    return (
-      <div className="flex justify-center py-20">
-        <Loader2 className="size-5 animate-spin text-teal-800" />
-      </div>
-    )
+    return <DetailPageSkeleton label="Loading person" />
   }
 
   if (personId === userId) {
@@ -878,19 +875,11 @@ export function PersonDetailPage() {
   }
 
   if (profile === undefined) {
-    return (
-      <div className="flex justify-center py-20">
-        <Loader2 className="size-5 animate-spin text-teal-800" />
-      </div>
-    )
+    return <DetailPageSkeleton label="Loading person" />
   }
 
   if (profile === null && (fallbackIdentity === undefined || lookupOutcome === null || lookupOutcome === 'present')) {
-    return (
-      <div className="flex justify-center py-20">
-        <Loader2 className="size-5 animate-spin text-teal-800" />
-      </div>
-    )
+    return <DetailPageSkeleton label="Loading person" />
   }
 
   if (profile === null && !fallbackIdentity) {
@@ -1120,6 +1109,12 @@ export function PersonDetailPage() {
             >
               Try again
             </Button>
+          </div>
+        )}
+        {!personSummary.data && !personSummary.error && (
+          <div role="status" aria-label="Loading balance">
+            <Skeleton className="mt-3 h-6 w-40" />
+            <Skeleton className="mt-4 h-20 w-full rounded-2xl bg-stone-100" />
           </div>
         )}
         {summary && (

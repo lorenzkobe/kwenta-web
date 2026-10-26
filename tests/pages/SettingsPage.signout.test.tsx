@@ -31,7 +31,7 @@ vi.mock('@/lib/clear-kwenta-local', async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
   clearKwentaLocalData: h.clearLocal,
 }))
-vi.mock('sonner', () => ({ toast: { error: vi.fn(), success: vi.fn(), info: vi.fn() } }))
+vi.mock('sonner', () => ({ toast: { error: vi.fn(), success: vi.fn(), info: vi.fn(), warning: vi.fn(), dismiss: vi.fn() } }))
 vi.mock('@/hooks/useAuth', () => ({
   useAuth: () => ({ user: { id: 'ME' }, isAuthenticated: true, updateDisplayName: vi.fn() }),
 }))

@@ -177,7 +177,7 @@ vi.mock('@/db/operations', () => ({
 vi.mock('@/lib/export-csv', () => ({ exportGroupToCSV: vi.fn(async () => {}) }))
 vi.mock('@/lib/export-pdf', () => ({ generateGroupPDF: vi.fn(async () => {}) }))
 vi.mock('sonner', () => ({
-  toast: { error: vi.fn(), success: vi.fn(), info: vi.fn(), loading: vi.fn(() => 'toast-id') },
+  toast: { error: vi.fn(), success: vi.fn(), info: vi.fn(), warning: vi.fn(), dismiss: vi.fn(), loading: vi.fn(() => 'toast-id') },
 }))
 
 import * as balances from '@/api/balances'
@@ -906,5 +906,12 @@ describe('GroupDetailPage bills, server-paged', () => {
 
     expect(toast.error).toHaveBeenCalledWith(SHARE_FAIL)
     expect(text()).not.toContain('Bill #060')
+  })
+
+  it('C12: opening the group shows the page skeleton, not a spinner, until the detail answers', async () => {
+    vi.mocked(balances.fetchGroupDetailPaged).mockImplementationOnce(() => new Promise(() => {}))
+    await render()
+    expect(container.querySelector('[aria-label="Loading group"]')).not.toBeNull()
+    expect(container.querySelector('.animate-spin')).toBeNull()
   })
 })

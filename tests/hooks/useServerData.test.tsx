@@ -1,7 +1,7 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
-import { useServerData } from '@/hooks/useServerData'
+import { SAVED_COPY_FALLBACK_MS, useServerData } from '@/hooks/useServerData'
 import { useAppStore } from '@/store/app-store'
 import {
   clearPrimedReads,
@@ -10,6 +10,13 @@ import {
 } from '@/api/primed-reads'
 import { writeCache } from '@/api/cache'
 import { ApiError, ServerDeclinedError } from '@/api/balances'
+
+const toastMock = vi.hoisted(() => ({
+  info: vi.fn(),
+  warning: vi.fn(),
+  dismiss: vi.fn(),
+}))
+vi.mock('sonner', () => ({ toast: toastMock }))
 
 /**
  * The one hook test in the suite, because the defect it pins is not expressible as a pure
@@ -276,6 +283,7 @@ describe('useServerData cache seed (stale-while-revalidate)', () => {
     localStorage.clear()
     clearPrimedReads()
     useAppStore.getState().setCurrentUserId('u1')
+    useAppStore.setState({ isOnline: true })
   })
   afterEach(() => {
     useAppStore.getState().setCurrentUserId(null)
@@ -283,7 +291,7 @@ describe('useServerData cache seed (stale-while-revalidate)', () => {
     clearPrimedReads()
   })
 
-  it('C1: renders the cached copy on the first render, then replaces it with the fetch result', async () => {
+  it('C1: online, a saved copy is held back on open so the screen shows its skeleton, then the fresh answer', async () => {
     writeCache('overview', 'u1', { owed: 900 }, CACHED_AT)
     const fresh = deferred<Payload>()
     const seen: SeededObserved[] = []
@@ -294,17 +302,10 @@ describe('useServerData cache seed (stale-while-revalidate)', () => {
       )
     })
 
-    // The very first render already has the saved answer: no blank frame.
-    expect(seen[0]).toMatchObject({
-      data: { owed: 900 },
-      revalidating: true,
-      fromCache: true,
-      loading: true,
-      error: null,
-    })
-    // Derived: the "saved copy" line needs the cached fetch time, not null.
-    expect(seen[0].fetchedAt).toBe(CACHED_AT)
-    expect(seen.at(-1)).toMatchObject({ data: { owed: 900 }, revalidating: true })
+    // Painting the saved copy and swapping it for the server's answer is the jump users saw.
+    expect(seen.every((s) => s.data === undefined)).toBe(true)
+    expect(seen.at(-1)).toMatchObject({ loading: true, fromCache: false, error: null, fetchedAt: null })
+    expect(seen.at(-1)?.revalidating).toBe(false)
 
     await act(async () => {
       fresh.resolve({ data: { owed: 1250 }, fromCache: false, fetchedAt: FRESH_AT })
@@ -318,6 +319,30 @@ describe('useServerData cache seed (stale-while-revalidate)', () => {
       error: null,
     })
     expect(seen.at(-1)?.fetchedAt).toBe(FRESH_AT)
+    expect(seen.some((s) => JSON.stringify(s.data) === JSON.stringify({ owed: 900 }))).toBe(false)
+  })
+
+  it('C1: offline, the saved copy is painted on the first render and revalidated behind it', async () => {
+    useAppStore.setState({ isOnline: false })
+    writeCache('overview', 'u1', { owed: 900 }, CACHED_AT)
+    const fresh = deferred<Payload>()
+    const seen: SeededObserved[] = []
+
+    await act(async () => {
+      root.render(
+        <SeededProbe subject="home" endpointKey="overview" fetcher={() => fresh.promise} seen={seen} />,
+      )
+    })
+
+    // Offline the copy is all there is: a skeleton would only delay it.
+    expect(seen[0]).toMatchObject({ data: { owed: 900 }, fromCache: true, loading: true, error: null })
+    expect(seen[0].fetchedAt).toBe(CACHED_AT)
+
+    await act(async () => {
+      fresh.resolve({ data: { owed: 900 }, fromCache: true, fetchedAt: CACHED_AT })
+    })
+    expect(seen.at(-1)).toMatchObject({ data: { owed: 900 }, fromCache: true, loading: false })
+    expect(seen.at(-1)?.revalidating).toBe(false)
   })
 
   it('C2: with no cached copy it starts empty and loading, not revalidating', async () => {
@@ -339,7 +364,7 @@ describe('useServerData cache seed (stale-while-revalidate)', () => {
     expect(seen.at(-1)).toMatchObject({ data: { owed: 7 }, loading: false, revalidating: false })
   })
 
-  it("C3: a subject change seeds the NEW subject's cache and never renders the old subject's data", async () => {
+  it("C3: a subject change holds the NEW subject's copy back online and never renders the old subject's data", async () => {
     writeCache('person:alice', 'u1', { owed: 1200 }, CACHED_AT)
     writeCache('person:bob', 'u1', { owed: 5 }, CACHED_AT)
     const bobFresh = deferred<Payload>()
@@ -368,7 +393,8 @@ describe('useServerData cache seed (stale-while-revalidate)', () => {
     const afterSwitch = seen.slice(before).map((s) => JSON.stringify(s.data))
     expect(afterSwitch).not.toContain(JSON.stringify({ owed: 1300 }))
     expect(afterSwitch).not.toContain(JSON.stringify({ owed: 1200 }))
-    expect(seen.at(-1)).toMatchObject({ data: { owed: 5 }, revalidating: true, fromCache: true })
+    expect(afterSwitch).not.toContain(JSON.stringify({ owed: 5 }))
+    expect(seen.at(-1)).toMatchObject({ data: undefined, loading: true, fromCache: false })
 
     await act(async () => {
       bobFresh.resolve({ data: { owed: 6 }, fromCache: false, fetchedAt: FRESH_AT })
@@ -414,14 +440,14 @@ describe('useServerData cache seed (stale-while-revalidate)', () => {
         <SeededProbe subject="g1" endpointKey="group:g1" fetcher={() => fresh.promise} seen={seen} />,
       )
     })
-    expect(seen[0].data).toEqual({ members: 3 })
 
     await act(async () => {
       // The exact prefix fetchEndpoint uses for an authorization failure (src/api/balances.ts).
       fresh.reject(new ApiError('You no longer have access to this group.'))
     })
 
-    // Losing access must not read as staleness: the saved copy goes away with it.
+    // Losing access must not read as staleness: the held copy is never shown.
+    expect(seen.every((x) => JSON.stringify(x.data) !== JSON.stringify({ members: 3 }))).toBe(true)
     expect(seen.at(-1)).toMatchObject({
       data: undefined,
       error: 'You no longer have access to this group.',
@@ -446,7 +472,6 @@ describe('useServerData cache seed (stale-while-revalidate)', () => {
         />,
       )
     })
-    expect(seen[0].data).toEqual({ pays: [] })
 
     await act(async () => {
       fresh.reject(new ServerDeclinedError('Kwenta could not confirm the balances in this group.'))
@@ -753,5 +778,308 @@ describe('useServerData screen-load counter', () => {
       useAppStore.getState().endScreenLoad()
     })
     expect(renders.length).toBe(settled)
+  })
+})
+
+/**
+ * skeleton-on-fetch. Online, a screen opened over a saved copy shows its skeleton instead of the
+ * copy, so the answer appears once rather than jumping from the saved numbers to the fresh ones.
+ * A slow server must not leave the skeleton up indefinitely: after SAVED_COPY_FALLBACK_MS the copy
+ * is shown, with a toast saying so, and a failed fetch says so too.
+ */
+describe('useServerData saved-copy fallback', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+    localStorage.clear()
+    clearPrimedReads()
+    useAppStore.getState().setCurrentUserId('u1')
+    useAppStore.setState({ isOnline: true, screenLoadCount: 0 })
+    toastMock.info.mockClear()
+    toastMock.warning.mockClear()
+    toastMock.dismiss.mockClear()
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+    useAppStore.getState().setCurrentUserId(null)
+    useAppStore.setState({ isOnline: true, screenLoadCount: 0 })
+    localStorage.clear()
+    clearPrimedReads()
+  })
+
+  function renderOverview(fetcher: () => Promise<Payload>, seen: SeededObserved[]) {
+    return act(async () => {
+      root.render(<SeededProbe subject="home" endpointKey="overview" fetcher={fetcher} seen={seen} />)
+    })
+  }
+
+  it('C2: a server slower than the fallback reveals the saved copy with a toast, then the fresh answer replaces it', async () => {
+    writeCache('overview', 'u1', { owed: 900 }, CACHED_AT)
+    const fresh = deferred<Payload>()
+    const seen: SeededObserved[] = []
+    await renderOverview(() => fresh.promise, seen)
+
+    await act(async () => {
+      vi.advanceTimersByTime(SAVED_COPY_FALLBACK_MS - 1)
+    })
+    expect(seen.at(-1)?.data).toBeUndefined()
+    expect(toastMock.info).not.toHaveBeenCalled()
+
+    await act(async () => {
+      vi.advanceTimersByTime(1)
+    })
+    // Still updating: the header bar carries that, so the copy is revalidating, not a final answer.
+    expect(seen.at(-1)).toMatchObject({
+      data: { owed: 900 },
+      fromCache: true,
+      revalidating: true,
+      loading: true,
+      fetchedAt: CACHED_AT,
+    })
+    expect(toastMock.info).toHaveBeenCalledTimes(1)
+    expect(useAppStore.getState().screenLoadCount).toBe(1)
+
+    await act(async () => {
+      fresh.resolve({ data: { owed: 1250 }, fromCache: false, fetchedAt: FRESH_AT })
+    })
+    expect(seen.at(-1)).toMatchObject({ data: { owed: 1250 }, fromCache: false, revalidating: false })
+    expect(toastMock.dismiss).toHaveBeenCalledWith(toastMock.info.mock.calls[0][1].id)
+    expect(toastMock.warning).not.toHaveBeenCalled()
+  })
+
+  it('C3: an answer just before the fallback never shows the saved copy or a toast', async () => {
+    writeCache('overview', 'u1', { owed: 900 }, CACHED_AT)
+    const fresh = deferred<Payload>()
+    const seen: SeededObserved[] = []
+    await renderOverview(() => fresh.promise, seen)
+
+    await act(async () => {
+      vi.advanceTimersByTime(SAVED_COPY_FALLBACK_MS - 1)
+      fresh.resolve({ data: { owed: 1250 }, fromCache: false, fetchedAt: FRESH_AT })
+    })
+    await act(async () => {
+      vi.advanceTimersByTime(SAVED_COPY_FALLBACK_MS * 2)
+    })
+
+    expect(seen.some((s) => JSON.stringify(s.data) === JSON.stringify({ owed: 900 }))).toBe(false)
+    expect(seen.at(-1)?.data).toEqual({ owed: 1250 })
+    expect(toastMock.info).not.toHaveBeenCalled()
+    expect(toastMock.warning).not.toHaveBeenCalled()
+  })
+
+  it('C4: a fetch that falls back to the saved copy while online shows it with a warning toast', async () => {
+    writeCache('overview', 'u1', { owed: 900 }, CACHED_AT)
+    const fresh = deferred<Payload>()
+    const seen: SeededObserved[] = []
+    await renderOverview(() => fresh.promise, seen)
+
+    await act(async () => {
+      fresh.resolve({ data: { owed: 900 }, fromCache: true, fetchedAt: CACHED_AT })
+    })
+
+    expect(seen.at(-1)).toMatchObject({ data: { owed: 900 }, fromCache: true, revalidating: false, loading: false })
+    expect(toastMock.warning).toHaveBeenCalledTimes(1)
+    expect(toastMock.warning.mock.calls[0][0]).toMatch(/saved copy/i)
+  })
+
+  it('C4: an unsent (device-only) answer is not a failed fetch and raises no toast', async () => {
+    const seen: SeededObserved[] = []
+    await renderOverview(
+      () => Promise.resolve({ data: { title: 'Lunch' }, fromCache: true, fetchedAt: CACHED_AT, unsent: true }),
+      seen,
+    )
+    expect(seen.at(-1)).toMatchObject({ data: { title: 'Lunch' }, fromCache: true })
+    expect(toastMock.warning).not.toHaveBeenCalled()
+  })
+
+  it('C4: a rejected fetch with a held copy reveals it, keeps the error and warns', async () => {
+    writeCache('overview', 'u1', { owed: 900 }, CACHED_AT)
+    const fresh = deferred<Payload>()
+    const seen: SeededObserved[] = []
+    await renderOverview(() => fresh.promise, seen)
+
+    await act(async () => {
+      fresh.reject(new Error('Failed to fetch'))
+    })
+
+    expect(seen.at(-1)).toMatchObject({ data: { owed: 900 }, fromCache: true, error: 'Failed to fetch' })
+    expect(toastMock.warning).toHaveBeenCalledTimes(1)
+  })
+
+  it('C4: a refresh in place that ends on the saved copy warns too', async () => {
+    let call = 0
+    const fetcher = () =>
+      Promise.resolve(
+        ++call === 1
+          ? { data: { owed: 1 }, fromCache: false, fetchedAt: FRESH_AT }
+          : { data: { owed: 1 }, fromCache: true, fetchedAt: FRESH_AT },
+      )
+    const seen: SeededObserved[] = []
+    await renderOverview(fetcher, seen)
+    expect(toastMock.warning).not.toHaveBeenCalled()
+
+    await act(async () => {
+      useAppStore.getState().bumpDataVersion()
+    })
+    expect(seen.at(-1)).toMatchObject({ data: { owed: 1 }, fromCache: true })
+    expect(toastMock.warning).toHaveBeenCalledTimes(1)
+  })
+
+  it('C5: access lost while the copy is held never shows the copy and never claims a saved copy', async () => {
+    writeCache('overview', 'u1', { owed: 900 }, CACHED_AT)
+    const fresh = deferred<Payload>()
+    const seen: SeededObserved[] = []
+    await renderOverview(() => fresh.promise, seen)
+
+    await act(async () => {
+      fresh.reject(new ApiError('You no longer have access to this group.'))
+    })
+    await act(async () => {
+      vi.advanceTimersByTime(SAVED_COPY_FALLBACK_MS * 2)
+    })
+
+    expect(seen.every((s) => s.data === undefined)).toBe(true)
+    expect(seen.at(-1)?.error).toBe('You no longer have access to this group.')
+    expect(toastMock.info).not.toHaveBeenCalled()
+    expect(toastMock.warning).not.toHaveBeenCalled()
+  })
+
+  it('C5: offline with no fetch failure shows no toast', async () => {
+    useAppStore.setState({ isOnline: false })
+    writeCache('overview', 'u1', { owed: 900 }, CACHED_AT)
+    const seen: SeededObserved[] = []
+    await renderOverview(() => Promise.resolve({ data: { owed: 900 }, fromCache: true, fetchedAt: CACHED_AT }), seen)
+    await act(async () => {
+      vi.advanceTimersByTime(SAVED_COPY_FALLBACK_MS * 2)
+    })
+
+    expect(seen.at(-1)).toMatchObject({ data: { owed: 900 }, fromCache: true })
+    expect(toastMock.info).not.toHaveBeenCalled()
+    expect(toastMock.warning).not.toHaveBeenCalled()
+  })
+
+  it('C7: going offline while the copy is held reveals it at once', async () => {
+    writeCache('overview', 'u1', { owed: 900 }, CACHED_AT)
+    const seen: SeededObserved[] = []
+    await renderOverview(() => new Promise<Payload>(() => {}), seen)
+    expect(seen.at(-1)?.data).toBeUndefined()
+
+    await act(async () => {
+      useAppStore.getState().setOnline(false)
+    })
+    expect(seen.at(-1)).toMatchObject({ data: { owed: 900 }, fromCache: true })
+    expect(toastMock.info).not.toHaveBeenCalled()
+  })
+
+  it('C9: a refresh in place keeps the fresh answer on screen while it loads, past the fallback too', async () => {
+    let call = 0
+    const second = deferred<Payload>()
+    const fetcher = () =>
+      ++call === 1 ? Promise.resolve({ data: { owed: 1 }, fromCache: false, fetchedAt: FRESH_AT }) : second.promise
+    const seen: SeededObserved[] = []
+    await renderOverview(fetcher, seen)
+    const before = seen.length
+
+    await act(async () => {
+      useAppStore.getState().bumpDataVersion()
+    })
+    await act(async () => {
+      vi.advanceTimersByTime(SAVED_COPY_FALLBACK_MS * 2)
+    })
+    expect(seen.slice(before).every((s) => JSON.stringify(s.data) === JSON.stringify({ owed: 1 }))).toBe(true)
+    expect(toastMock.info).not.toHaveBeenCalled()
+
+    await act(async () => {
+      second.resolve({ data: { owed: 2 }, fromCache: false, fetchedAt: FRESH_AT })
+    })
+    expect(seen.at(-1)?.data).toEqual({ owed: 2 })
+  })
+
+  it('C10: several slow screens share one toast, dismissed only when the last of them answers', async () => {
+    writeCache('overview', 'u1', { owed: 900 }, CACHED_AT)
+    writeCache('recent-bills', 'u1', [{ id: 'b1' }], CACHED_AT)
+    const a = deferred<Payload>()
+    const b = deferred<Payload>()
+    const seenA: SeededObserved[] = []
+    const seenB: SeededObserved[] = []
+    await act(async () => {
+      root.render(
+        <>
+          <SeededProbe subject="home" endpointKey="overview" fetcher={() => a.promise} seen={seenA} />
+          <SeededProbe subject="home" endpointKey="recent-bills" fetcher={() => b.promise} seen={seenB} />
+        </>,
+      )
+    })
+    await act(async () => {
+      vi.advanceTimersByTime(SAVED_COPY_FALLBACK_MS)
+    })
+    const ids = new Set(toastMock.info.mock.calls.map((c) => c[1].id))
+    expect(ids.size).toBe(1)
+
+    await act(async () => {
+      a.resolve({ data: { owed: 1 }, fromCache: false, fetchedAt: FRESH_AT })
+    })
+    expect(toastMock.dismiss).not.toHaveBeenCalled()
+
+    await act(async () => {
+      b.resolve({ data: [], fromCache: false, fetchedAt: FRESH_AT })
+    })
+    expect(toastMock.dismiss).toHaveBeenCalledTimes(1)
+  })
+
+  it('C10: two failing screens use one toast id', async () => {
+    writeCache('overview', 'u1', { owed: 900 }, CACHED_AT)
+    writeCache('recent-bills', 'u1', [{ id: 'b1' }], CACHED_AT)
+    await act(async () => {
+      root.render(
+        <>
+          <SeededProbe subject="home" endpointKey="overview" fetcher={() => Promise.reject(new Error('Failed to fetch'))} seen={[]} />
+          <SeededProbe subject="home" endpointKey="recent-bills" fetcher={() => Promise.reject(new Error('Failed to fetch'))} seen={[]} />
+        </>,
+      )
+    })
+    const ids = new Set(toastMock.warning.mock.calls.map((c) => c[1].id))
+    expect(toastMock.warning).toHaveBeenCalled()
+    expect(ids.size).toBe(1)
+  })
+
+  it('C11: unmounting while held cancels the fallback: no late reveal, no toast', async () => {
+    writeCache('overview', 'u1', { owed: 900 }, CACHED_AT)
+    const seen: SeededObserved[] = []
+    await renderOverview(() => new Promise<Payload>(() => {}), seen)
+    await act(async () => {
+      root.render(null)
+    })
+    const after = seen.length
+    await act(async () => {
+      vi.advanceTimersByTime(SAVED_COPY_FALLBACK_MS * 2)
+    })
+    expect(seen.length).toBe(after)
+    expect(toastMock.info).not.toHaveBeenCalled()
+  })
+
+  it('C8: a subject change while held restarts the fallback for the new subject', async () => {
+    writeCache('person:alice', 'u1', { owed: 1200 }, CACHED_AT)
+    writeCache('person:bob', 'u1', { owed: 5 }, CACHED_AT)
+    const seen: SeededObserved[] = []
+    const never = () => new Promise<Payload>(() => {})
+    await act(async () => {
+      root.render(<SeededProbe subject="alice" endpointKey="person:alice" fetcher={never} seen={seen} />)
+    })
+    await act(async () => {
+      vi.advanceTimersByTime(SAVED_COPY_FALLBACK_MS - 500)
+    })
+    await act(async () => {
+      root.render(<SeededProbe subject="bob" endpointKey="person:bob" fetcher={never} seen={seen} />)
+    })
+    await act(async () => {
+      vi.advanceTimersByTime(500)
+    })
+    expect(seen.at(-1)?.data).toBeUndefined()
+    expect(seen.some((s) => JSON.stringify(s.data) === JSON.stringify({ owed: 1200 }))).toBe(false)
+
+    await act(async () => {
+      vi.advanceTimersByTime(SAVED_COPY_FALLBACK_MS)
+    })
+    expect(seen.at(-1)).toMatchObject({ data: { owed: 5 }, fromCache: true })
   })
 })

@@ -196,9 +196,10 @@ vi.mock('@/lib/export-splits', () => ({ loadBillExportItems: vi.fn(async () => n
 vi.mock('@/lib/export-csv', () => ({ exportPersonToCSV: vi.fn(async () => {}) }))
 vi.mock('@/lib/export-pdf', () => ({ generatePersonPDF: vi.fn(async () => {}) }))
 vi.mock('sonner', () => ({
-  toast: { error: vi.fn(), success: vi.fn(), info: vi.fn(), loading: vi.fn(() => 'toast-id') },
+  toast: { error: vi.fn(), success: vi.fn(), info: vi.fn(), warning: vi.fn(), dismiss: vi.fn(), loading: vi.fn(() => 'toast-id') },
 }))
 
+import { SAVED_COPY_FALLBACK_MS } from '@/hooks/useServerData'
 import * as balances from '@/api/balances'
 import { ApiError } from '@/api/balances'
 import { writeCache } from '@/api/cache'
@@ -786,7 +787,19 @@ describe('PersonDetailPage export errors and saved copies (items 3, 4)', () => {
     )
     server.fullFromCache = true
     server.gate = { match: (fn) => fn === 'page', release: [] }
-    await render()
+    // Online the saved copy waits behind the skeleton until the fallback; this rule is about the
+    // copy once it is on screen and still revalidating.
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      await render()
+      expect(text()).not.toContain('Bill #001')
+      await act(async () => {
+        vi.advanceTimersByTime(SAVED_COPY_FALLBACK_MS)
+      })
+      await settle()
+    } finally {
+      vi.useRealTimers()
+    }
     expect(text()).toContain('Bill #001')
 
     await click(byLabel('Share person summary'))
