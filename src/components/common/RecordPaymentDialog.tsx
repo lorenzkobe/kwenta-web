@@ -15,6 +15,7 @@ import { normalizePaymentMethod } from '@/lib/payment-method'
 import { formatCurrency, isEffectivelyZero, MONEY_EPSILON, roundMoney } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { MoneyInput } from '@/components/common/MoneyInput'
 import { PaymentMethodField } from '@/components/common/PaymentMethodField'
 
 export type PaymentDirection = 'they_paid_me' | 'i_paid_them'
@@ -359,10 +360,9 @@ export function RecordPaymentDialog({
             <label htmlFor="pay-amt" className="text-xs font-medium text-stone-500">
               Amount
             </label>
-            <Input
+            <MoneyInput
               id="pay-amt"
-              type="text"
-              inputMode="decimal"
+              currency={currency}
               autoFocus
               placeholder="0.00"
               value={amountStr}
@@ -373,7 +373,8 @@ export function RecordPaymentDialog({
                   return next === s ? s : next
                 })
               }
-              className="mt-1 rounded-lg text-lg font-semibold"
+              className="mt-1"
+              inputClassName="rounded-lg text-lg font-semibold"
             />
             {owedTotal > MONEY_EPSILON && (
               <button
@@ -418,13 +419,13 @@ export function RecordPaymentDialog({
                       <p className="text-[11px] text-stone-400">owed {formatCurrency(c.owed, currency)}</p>
                     </div>
                     {mode === 'custom' && eligible.length > 1 ? (
-                      <Input
-                        type="text"
-                        inputMode="decimal"
+                      <MoneyInput
+                        currency={currency}
                         value={customAmounts[c.key] ?? ''}
                         onChange={(e) => handleCustomChange(c.key, e.target.value)}
                         disabled={saving}
-                        className="h-8 w-24 rounded-lg text-right text-sm"
+                        className="w-24"
+                        inputClassName="h-8 rounded-lg text-right text-sm"
                       />
                     ) : mode === 'percentage' && eligible.length > 1 ? (
                       <div className="flex items-center gap-1.5">

@@ -13,6 +13,7 @@ import type { SettlementHistoryItem } from '@/api/balances'
 import { useCurrentUser } from '@/hooks/useCurrentUser'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { MoneyInput } from '@/components/common/MoneyInput'
 import { ConfirmDialog } from '@/components/common/ConfirmDialog'
 import { PaymentMethodField } from '@/components/common/PaymentMethodField'
 import { normalizeAmountInput, stripLeadingZerosAmount } from '@/lib/amount-input'
@@ -146,10 +147,9 @@ export function EditSettlementDialog({
               <label htmlFor="edit-settlement-amount" className="text-sm font-medium text-stone-800">
                 Amount ({item.currency})
               </label>
-              <Input
+              <MoneyInput
                 id="edit-settlement-amount"
-                type="text"
-                inputMode="decimal"
+                currency={item.currency}
                 value={amountStr}
                 onChange={(e) => setAmountStr(normalizeAmountInput(e.target.value))}
                 onBlur={() =>
@@ -158,7 +158,7 @@ export function EditSettlementDialog({
                     return next === s ? s : next
                   })
                 }
-                className="rounded-lg"
+                inputClassName="rounded-lg"
               />
             </div>
           )}

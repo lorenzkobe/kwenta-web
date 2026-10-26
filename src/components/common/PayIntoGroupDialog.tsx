@@ -3,6 +3,7 @@ import { Lock, X } from 'lucide-react'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { MoneyInput } from '@/components/common/MoneyInput'
 import {
   Select,
   SelectContent,
@@ -278,12 +279,12 @@ export function PayIntoGroupDialog({
           </div>
 
           {mode !== 'custom' && (
-            <Input
-              inputMode="decimal"
+            <MoneyInput
+              currency={currency}
               placeholder="Total amount"
               value={total}
               onChange={(e) => setTotal(e.target.value)}
-              className="rounded-lg"
+              inputClassName="rounded-lg"
               disabled={saving}
             />
           )}
@@ -323,9 +324,10 @@ export function PayIntoGroupDialog({
                       </div>
                     )}
                     {mode === 'custom' && (
-                      <Input
-                        className="w-28 rounded-lg"
-                        inputMode="decimal"
+                      <MoneyInput
+                        currency={currency}
+                        className="w-28"
+                        inputClassName="rounded-lg"
                         placeholder="0.00"
                         value={customAmounts[p.userId] ?? ''}
                         onChange={(e) => handleCustomChange(p.userId, e.target.value)}

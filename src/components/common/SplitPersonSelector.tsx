@@ -7,6 +7,7 @@ import { parseSplitNumber } from '@/lib/bill-split-form'
 import { filterDecimalInput, stripLeadingZerosAmount } from '@/lib/amount-input'
 import { cn, formatCurrency } from '@/lib/utils'
 import { Input } from '@/components/ui/input'
+import { MoneyInput } from '@/components/common/MoneyInput'
 export interface SplitMemberOption {
   userId: string
   displayName: string
@@ -72,6 +73,16 @@ export function SplitPersonSelector({
   const sum = selectedUserIds.reduce((a, uid) => a + parseSplitNumber(values[uid]), 0)
   const pctOk = splitType === 'percentage' && Math.abs(sum - 100) <= 0.06
   const customOk = splitType === 'custom' && lineAmount > 0 && Math.abs(sum - lineAmount) <= 0.06
+  const valueSizeClass = size === 'compact' ? 'h-7 text-xs' : 'h-9 text-sm'
+  const decimalValueProps = (userId: string) => ({
+    value: values[userId] ?? '',
+    onChange: (e: React.ChangeEvent<HTMLInputElement>) => onValueChange(userId, filterDecimalInput(e.target.value)),
+    onBlur: () => {
+      const v = values[userId] ?? ''
+      const next = stripLeadingZerosAmount(v)
+      if (next !== v) onValueChange(userId, next)
+    },
+  })
   const qtyValid =
     splitType === 'quantity' &&
     selectedUserIds.every((uid) => {
@@ -318,24 +329,26 @@ export function SplitPersonSelector({
                   <Input
                     type="text"
                     inputMode="numeric"
-                    className={cn('flex-1 rounded-lg', size === 'compact' ? 'h-7 text-xs' : 'h-9 text-sm')}
+                    className={cn('flex-1 rounded-lg', valueSizeClass)}
                     placeholder="Qty"
                     value={values[m.userId] ?? ''}
                     onChange={(e) => onValueChange(m.userId, e.target.value.replace(/[^0-9]/g, ''))}
                   />
-                ) : (
+                ) : splitType === 'percentage' ? (
                   <Input
                     type="text"
                     inputMode="decimal"
-                    className={cn('flex-1 rounded-lg', size === 'compact' ? 'h-7 text-xs' : 'h-9 text-sm')}
-                    placeholder={splitType === 'percentage' ? '%' : '0.00'}
-                    value={values[m.userId] ?? ''}
-                    onChange={(e) => onValueChange(m.userId, filterDecimalInput(e.target.value))}
-                    onBlur={() => {
-                      const v = values[m.userId] ?? ''
-                      const next = stripLeadingZerosAmount(v)
-                      if (next !== v) onValueChange(m.userId, next)
-                    }}
+                    className={cn('flex-1 rounded-lg', valueSizeClass)}
+                    placeholder="%"
+                    {...decimalValueProps(m.userId)}
+                  />
+                ) : (
+                  <MoneyInput
+                    currency={currency}
+                    className="flex-1"
+                    inputClassName={cn('rounded-lg', valueSizeClass)}
+                    placeholder="0.00"
+                    {...decimalValueProps(m.userId)}
                   />
                 )}
               </div>

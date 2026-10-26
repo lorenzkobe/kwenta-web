@@ -184,3 +184,17 @@ describe('SplitPersonSelector — unlisted participants', () => {
     expect(props.onSelectAll).toHaveBeenCalledTimes(1)
   })
 })
+
+describe('SplitPersonSelector — currency prefix', () => {
+  const prefixes = () => [...container.querySelectorAll('[data-slot="currency-prefix"]')].map((p) => p.textContent)
+
+  it('prefixes each custom amount with the bill currency symbol', async () => {
+    await render({ splitType: 'custom', currency: 'VND', selectedUserIds: ['ME', 'LOCAL'] })
+    expect(prefixes()).toEqual(['₫', '₫'])
+  })
+
+  it('leaves percentage inputs unprefixed', async () => {
+    await render({ splitType: 'percentage', currency: 'VND', selectedUserIds: ['ME', 'LOCAL'] })
+    expect(prefixes()).toEqual([])
+  })
+})

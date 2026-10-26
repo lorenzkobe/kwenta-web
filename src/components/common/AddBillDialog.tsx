@@ -29,6 +29,7 @@ import { normalizeAmountInput, stripLeadingZerosAmount } from '@/lib/amount-inpu
 import { cn, formatCurrency } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { MoneyInput } from '@/components/common/MoneyInput'
 import { Textarea } from '@/components/ui/textarea'
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@/components/ui/select'
 import { SplitPersonSelector, type SplitMemberOption } from '@/components/common/SplitPersonSelector'
@@ -928,9 +929,8 @@ export function AddBillDialog({
                 <div className="space-y-3 rounded-2xl border border-stone-200 bg-stone-50 p-4">
                   <div className="flex flex-col gap-2">
                     <label className="text-sm font-medium">Total amount</label>
-                    <Input
-                      type="text"
-                      inputMode="decimal"
+                    <MoneyInput
+                      currency={conv.currency}
                       placeholder="0.00"
                       value={simpleAmount}
                       onChange={(e) => {
@@ -956,7 +956,7 @@ export function AddBillDialog({
                           return next === prev ? prev : next
                         })
                       }
-                      className="text-lg font-semibold"
+                      inputClassName="text-lg font-semibold"
                     />
                   </div>
 
@@ -1094,11 +1094,11 @@ export function AddBillDialog({
                             value={item.name}
                             onChange={(e) => updateItem(item.key, { name: e.target.value })}
                           />
-                          <Input
-                            type="text"
-                            inputMode="decimal"
+                          <MoneyInput
+                            currency={conv.currency}
                             placeholder={item.splitType === 'quantity' ? 'Unit price' : '0.00'}
-                            className="rounded-lg sm:w-28"
+                            className="sm:w-28"
+                            inputClassName="rounded-lg"
                             value={item.amount}
                             onChange={(e) => {
                               const v = normalizeAmountInput(e.target.value)

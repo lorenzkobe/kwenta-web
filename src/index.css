@@ -43,6 +43,16 @@ body,
   min-height: -webkit-fill-available;
 }
 
+/* iOS Safari zooms the page when a field under 16px takes focus, and a `text-sm` passed to <Input>
+   beats its `text-base`. Unlayered on purpose: only that outranks Tailwind's layered utilities. */
+@media (pointer: coarse) {
+  input,
+  textarea,
+  select {
+    font-size: 16px;
+  }
+}
+
 /* Headings / logo: same sans stack as body (no secondary serif face). */
 .font-display {
   font-family: var(--font-family-sans);

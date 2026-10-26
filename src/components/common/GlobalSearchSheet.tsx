@@ -5,6 +5,7 @@ import { searchEverything, type SearchResults } from '@/api/balances'
 import { searchLocalMirror } from '@/lib/local-search'
 import { useCurrentUser } from '@/hooks/useCurrentUser'
 import { describeError, formatCurrency } from '@/lib/utils'
+import { Skeleton } from '@/components/ui/skeleton'
 
 const MIN_QUERY_LENGTH = 2
 const DEBOUNCE_MS = 150
@@ -136,7 +137,7 @@ export function GlobalSearchSheet({ onClose }: { onClose: () => void }) {
   const hasResults = results.length > 0
 
   return (
-    <div className="fixed inset-0 z-50 flex flex-col bg-white">
+    <div className="fixed inset-0 z-50 flex flex-col bg-white pb-[env(safe-area-inset-bottom)] pt-[env(safe-area-inset-top)]">
       <div className="flex items-center gap-3 border-b border-stone-200 px-4 py-3">
         <Search className="size-4 shrink-0 text-stone-400" />
         <input
@@ -162,6 +163,20 @@ export function GlobalSearchSheet({ onClose }: { onClose: () => void }) {
           <p className="mt-8 text-center text-sm text-stone-400">
             Type at least 2 characters to search
           </p>
+        )}
+
+        {loading && (
+          <div className="space-y-1" role="status" aria-label="Searching">
+            {Array.from({ length: 4 }).map((_, i) => (
+              <div key={i} className="flex items-center gap-3 px-3 py-2.5">
+                <Skeleton className="size-8 shrink-0 rounded-xl" />
+                <div className="min-w-0 flex-1">
+                  <Skeleton className="h-4 w-1/2" />
+                  <Skeleton className="mt-1.5 h-3 w-1/4" />
+                </div>
+              </div>
+            ))}
+          </div>
         )}
 
         {error && <p className="mt-8 text-center text-sm text-red-600">{error}</p>}

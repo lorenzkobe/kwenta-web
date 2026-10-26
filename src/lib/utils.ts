@@ -64,8 +64,20 @@ export function isEffectivelyZero(amount: number): boolean {
   return Math.abs(amount) <= MONEY_EPSILON
 }
 
+const MONEY_LOCALE = 'en-PH'
+
+/** The symbol `formatCurrency` prints for `currency` (₱, ₫, A$, SGD), or the code when Intl rejects it. */
+export function currencySymbol(currency: string): string {
+  try {
+    const parts = new Intl.NumberFormat(MONEY_LOCALE, { style: 'currency', currency }).formatToParts(0)
+    return parts.find((p) => p.type === 'currency')?.value ?? currency
+  } catch {
+    return currency
+  }
+}
+
 export function formatCurrency(amount: number, currency = 'PHP'): string {
-  return new Intl.NumberFormat('en-PH', {
+  return new Intl.NumberFormat(MONEY_LOCALE, {
     style: 'currency',
     currency,
     minimumFractionDigits: 0,

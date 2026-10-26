@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it } from 'vitest'
 import {
   cn,
   describeError,
+  currencySymbol,
   formatCurrency,
   generateId,
   getDeviceId,
@@ -154,5 +155,19 @@ describe('describeError', () => {
     expect(describeError(null, 'Could not run the repair.')).toBe('Could not run the repair.')
     expect(describeError({ code: '500' }, 'fallback')).toBe('fallback')
     expect(describeError({ message: '' }, 'fallback')).toBe('fallback')
+  })
+})
+
+describe('currencySymbol', () => {
+  it('is the symbol formatCurrency prints, so an input prefix matches the amount it becomes', () => {
+    for (const [code, symbol] of [['PHP', '₱'], ['VND', '₫'], ['AUD', 'A$'], ['SGD', 'SGD']] as const) {
+      expect(currencySymbol(code)).toBe(symbol)
+      expect(formatCurrency(5, code).replace(/\s/g, '')).toBe(`${symbol}5`)
+    }
+  })
+
+  it('falls back to the code itself for a code Intl rejects, instead of throwing during render', () => {
+    expect(currencySymbol('')).toBe('')
+    expect(currencySymbol('not-a-code')).toBe('not-a-code')
   })
 })

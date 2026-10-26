@@ -6,6 +6,7 @@ import { normalizeAmountInput, stripLeadingZerosAmount } from '@/lib/amount-inpu
 import { formatCurrency } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { MoneyInput } from '@/components/common/MoneyInput'
 
 export function RecordSettlementDialog({
   open,
@@ -247,10 +248,9 @@ export function RecordSettlementDialog({
                 <label htmlFor="settlement-amt" className="text-xs font-medium text-stone-500">
                   Amount
                 </label>
-                <Input
+                <MoneyInput
                   id="settlement-amt"
-                  type="text"
-                  inputMode="decimal"
+                  currency={currency}
                   value={amountStr}
                   onChange={(e) => setAmountStr(normalizeAmountInput(e.target.value))}
                   onBlur={() =>
@@ -259,7 +259,8 @@ export function RecordSettlementDialog({
                       return next === s ? s : next
                     })
                   }
-                  className="mt-1 rounded-lg"
+                  className="mt-1"
+                  inputClassName="rounded-lg"
                 />
               </div>
             ) : (

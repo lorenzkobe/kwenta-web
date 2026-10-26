@@ -58,6 +58,7 @@ import { normalizeAmountInput, stripLeadingZerosAmount } from '@/lib/amount-inpu
 import { cn, formatCurrency } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { MoneyInput } from '@/components/common/MoneyInput'
 import { Textarea } from '@/components/ui/textarea'
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@/components/ui/select'
 import { SplitPersonSelector, type SplitMemberOption } from '@/components/common/SplitPersonSelector'
@@ -1115,9 +1116,8 @@ export function AddBillPage() {
                   <label className="text-sm font-medium">
                     {simpleSplitType === 'quantity' ? 'Unit price' : 'Total amount'}
                   </label>
-                  <Input
-                    type="text"
-                    inputMode="decimal"
+                  <MoneyInput
+                    currency={conv.currency}
                     placeholder="0.00"
                     value={simpleAmount}
                     onChange={(e) => {
@@ -1143,7 +1143,7 @@ export function AddBillPage() {
                         return next === prev ? prev : next
                       })
                     }
-                    className="text-lg font-semibold"
+                    inputClassName="text-lg font-semibold"
                   />
                 </div>
 
@@ -1394,11 +1394,11 @@ export function AddBillPage() {
                           value={item.name}
                           onChange={(e) => updateItem(item.key, { name: e.target.value })}
                         />
-                        <Input
-                          type="text"
-                          inputMode="decimal"
+                        <MoneyInput
+                          currency={conv.currency}
                           placeholder={item.splitType === 'quantity' ? 'Unit price' : '0.00'}
-                          className="rounded-lg sm:w-32"
+                          className="sm:w-32"
+                          inputClassName="rounded-lg"
                           value={item.amount}
                           onChange={(e) => {
                             const v = normalizeAmountInput(e.target.value)

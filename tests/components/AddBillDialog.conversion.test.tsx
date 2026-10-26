@@ -146,6 +146,10 @@ async function pickPaidIn(code: string) {
   })
 }
 
+function prefixOf(input: HTMLInputElement) {
+  return input.parentElement?.querySelector('[data-slot="currency-prefix"]')?.textContent ?? null
+}
+
 function saveButton() {
   return [...container.querySelectorAll('button')].find((b) => /Save (changes|bill)/.test(b.textContent ?? ''))!
 }
@@ -193,10 +197,13 @@ describe('AddBillDialog conversion', () => {
     await settle()
     const inputs = () => [...container.querySelectorAll('input')]
     await typeInto(inputs().find((i) => i.placeholder.startsWith('e.g.'))!, 'Hanoi dinner')
-    await typeInto(inputs().find((i) => i.placeholder === '0.00')!, '500000')
+    const total = inputs().find((i) => i.placeholder === '0.00')!
+    expect(prefixOf(total)).toBe('$')
+    await typeInto(total, '500000')
     expect(saveButton().disabled).toBe(false)
 
     await pickPaidIn('VND')
+    expect(prefixOf(inputs().find((i) => i.placeholder === '0.00' && !i.id)!)).toBe('₫')
     expect(saveButton().disabled).toBe(true)
     expect(container.textContent).toContain('Enter an exchange rate to save')
 
@@ -207,5 +214,22 @@ describe('AddBillDialog conversion', () => {
     expect(input.currency).toBe('USD')
     expect((input.conversion as { fromCurrency: string; source: string }).fromCurrency).toBe('VND')
     expect((input.conversion as { source: string }).source).toBe('manual')
+  })
+
+  it('an itemized line price shows the Paid-in currency symbol', async () => {
+    mocks.bill = null
+    await act(async () =>
+      root.render(
+        <AddBillDialog groupId="g1" groupCurrency="PHP" groupMembers={members} currentUserId="me" onClose={vi.fn()} />,
+      ),
+    )
+    await settle()
+    const itemized = [...container.querySelectorAll('button')].find((b) => b.textContent?.trim() === 'Itemized')!
+    await act(async () => itemized.click())
+    // The exchange-rate field also shows 0.00 and comes first once a conversion is open; it has an id.
+    const price = () => [...container.querySelectorAll('input')].find((i) => i.placeholder === '0.00' && !i.id)!
+    expect(prefixOf(price())).toBe('₱')
+    await pickPaidIn('VND')
+    expect(prefixOf(price())).toBe('₫')
   })
 })
