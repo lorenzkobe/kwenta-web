@@ -468,7 +468,11 @@ Settings offers **Dismiss** (online, refused entries only: discards the local ch
 **Retry** (same submission id). Applied entries are deleted. The header counts these from the
 `[actor_user_id+status+seq]` index — never a table scan (`RefreshButton`).
 
-Known gap (unchanged, 021b): a queued edit that loses to a newer server edit is reported applied.
+Known gap (021b, legacy rows only): since 081 a queued edit of a synced row carries its base
+version and is refused ("not applied") when another device saved first. Rows sent WITHOUT a base
+still fall to 021b: `kwenta_sync`'s replay of unsynced rows no queue entry owns (pre-v15 leftovers,
+legacy `push = null` entries) and older installs that send no bases. Such an older change is
+dropped without an error and the next pull replaces the local copy with the newer server row.
 
 ---
 
