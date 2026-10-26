@@ -17,5 +17,6 @@
       "cmd": "npm run build",
       "when": "source"
     }
-  ]
+  ],
+  "driver": "skill:verify"
 }
