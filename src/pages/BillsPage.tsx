@@ -97,6 +97,15 @@ export function BillsPage() {
   // Bumped whenever the loaded list is replaced or reset, so a slower answer for the old list
   // is dropped instead of being appended to the new one.
   const generation = useRef(0)
+  // A "Show more" tap whose answer arrives after the list was refreshed is asked again from the new
+  // last row instead of being lost. Each tap has its own token, so a late answer from an older tap
+  // can never re-issue a newer one; a filter, sort or tab change cancels the re-issue outright.
+  const tapSeq = useRef(0)
+  const pendingTap = useRef<number | null>(null)
+  const retapWanted = useRef(false)
+  const [retapAsk, setRetapAsk] = useState(0)
+  // The state drives the button; the ref is the guard, so a tap and a re-issue in the same tick cannot both fetch.
+  const loadingMoreRef = useRef(false)
 
   // The Shared tab has no controls: it always asks for everything, newest first.
   const bucket = tab
@@ -215,13 +224,17 @@ export function BillsPage() {
   const remaining = page ? matching - serverRows.length : 0
 
   const presentCategories = BILL_CATEGORIES.filter(
-    (c) => shownMeta?.categories.includes(c) || c === filterCategory,
+    (c) =>
+      shownMeta?.categories.includes(c) || c === filterCategory || unsent.newBills.some((b) => b.category === c),
   )
 
   const loadingBills = !userId || (billsQuery.loading && !billsQuery.data)
 
   function resetLoaded() {
     generation.current++
+    pendingTap.current = null
+    retapWanted.current = false
+    loadingMoreRef.current = false
     setMore(null)
     setLoadingMore(false)
     setReloading(false)
@@ -241,8 +254,11 @@ export function BillsPage() {
 
   async function showMore() {
     const last = serverRows[serverRows.length - 1]
-    if (!userId || !last || loadingMore || reloading) return
+    if (!userId || !last || loadingMoreRef.current || reloading) return
     const mine = generation.current
+    const token = ++tapSeq.current
+    pendingTap.current = token
+    loadingMoreRef.current = true
     setLoadingMore(true)
     try {
       const res = await fetchPersonalBillsPage(userId, {
@@ -253,7 +269,14 @@ export function BillsPage() {
         limit: PAGE_SIZE,
         after: cursorOf(last),
       })
-      if (mine !== generation.current) return
+      if (mine !== generation.current) {
+        if (pendingTap.current === token) {
+          retapWanted.current = true
+          setRetapAsk((n) => n + 1)
+        }
+        return
+      }
+      pendingTap.current = null
       const rows = res.data.rows
       setMore({
         key: endpointKey,
@@ -262,11 +285,25 @@ export function BillsPage() {
         matching: rows.length > 0 ? res.data.matching : serverRows.length,
       })
     } catch (error) {
+      if (pendingTap.current === token) pendingTap.current = null
       toast.error(error instanceof Error ? error.message : 'Could not load more bills.')
     } finally {
-      setLoadingMore(false)
+      // Only the latest tap clears it: a stale answer must not unlock the button over a newer request.
+      if (tapSeq.current === token && loadingMoreRef.current) {
+        loadingMoreRef.current = false
+        setLoadingMore(false)
+      }
     }
   }
+
+  const showMoreRef = useRef(showMore)
+  showMoreRef.current = showMore
+  useEffect(() => {
+    if (!retapWanted.current || reloading || loadingMoreRef.current) return
+    retapWanted.current = false
+    pendingTap.current = null
+    if (remaining > 0) void showMoreRef.current()
+  }, [retapAsk, reloading, remaining])
 
   // Fetched on tap rather than held: the page only ever has one screenful, and the full list is
   // needed once. Throws offline with no saved copy, which the dialog reports without exporting.

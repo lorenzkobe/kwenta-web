@@ -610,7 +610,7 @@ describe('BillsPage, server-paged', () => {
     expect(text().match(/Mine #041/g)).toHaveLength(1)
   })
 
-  it('C23 race: a Show more answer that lands after a reload started is dropped, not appended', async () => {
+  it('C23 race: a Show more answer that lands after a reload started is dropped and the tap re-issued against the reloaded list', async () => {
     await render()
     await click(button(/Show more/))
     server.gate = { match: (q) => q.after?.id === 'mine-040', release: [] }
@@ -623,14 +623,127 @@ describe('BillsPage, server-paged', () => {
     await act(async () => server.gate!.release.forEach((r) => r()))
     await settle()
 
+    // The stale answer is dropped, and the tap is re-issued against the reloaded list (it used to be
+    // lost, so the user had to tap again): the rest arrives once, and the deleted bill stays gone.
     expect(text()).not.toContain('Mine #030')
-    expect(text()).toContain('Mine #041')
-    expect(text()).not.toContain('Mine #045')
-    expect(text().match(/Mine #041/g)).toHaveLength(1)
-    expect(button(/Show more/)?.disabled).toBe(false)
-    await click(button(/Show more/))
     expect(text()).toContain('Mine #045')
     expect(text().match(/Mine #041/g)).toHaveLength(1)
+    expect(text().match(/Mine #045/g)).toHaveLength(1)
+    expect(button(/Show more/)).toBeUndefined()
+  })
+
+  it('edges: a Show more tap whose answer lands after a fresh first page is re-issued after the new last row', async () => {
+    await render()
+    server.gate = { match: (q) => q.after?.id === 'mine-020', release: [] }
+    await click(button(/Show more/))
+    const gate = server.gate
+    expect(gate.release).toHaveLength(1)
+    server.gate = null
+    // A bill added at the top while the tap is in flight shifts the list by one.
+    server.mine = [row('Mine', 0), ...server.mine]
+
+    await act(async () => useAppStore.getState().bumpDataVersion())
+    await settle()
+    const before = calls().length
+    await act(async () => gate.release.forEach((r) => r()))
+    await settle()
+
+    const after = calls().slice(before)
+    expect(after.filter((q) => q.after)).toHaveLength(1)
+    expect(after.find((q) => q.after)).toMatchObject({ limit: 20, after: { id: 'mine-019' } })
+    expect(text()).toContain('Mine #000')
+    expect(text()).toContain('Mine #039')
+    expect(text().match(/Mine #020/g)).toHaveLength(1)
+    expect(text()).not.toContain('Mine #040')
+  })
+
+  it('edges: a Show more tap followed by a filter change is not re-issued', async () => {
+    await render()
+    server.gate = { match: (q) => q.after?.id === 'mine-020', release: [] }
+    await click(button(/Show more/))
+    const gate = server.gate
+    server.gate = null
+    await choose('unsettled')
+    const before = calls().length
+    await act(async () => gate.release.forEach((r) => r()))
+    await settle()
+
+    expect(calls().slice(before).filter((q) => q.after)).toHaveLength(0)
+    expect(lastCall()).toMatchObject({ settled: 'unsettled' })
+  })
+
+  it('edges: tap A, filter change, tap B — A landing late re-issues nothing (each tap has its own token)', async () => {
+    await render()
+    server.gate = { match: (q) => q.after?.id === 'mine-020', release: [] }
+    await click(button(/Show more/))
+    const gateA = server.gate
+    await choose('unsettled')
+    // Unsettled rows are the odd ones, so the new first page ends at Mine #039.
+    server.gate = { match: (q) => q.after?.id === 'mine-039', release: [] }
+    await click(button(/Show more/))
+    const gateB = server.gate
+    expect(gateB.release).toHaveLength(1)
+    const before = calls().length
+
+    await act(async () => gateA.release.forEach((r) => r()))
+    await settle()
+    expect(calls().length).toBe(before)
+
+    await act(async () => gateB.release.forEach((r) => r()))
+    await settle()
+    expect(calls().length).toBe(before)
+    expect(text()).toContain('Mine #041')
+  })
+
+  it('edges: a re-issue and a user tap at the same moment never fetch the same next page twice', async () => {
+    await render()
+    server.gate = { match: (q) => q.after?.id === 'mine-020', release: [] }
+    await click(button(/Show more/))
+    const gate = server.gate
+    server.gate = null
+    server.mine = [row('Mine', 0), ...server.mine]
+    await act(async () => useAppStore.getState().bumpDataVersion())
+    await settle()
+    const before = calls().length
+
+    await act(async () => {
+      gate.release.forEach((r) => r())
+      button(/Show more/)?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    await settle()
+
+    const cursors = calls()
+      .slice(before)
+      .filter((q) => q.after)
+      .map((q) => q.after!.id)
+    expect(new Set(cursors).size).toBe(cursors.length)
+    expect(text().match(/Mine #020/g)).toHaveLength(1)
+  })
+
+  it('edges: a refresh that leaves nothing remaining makes no re-issued call', async () => {
+    await render()
+    server.gate = { match: (q) => q.after?.id === 'mine-020', release: [] }
+    await click(button(/Show more/))
+    const gate = server.gate
+    server.gate = null
+    server.mine = server.mine.slice(0, 20)
+    await act(async () => useAppStore.getState().bumpDataVersion())
+    await settle()
+    const before = calls().length
+
+    await act(async () => gate.release.forEach((r) => r()))
+    await settle()
+
+    expect(calls().length).toBe(before)
+    expect(button(/Show more/)).toBeUndefined()
+  })
+
+  it('edges: a category used only by an unsent bill gets a filter chip', async () => {
+    server.categories = ['transport']
+    await stageNew([{ ...STAGED, category: 'groceries' }])
+    await render()
+    expect(button(/^Transport$/)).toBeDefined()
+    expect(button(/^Groceries$/)).toBeDefined()
   })
 
   it('C20: a filter change after Show more drops the appended rows and starts again at 20', async () => {
