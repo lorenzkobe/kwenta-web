@@ -89,16 +89,41 @@ describe('computeSplits', () => {
       expect(sumAmounts(result)).toBe(100)
     })
 
-    it('keeps explicit amounts when there is nothing left to distribute', () => {
+    it('keeps explicit amounts when they cover the total exactly and leave nothing to distribute', () => {
+      const splits: SplitInput[] = [
+        { userId: 'a', splitType: 'custom', splitValue: 50 },
+        { userId: 'b', splitType: 'custom', splitValue: 0 },
+      ]
+      expect(computeSplits(50, splits)).toEqual([
+        { userId: 'a', computedAmount: 50 },
+        { userId: 'b', computedAmount: 0 },
+      ])
+    })
+
+    // This used to keep 60 on a 50 bill as typed; the user decided an overflow is refused instead.
+    it('refuses shares that add up to more than the item total', () => {
       const splits: SplitInput[] = [
         { userId: 'a', splitType: 'custom', splitValue: 60 },
         { userId: 'b', splitType: 'custom', splitValue: 0 },
       ]
-      // total custom (60) already >= amount (50) → remaining <= 0
-      expect(computeSplits(50, splits)).toEqual([
-        { userId: 'a', computedAmount: 60 },
-        { userId: 'b', computedAmount: 0 },
-      ])
+      expect(() => computeSplits(50, splits)).toThrow('Custom shares add up to more than the item total.')
+    })
+
+    it('refuses an overflow of a single cent', () => {
+      const splits: SplitInput[] = [
+        { userId: 'a', splitType: 'custom', splitValue: 50 },
+        { userId: 'b', splitType: 'custom', splitValue: 50.01 },
+      ]
+      expect(() => computeSplits(100, splits)).toThrow('Custom shares add up to more than the item total.')
+    })
+
+    it('does not refuse a float sum that is exactly the total in cents', () => {
+      const splits: SplitInput[] = [
+        { userId: 'a', splitType: 'custom', splitValue: 33.33 },
+        { userId: 'b', splitType: 'custom', splitValue: 33.33 },
+        { userId: 'c', splitType: 'custom', splitValue: 33.34 },
+      ]
+      expect(sumAmounts(computeSplits(100, splits))).toBe(100)
     })
   })
 })

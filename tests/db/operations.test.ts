@@ -226,6 +226,33 @@ describe('createBill', () => {
     expect(log?.action).toBe('created')
   })
 
+  it('refuses custom shares that add up to more than the item and sends nothing', async () => {
+    await db.profiles.bulkAdd([makeProfile({ id: 'ME' }), makeProfile({ id: 'FR' })])
+    const callsBefore = cloudCalls.calls
+    await expect(
+      createBill({
+        title: 'Lunch',
+        currency: 'PHP',
+        groupId: null,
+        createdBy: 'ME',
+        note: '',
+        items: [
+          {
+            name: 'Pizza',
+            amount: 100,
+            splits: [
+              { userId: 'ME', splitType: 'custom', splitValue: 70 },
+              { userId: 'FR', splitType: 'custom', splitValue: 40 },
+            ],
+          },
+        ],
+      }),
+    ).rejects.toThrow('Custom shares add up to more than the item total.')
+    expect(cloudCalls.calls).toBe(callsBefore)
+    expect(await db.bills.count()).toBe(0)
+    expect(await db.pending_mutations.count()).toBe(0)
+  })
+
   it('honors an explicit paidBy', async () => {
     const billId = await createBill({
       title: 'Dinner',

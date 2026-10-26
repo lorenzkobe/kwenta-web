@@ -91,6 +91,10 @@ function computeCustom(
   splits: SplitInput[],
 ): { userId: string; computedAmount: number }[] {
   const totalCustom = splits.reduce((sum, s) => sum + s.splitValue, 0)
+  // Cents, not floats: 33.33 + 33.33 + 33.34 must not read as more than 100.
+  if (Math.round(totalCustom * 100) > Math.round(amount * 100)) {
+    throw new Error('Custom shares add up to more than the item total.')
+  }
   const remaining = Math.round((amount - totalCustom) * 100) / 100
 
   if (remaining <= 0) {
