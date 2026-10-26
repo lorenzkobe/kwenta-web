@@ -135,6 +135,8 @@ const ENDPOINT_LABELS: Record<string, string> = {
   bill: 'this bill',
   'bill-payments': "this bill's payments",
   bills: 'your bills',
+  'personal-bills': 'your bills',
+  'personal-bills-page': 'your bills',
   'recent-bills': 'your recent bills',
   person: 'this person',
   'person-payments': "this person's payments",
@@ -310,6 +312,28 @@ export type PersonalBillRow = {
 }
 
 export type PersonalBillBuckets = { mine: PersonalBillRow[]; shared: PersonalBillRow[] }
+
+/** The last row a reader holds: the next page starts strictly after it in the chosen sort. */
+export type PersonalBillCursor = { id: string; createdAt: string; title: string }
+
+export type PersonalBillsPageQuery = {
+  bucket: 'mine' | 'shared'
+  limit: number
+  after?: PersonalBillCursor
+  settled: 'all' | 'settled' | 'unsettled'
+  category: string | null
+  sort: 'date_desc' | 'date_asc' | 'title_asc' | 'title_desc'
+}
+
+/** `matching` counts the filtered bucket; `mine`/`shared` are the unfiltered tab totals. */
+export type PersonalBillsPage = {
+  rows: PersonalBillRow[]
+  matching: number
+  mine: number
+  shared: number
+  /** Categories present in the unfiltered `mine` bucket, for the filter chips. */
+  categories: string[]
+}
 
 function toBillRow(row: Record<string, unknown>): PersonalBillRow {
   const participants = Array.isArray(row.participants)
@@ -645,6 +669,73 @@ export async function fetchPersonalBills(userId: string) {
       return { mine: bucket(o.mine), shared: bucket(o.shared) }
     },
   )
+}
+
+export function personalBillsPageKey(q: Omit<PersonalBillsPageQuery, 'limit' | 'after'>): string {
+  return `personal-bills-page:${q.bucket}:${q.settled}:${q.category ?? ''}:${q.sort}`
+}
+
+function toBillsPage(data: unknown): PersonalBillsPage {
+  const o = (data ?? {}) as Record<string, unknown>
+  const count = (v: unknown) => (Number.isFinite(Number(v)) ? Number(v) : 0)
+  return {
+    rows: Array.isArray(o.rows) ? (o.rows as Record<string, unknown>[]).map(toBillRow) : [],
+    matching: count(o.matching),
+    mine: count(o.mine),
+    shared: count(o.shared),
+    categories: Array.isArray(o.categories)
+      ? o.categories.filter((c): c is string => typeof c === 'string')
+      : [],
+  }
+}
+
+/**
+ * One page of the Bills list.
+ *
+ * The FIRST page (no `after`) is an ordinary cached read: the key leaves the limit out, so a
+ * saved copy answers offline whatever the limit, and every argument rides `extraArgs` because
+ * `kwenta_write` recomputes by id/limit only — a write must never be asked to restate this
+ * endpoint, the page refetches itself.
+ *
+ * A page `after` a row is a "Show more" step: always live, never cached and never primed. Caching
+ * it would hand a later first-page read rows from the middle of the list, and a saved copy of
+ * "the rows after X" answers nothing once X is gone.
+ */
+export async function fetchPersonalBillsPage(userId: string, query: PersonalBillsPageQuery) {
+  const args = {
+    p_bucket: query.bucket,
+    p_limit: query.limit,
+    p_settled: query.settled,
+    p_category: query.category,
+    p_sort: query.sort,
+  }
+  if (!query.after) {
+    return fetchEndpoint<PersonalBillsPage>(
+      personalBillsPageKey(query),
+      userId,
+      { fn: 'kwenta_personal_bills_page', extraArgs: args },
+      toBillsPage,
+    )
+  }
+
+  if (typeof navigator !== 'undefined' && !navigator.onLine) {
+    throw new ApiError("You're offline. Connect to load more of your bills.")
+  }
+  try {
+    const { data: raw, error } = await supabase.rpc('kwenta_personal_bills_page', {
+      ...args,
+      p_after: query.after,
+    })
+    if (error) throw error
+    const data = toBillsPage(raw)
+    refreshOnlineStatus()
+    return { data, fromCache: false, fetchedAt: now() }
+  } catch (err) {
+    if (isAccessError(err)) {
+      throw new ApiError(`You no longer have access to ${describeEndpoint('personal-bills-page')}.`, err)
+    }
+    throw new ApiError(`Could not load more of ${describeEndpoint('personal-bills-page')}.`, err)
+  }
 }
 
 export async function fetchRecentBills(userId: string, limit = 5) {

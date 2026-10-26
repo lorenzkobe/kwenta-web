@@ -294,6 +294,8 @@ export async function submitCloudWrite(input: {
    * later entry drains).
    */
   preserveLocalKeys?: ReadonlySet<string>
+  /** Endpoint families this write cannot change (`readsUnaffectedBy`): left out of `p_reads`. */
+  unaffectedReads?: readonly string[]
 }): Promise<{ stored: number; versions: Map<string, string> }> {
   if (isCloudWritePayloadEmpty(input.payload)) {
     throw new CloudWriteRejectedError('Nothing to save.', 'EMPTY_PAYLOAD')
@@ -315,7 +317,7 @@ export async function submitCloudWrite(input: {
   let rpcError: unknown = null
   // Which endpoints are on screen right now. The server recomputes exactly these AFTER applying
   // the push and hands them back, so the re-read triggered below costs no request.
-  const reads = mountedReadSpecs()
+  const reads = mountedReadSpecs(input.unaffectedReads)
   let usedWriteRpc = false
 
   if (writeRpcSupported !== false) {
@@ -552,6 +554,11 @@ export async function commitCloudFirstWrite(input: {
   pending: QueuedWriteMeta
   /** Stable id for this logical write; see submitCloudWrite. Generated when omitted. */
   submissionId?: string
+  /**
+   * Endpoint families this write cannot change (`readsUnaffectedBy`). Online success leaves them
+   * out of `p_reads` and out of the refetch; a queued write still invalidates every screen.
+   */
+  unaffectedReads?: readonly string[]
 }): Promise<{ mode: 'cloud' | 'queued'; submissionId: string }> {
   const submissionId = input.submissionId ?? generateId()
   const epoch = currentSessionEpoch()
@@ -585,7 +592,7 @@ export async function commitCloudFirstWrite(input: {
     // Tracked so the realtime path can wait for this write's rows to be mirrored before it
     // decides whether their events are this write's own echoes.
     await trackCloudWrite(
-      submitCloudWrite({ actorUserId: input.actorUserId, payload, submissionId }),
+      submitCloudWrite({ actorUserId: input.actorUserId, payload, submissionId, unaffectedReads: input.unaffectedReads }),
     )
   } catch (err) {
     if (
@@ -601,6 +608,6 @@ export async function commitCloudFirstWrite(input: {
   refreshOnlineStatus()
   // Balances are computed on the server now, so a saved bill only reaches the screen when the
   // server-backed reads run again. Without this the user saves and nothing visibly changes.
-  useAppStore.getState().bumpDataVersion()
+  useAppStore.getState().bumpDataVersion(input.unaffectedReads)
   return { mode: 'cloud', submissionId }
 }

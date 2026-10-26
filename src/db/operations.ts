@@ -18,6 +18,7 @@ import { commitCloudFirstWrite, submitGroupDelete, type ClientWriteKeys, type Cl
 import { refreshOnlineStatus } from '@/lib/online-status'
 import { trackCloudWrite } from '@/sync/in-flight-writes'
 import { useAppStore } from '@/store/app-store'
+import { readsUnaffectedBy } from '@/api/read-scope'
 import { loadBillIntoMirror, loadedRowsSyncedSince, type LoadedBillVersion } from '@/sync/bill-mirror'
 import { fullSync, rowKey } from '@/sync/sync-service'
 import { ensureGroupInMirror, GroupUnavailableError, refreshGroupIntoMirror } from '@/sync/group-mirror'
@@ -384,6 +385,7 @@ export async function createBill(input: CreateBillInput): Promise<string> {
   const { mode, submissionId } = await commitCloudFirstWrite({
     actorUserId: input.createdBy,
     payload,
+    unaffectedReads: readsUnaffectedBy(payload, { createsBill: true }),
     pending: {
       operation: 'create_bill',
       entityType: 'bill',
@@ -1728,9 +1730,11 @@ async function commitSettlementRows(input: {
     routeHint: string
   }
 }): Promise<{ mode: 'cloud' | 'queued'; submissionId: string }> {
+  const payload = { settlements: input.settlements, activity_log: [input.activity] }
   return commitCloudFirstWrite({
     actorUserId: input.actorUserId,
-    payload: { settlements: input.settlements, activity_log: [input.activity] },
+    payload,
+    unaffectedReads: readsUnaffectedBy(payload),
     pending: {
       operation: input.pending.operation,
       entityType: 'settlement',
@@ -1840,9 +1844,11 @@ export async function createSettlement(
     options.collect.settlements.push(settlement)
     options.collect.activity_log.push(settlementActivity)
   } else {
+    const payload = { settlements: [settlement], activity_log: [settlementActivity] }
     const committed = await commitCloudFirstWrite({
       actorUserId: markedBy,
-      payload: { settlements: [settlement], activity_log: [settlementActivity] },
+      payload,
+      unaffectedReads: readsUnaffectedBy(payload),
       pending: {
         operation: options?.syncOperation ?? 'create_settlement',
         entityType: 'settlement',
@@ -2289,9 +2295,11 @@ export async function recordPersonPayment(params: {
   // contexts, so a partial landing would misstate the balance in both directions — the group leg
   // cleared but the personal one not, or the reverse. One RPC is one Postgres transaction, so
   // either all legs are stored or none are.
+  const payload = { settlements: collect.settlements, activity_log: collect.activity_log }
   const { mode, submissionId } = await commitCloudFirstWrite({
     actorUserId: params.markedBy,
-    payload: { settlements: collect.settlements, activity_log: collect.activity_log },
+    payload,
+    unaffectedReads: readsUnaffectedBy(payload),
     pending: {
       operation: 'record_person_payment',
       entityType: 'settlement',

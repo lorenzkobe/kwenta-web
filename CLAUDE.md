@@ -380,6 +380,11 @@ was the saved copy).
 An access-lost `ApiError` or `ServerDeclinedError` clears the seeded copy. The seed is chosen
 during render, so a subject change never paints the previous subject for a frame.
 
+**Payloads are kept small (083).** Three rules, detail in migration `083`'s header:
+- `kwenta_group_detail.rawDebts` is already **netted**: one `{from, to, amount}` per unordered pair of literal ids, in integer cents, zero nets dropped, ordered by from, to — never one edge per split. `buildDebtGraph` over it is a no-op (same pair nets); the order is what keeps the greedy `buildSuggestedPayers` stable across loads. Do not add a per-split list back.
+- The **Bills page pages on the server**: `kwenta_personal_bills_page` (built over `kwenta_personal_bills()`, so one row shape) returns 20 rows per tab with server-side filter, category, sort and counts (`{rows, matching, mine, shared, categories}`); Paging is keyset: `p_after` = the last loaded row's `{id, createdAt, title}` returns the next 20 after that position (compared on key values, so a deleted cursor row still works), with no 500-row ceiling on the walk. Export fetches the full list (`fetchPersonalBills`) on tap. The page endpoint is never primed by a write: `kwenta_read` dispatches only `fn`/`id`/`limit`, so the page refetches the pages it holds after a write. The full endpoint stays for Export and installed older builds.
+- **Scoped refresh.** A write skips refreshing screens it provably cannot change: a new bill skips the three payment-history families (`group-payments`, `bill-payments`, `person-payments`), a payment-only write skips `group-spending`; `updateBill`/`deleteBill` and every mixed payload skip nothing. `readsUnaffectedBy` (`src/api/read-scope.ts`) decides; `commitCloudFirstWrite` drops those families from `p_reads` and the store records per-family skipped-bump counts, which `useServerData` subtracts (`relevantDataVersion`) so coalesced bumps never lose a real invalidation. Queued/offline writes and every non-write bump (realtime, sync, Refresh) invalidate everything.
+
 What is left in TypeScript is pure transforms of bounded input, each with its Vitest coverage:
 `computeSplits`, `buildSuggestedPayers` (`settlement-suggestions.ts`), `buildMovementChains`
 (`settlement.ts`), `buildMoneyFlowRows` + `collapsePaymentLegs` (`money-flow.ts`),
@@ -848,7 +853,7 @@ Each of these reflects a real past correction in this repo:
 2. **Deletion is server-authoritative.** A device is sent only its own profile plus its own
    local contacts, so it can never conclude that a person/bill/group does not exist. No
    client-side soft-delete driven by a missing row — ever.
-3. **Migrations are append-only.** Next number: **`083`**. Never edit a past migration.
+3. **Migrations are append-only.** Next number: **`084`**. Never edit a past migration.
    **Every migration carries its own explanatory header** — what broke, why the shape is
    what it is, and whether it must be applied before the code that uses it ships. That
    header is the canonical record; read it rather than trusting any summary. A signature or

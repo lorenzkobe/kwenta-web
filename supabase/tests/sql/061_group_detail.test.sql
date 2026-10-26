@@ -213,22 +213,27 @@ BEGIN
   PERFORM test.assert_money((debts -> 0 ->> 'amount')::numeric, 50, 'their share');
   PERFORM test.as_owner();
 
-  -- A settled payment enters as a debt in the OPPOSITE direction, which the client's
-  -- buildDebtGraph nets against the original rather than subtracting from it.
-  PERFORM test.new_settlement(bob, alice, 50, g, NULL, 'PHP');
+  -- A settled payment counts in the OPPOSITE direction and cancels against the split debt.
+  -- Updated for 083: rawDebts is now netted per pair on the server (one edge per pair, zero nets
+  -- dropped) instead of shipping the payment as a second reversed edge for the client to net.
+  PERFORM test.new_settlement(bob, alice, 20, g, NULL, 'PHP');
+
+  PERFORM test.as_user(alice);
+  debts := public.kwenta_group_detail(g) -> 'rawDebts';
+  PERFORM test.assert_eq(jsonb_array_length(debts), 1, 'a partial payment nets into the one pair edge');
+  PERFORM test.assert_eq(debts -> 0 ->> 'from', bob::text, 'the splitter still owes');
+  PERFORM test.assert_money((debts -> 0 ->> 'amount')::numeric, 30, '50 owed less the 20 paid');
+  PERFORM test.as_owner();
+
+  PERFORM test.new_settlement(bob, alice, 30, g, NULL, 'PHP');
 
   PERFORM test.as_user(alice);
   d := public.kwenta_group_detail(g);
   debts := d -> 'rawDebts';
-  PERFORM test.assert_eq(jsonb_array_length(debts), 2, 'the payment is a second, reversed edge');
-  PERFORM test.assert_true(
-    EXISTS (SELECT 1 FROM jsonb_array_elements(debts) e
-            WHERE e ->> 'from' = alice::text AND e ->> 'to' = bob::text
-              AND (e ->> 'amount')::numeric = 50),
-    'the reversed edge runs payer-ward');
+  PERFORM test.assert_eq(jsonb_array_length(debts), 0, 'a payment that clears the pair leaves no edge');
   PERFORM test.as_owner();
 
-  PERFORM test.note('rawDebts: split edges plus reversed settlement edges');
+  PERFORM test.note('rawDebts: split edges netted against settled payments per pair');
 END;
 $$;
 

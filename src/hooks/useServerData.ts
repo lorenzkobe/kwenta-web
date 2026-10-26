@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { useAppStore } from '@/store/app-store'
+import { relevantDataVersion, useAppStore } from '@/store/app-store'
 import { markReadMounted, markReadUnmounted } from '@/api/primed-reads'
 import { readCache } from '@/api/cache'
 import { ApiError, ServerDeclinedError } from '@/api/balances'
@@ -120,7 +120,7 @@ export function useServerData<T>(
   deps: readonly unknown[],
   endpointKey?: string,
 ): ServerDataState<T> {
-  const dataVersion = useAppStore((s) => s.dataVersion)
+  const dataVersion = useAppStore((s) => relevantDataVersion(s, endpointKey))
   const isOnline = useAppStore((s) => s.isOnline)
   const currentUserId = useAppStore((s) => s.currentUserId)
 

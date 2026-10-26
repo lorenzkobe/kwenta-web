@@ -19,6 +19,8 @@
  * as a string, a null total that must be dropped rather than read as a zero balance.
  */
 
+import { endpointFamily } from '@/api/read-scope'
+
 /** One entry of `kwenta_write`'s `p_reads`. Shaped like the SQL argument so nothing translates. */
 export type ReadSpec = {
   /** The api cache key this answers, e.g. `overview`, `group:<uuid>`. */
@@ -37,10 +39,11 @@ export type ReadSpec = {
   limit?: number
   /**
    * Arguments the direct RPC call needs that `p_reads` cannot express — `kwenta_read` dispatches
-   * on one uuid or one limit, nothing else. A spec carrying these is never sent to the server for
-   * recomputation, which is correct: the only such endpoint is the member-breakdown guard, which
-   * is deliberately outside `kwenta_read`'s whitelist and must never be served from anywhere but a
-   * live call.
+   * on one uuid or one limit, nothing else. A spec carrying these is never sent in `p_reads`:
+   *  - the member-breakdown guard is deliberately outside `kwenta_read`'s whitelist and must only
+   *    be served from a live call;
+   *  - `kwenta_personal_bills_page` takes bucket/filter/sort arguments `kwenta_read` cannot pass,
+   *    so a write refetches its first N rows instead of having them recomputed.
    */
   extraArgs?: Record<string, unknown>
 }
@@ -112,13 +115,16 @@ export function markReadUnmounted(key: string): void {
 
 /**
  * The specs a write should ask the server to recompute: the endpoints currently on screen that
- * have been fetched at least once, so their RPC and arguments are known.
+ * have been fetched at least once, so their RPC and arguments are known. `skipFamilies` drops the
+ * endpoints the write cannot have changed (see `readsUnaffectedBy`).
  */
-export function mountedReadSpecs(): ReadSpec[] {
+export function mountedReadSpecs(skipFamilies?: readonly string[]): ReadSpec[] {
   const out: ReadSpec[] = []
   for (const key of mountedKeys.keys()) {
     const spec = specsByKey.get(key)
-    if (spec && !spec.extraArgs) out.push(spec)
+    if (!spec || spec.extraArgs) continue
+    if (skipFamilies?.includes(endpointFamily(key))) continue
+    out.push(spec)
   }
   return out
 }

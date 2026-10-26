@@ -1,10 +1,16 @@
-import { useCallback, useMemo, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Plus, ReceiptText, Share2, Trash2, Users } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { toast } from 'sonner'
 import { useLiveQuery } from 'dexie-react-hooks'
+import { db } from '@/db/db'
 import { deleteBill } from '@/db/operations'
-import { fetchPersonalBills, type PersonalBillRow } from '@/api/balances'
+import {
+  fetchPersonalBills,
+  fetchPersonalBillsPage,
+  personalBillsPageKey,
+  type PersonalBillRow,
+} from '@/api/balances'
 import { useServerData } from '@/hooks/useServerData'
 import { loadStagedPersonalBillRows } from '@/lib/staged-rows'
 import { SavedCopyNotice } from '@/components/common/SavedCopyNotice'
@@ -34,8 +40,50 @@ import {
 type BillFilter = 'all' | 'settled' | 'unsettled'
 type BillSort = 'date_desc' | 'date_asc' | 'title_asc' | 'title_desc'
 
+const PAGE_SIZE = 20
+
 /** A server row plus one fact only this device knows: whether the write is still queued. */
 type EnrichedBill = PersonalBillRow & { pending: boolean }
+
+type PageMeta = { mine: number; shared: number; categories: string[] }
+
+/** Rows loaded past the first page by "Show more", for the list identified by `key`. */
+type MoreRows = { key: string; rows: PersonalBillRow[]; matching: number }
+
+/** The largest page the server returns in one call (kwenta_personal_bills_page clamps `p_limit`). */
+const MAX_PAGE_ROWS = 500
+
+const EMPTY_UNSENT = { newBills: [] as PersonalBillRow[], pendingIds: new Set<string>() }
+
+const cursorOf = (b: PersonalBillRow) => ({ id: b.id, createdAt: b.createdAt, title: b.title })
+
+/**
+ * Unsent bills this device holds, split by whether the server has ever seen them.
+ *
+ * `loadStagedPersonalBillRows` returns every personal bill with an unsent write, which includes an
+ * offline EDIT of a bill the server already holds. Only a bill whose `create_bill` is still in the
+ * write queue is new to the server; counting or prepending an edit would double-count it and put
+ * it above rows it sorts below. (`synced_at` cannot tell them apart: an edit clears it too.)
+ */
+async function loadUnsentBills(userId: string) {
+  const [rows, creates] = await Promise.all([
+    loadStagedPersonalBillRows(userId),
+    db.pending_mutations
+      .where('actor_user_id')
+      .equals(userId)
+      .filter(
+        (m) =>
+          m.operation === 'create_bill' &&
+          (m.status === 'pending' || m.status === 'conflict' || m.status === 'blocked_by_earlier'),
+      )
+      .toArray(),
+  ])
+  const created = new Set(creates.map((m) => m.entity_id))
+  return {
+    newBills: rows.filter((b) => created.has(b.id)),
+    pendingIds: new Set(rows.map((b) => b.id)),
+  }
+}
 
 export function BillsPage() {
   const { userId } = useCurrentUser()
@@ -45,113 +93,190 @@ export function BillsPage() {
   const [tab, setTab] = useState<'mine' | 'shared'>('mine')
   const [deleteTarget, setDeleteTarget] = useState<{ id: string; title: string } | null>(null)
   const [exportOpen, setExportOpen] = useState(false)
-  const [myBillsShown, setMyBillsShown] = useState(10)
-  const [sharedBillsShown, setSharedBillsShown] = useState(10)
-  const [lastFilterKey, setLastFilterKey] = useState(`${filter}|${sort}|${filterCategory}`)
-  const filterKey = `${filter}|${sort}|${filterCategory}`
-  let resolvedMyBillsShown = myBillsShown
-  if (filterKey !== lastFilterKey) {
-    setLastFilterKey(filterKey)
-    setMyBillsShown(10)
-    resolvedMyBillsShown = 10
-  }
+  const [more, setMore] = useState<MoreRows | null>(null)
+  const [loadingMore, setLoadingMore] = useState(false)
+  const [reloading, setReloading] = useState(false)
+  // Bumped whenever the loaded list is replaced or reset, so a slower answer for the old list
+  // is dropped instead of being appended to the new one.
+  const generation = useRef(0)
 
-  // One call returns both buckets with participants, payer, item count and the settled flag
-  // already resolved. This replaced a per-bill fan-out: each bill re-read its own items, resolved
-  // every participant name, and asked isPersonalBillFullySettled — which computes a whole
-  // person-level tab. The Shared tab is no longer lazy because it costs nothing extra now.
+  // The Shared tab has no controls: it always asks for everything, newest first.
+  const bucket = tab
+  const settled = tab === 'mine' ? filter : 'all'
+  const category = tab === 'mine' ? filterCategory : null
+  const sortKey = tab === 'mine' ? sort : 'date_desc'
+  const endpointKey = personalBillsPageKey({ bucket, settled, category, sort: sortKey })
+
+  // The first page is an ordinary cached read (paints a saved copy, refetches on every bump).
+  // "Show more" asks only for the rows after the last one held, so nothing already loaded is
+  // downloaded again and a bill added meanwhile cannot shift a row onto two pages.
   const loadBills = useCallback(
-    () => (userId ? fetchPersonalBills(userId) : Promise.reject(new Error('no user'))),
-    [userId],
+    () =>
+      userId
+        ? fetchPersonalBillsPage(userId, { bucket, limit: PAGE_SIZE, settled, category, sort: sortKey })
+        : Promise.reject(new Error('no user')),
+    [userId, bucket, settled, category, sortKey],
   )
-  const billsQuery = useServerData(userId ? loadBills : null, [userId, loadBills], 'personal-bills')
+  const billsQuery = useServerData(userId ? loadBills : null, [userId, endpointKey], endpointKey)
+  const page = billsQuery.data
+  const extraRows = more && more.key === endpointKey ? more.rows : []
+  const extraCount = useRef(0)
+  useEffect(() => {
+    extraCount.current = extraRows.length
+  })
+
+  // A fresh first page (a write, a sync, Refresh) means the rows loaded past it may be stale:
+  // reload exactly that many, in one call or successive ones of at most 500, and replace them.
+  // They stay on screen meanwhile — the list never snaps back to 20.
+  //
+  // A fresh first page always supersedes a "Show more" still in flight (its rows were fetched
+  // against the old list), and "Show more" is off while this reload runs, so the two can never
+  // write the list in an order that resurrects a deleted bill or drops appended rows.
+  useEffect(() => {
+    if (!userId || !page || billsQuery.fromCache) {
+      setReloading(false)
+      return
+    }
+    const mine = ++generation.current
+    const held = extraCount.current
+    if (held === 0) {
+      setReloading(false)
+      return
+    }
+    setReloading(true)
+    let cancelled = false
+    void (async () => {
+      try {
+        const rows: PersonalBillRow[] = []
+        let last = page.rows[page.rows.length - 1]
+        let matching = page.matching
+        while (last && rows.length < held) {
+          const res = await fetchPersonalBillsPage(userId, {
+            bucket,
+            settled,
+            category,
+            sort: sortKey,
+            limit: Math.min(held - rows.length, MAX_PAGE_ROWS),
+            after: cursorOf(last),
+          })
+          if (cancelled || mine !== generation.current) return
+          if (res.data.rows.length === 0) break
+          rows.push(...res.data.rows)
+          last = rows[rows.length - 1]
+          matching = res.data.matching
+        }
+        setMore({ key: endpointKey, rows, matching })
+      } catch {
+        // The rows already on screen stay; the next bump reloads them.
+      } finally {
+        if (mine === generation.current) setReloading(false)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [page, billsQuery.fromCache, userId, bucket, settled, category, sortKey, endpointKey])
+
+  // Tab totals and category chips come with every page, but a tab switch or a filter change has no
+  // page for a moment; keep the last ones so the badges and the filter row do not blink away.
+  const [meta, setMeta] = useState<PageMeta | null>(null)
+  if (page && (meta?.mine !== page.mine || meta.shared !== page.shared || meta.categories !== page.categories)) {
+    setMeta({ mine: page.mine, shared: page.shared, categories: page.categories })
+  }
+  const shownMeta = page ?? meta
 
   // The one fact the server cannot know: which of these rows this device has not sent yet.
   // Written offline, it is queued locally and must be flagged rather than shown as confirmed.
-  // These rows are also the ONLY source for a bill the server has never seen — decorating the
-  // server's response could never surface one, so an offline save appeared nowhere at all.
-  const stagedBills = useLiveQuery(
-    async () => (userId ? loadStagedPersonalBillRows(userId) : []),
+  // A bill the server has never seen is the ONLY thing decorating cannot surface, so those rows
+  // are added; an unsent edit of a bill the server holds only flags that bill's row.
+  const unsent = useLiveQuery(
+    async () => (userId ? loadUnsentBills(userId) : EMPTY_UNSENT),
     [userId],
-    [] as PersonalBillRow[],
-  )
-  const unsentBillIds = useMemo(() => new Set(stagedBills.map((b) => b.id)), [stagedBills])
-
-  const withPending = useCallback(
-    (rows: PersonalBillRow[] | undefined): EnrichedBill[] =>
-      (rows ?? []).map((b) => ({ ...b, pending: unsentBillIds.has(b.id) })),
-    [unsentBillIds],
+    EMPTY_UNSENT,
   )
 
-  const myBills = useMemo(() => {
-    if (!billsQuery.data) return undefined
-    const confirmed = withPending(billsQuery.data.mine)
-    // A staged bill the server has already accepted comes back in `mine`; keep the server's copy
-    // so a row never renders twice while `synced_at` catches up.
-    const seen = new Set(confirmed.map((b) => b.id))
-    const staged = stagedBills
-      .filter((b) => !seen.has(b.id))
-      .map((b) => ({ ...b, pending: true }))
-    return [...staged, ...confirmed]
-  }, [billsQuery.data, withPending, stagedBills])
-  const sharedEnriched = useMemo(
-    () => (billsQuery.data ? withPending(billsQuery.data.shared) : undefined),
-    [billsQuery.data, withPending],
+  const serverRows: EnrichedBill[] = [...(page?.rows ?? []), ...extraRows].map((b) => ({
+    ...b,
+    pending: unsent.pendingIds.has(b.id),
+  }))
+
+  // A new bill the server already returned keeps the server's copy, so a row never renders twice
+  // while `synced_at` catches up. New bills are unsettled, so they match only the filters that
+  // admit an unsettled bill of their category, and they sit above the server's rows.
+  const loadedIds = new Set(serverRows.map((b) => b.id))
+  const unsentOnly = unsent.newBills.filter((b) => !loadedIds.has(b.id))
+  const unsentMatching: EnrichedBill[] = unsentOnly
+    .filter((b) => filter !== 'settled' && (!filterCategory || b.category === filterCategory))
+    .map((b) => ({ ...b, pending: true }))
+
+  const myBills = tab === 'mine' ? [...unsentMatching, ...serverRows] : []
+  const sharedBills = tab === 'shared' ? serverRows : []
+  const myTotal = (shownMeta?.mine ?? 0) + unsentOnly.length
+  const sharedTotal = shownMeta?.shared ?? 0
+  const matching = extraRows.length > 0 && more ? more.matching : (page?.matching ?? 0)
+  const remaining = page ? matching - serverRows.length : 0
+
+  const presentCategories = BILL_CATEGORIES.filter(
+    (c) => shownMeta?.categories.includes(c) || c === filterCategory,
   )
-
-  // Counted off the rendered lists, not the raw response, so the tab badges and the header total
-  // agree with what is actually on screen once staged bills are included.
-  const counts = useMemo(() => {
-    if (myBills === undefined) return undefined
-    return {
-      my: myBills.length,
-      shared: sharedEnriched?.length ?? 0,
-      myCategories: myBills.map((b) => b.category),
-    }
-  }, [myBills, sharedEnriched])
-
-  const billBuckets = myBills === undefined ? undefined : { myBills, sharedBills: sharedEnriched ?? [] }
-
-  const bills = useMemo(() => {
-    const list = billBuckets?.myBills ?? []
-    let out = list
-    if (filter === 'settled') out = out.filter((b) => b.settled)
-    if (filter === 'unsettled') out = out.filter((b) => !b.settled)
-    if (filterCategory) out = out.filter((b) => b.category === filterCategory)
-    const copy = [...out]
-    copy.sort((a, b) => {
-      switch (sort) {
-        case 'date_desc':
-          return b.createdAt.localeCompare(a.createdAt)
-        case 'date_asc':
-          return a.createdAt.localeCompare(b.createdAt)
-        case 'title_asc':
-          return a.title.localeCompare(b.title, undefined, { sensitivity: 'base' })
-        case 'title_desc':
-          return b.title.localeCompare(a.title, undefined, { sensitivity: 'base' })
-        default:
-          return 0
-      }
-    })
-    return copy
-  }, [billBuckets?.myBills, filter, sort, filterCategory])
-
-  const sharedBills = useMemo(() => {
-    const list = [...(billBuckets?.sharedBills ?? [])]
-    list.sort((a, b) => b.createdAt.localeCompare(a.createdAt))
-    return list
-  }, [billBuckets?.sharedBills])
-
-  const presentCategories = useMemo(() => {
-    const cats = new Set((counts?.myCategories ?? []).filter(Boolean) as string[])
-    return BILL_CATEGORIES.filter((c) => cats.has(c))
-  }, [counts?.myCategories])
 
   const loadingBills = !userId || (billsQuery.loading && !billsQuery.data)
-  const exportRows = useMemo(
-    () => [...(billBuckets?.myBills ?? []), ...(billBuckets?.sharedBills ?? [])],
-    [billBuckets?.myBills, billBuckets?.sharedBills],
-  )
+
+  function resetLoaded() {
+    generation.current++
+    setMore(null)
+    setLoadingMore(false)
+    setReloading(false)
+  }
+
+  function changeControls(patch: { filter?: BillFilter; sort?: BillSort; category?: string | null }) {
+    if (patch.filter !== undefined) setFilter(patch.filter)
+    if (patch.sort !== undefined) setSort(patch.sort)
+    if (patch.category !== undefined) setFilterCategory(patch.category)
+    resetLoaded()
+  }
+
+  function switchTab(next: 'mine' | 'shared') {
+    setTab(next)
+    resetLoaded()
+  }
+
+  async function showMore() {
+    const last = serverRows[serverRows.length - 1]
+    if (!userId || !last || loadingMore || reloading) return
+    const mine = generation.current
+    setLoadingMore(true)
+    try {
+      const res = await fetchPersonalBillsPage(userId, {
+        bucket,
+        settled,
+        category,
+        sort: sortKey,
+        limit: PAGE_SIZE,
+        after: cursorOf(last),
+      })
+      if (mine !== generation.current) return
+      const rows = res.data.rows
+      setMore({
+        key: endpointKey,
+        rows: [...extraRows, ...rows],
+        // A page with nothing in it means the rest is gone; stop offering a button that does nothing.
+        matching: rows.length > 0 ? res.data.matching : serverRows.length,
+      })
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Could not load more bills.')
+    } finally {
+      setLoadingMore(false)
+    }
+  }
+
+  // Fetched on tap rather than held: the page only ever has one screenful, and the full list is
+  // needed once. Throws offline with no saved copy, which the dialog reports without exporting.
+  async function loadExportRows(uid: string) {
+    const { data } = await fetchPersonalBills(uid)
+    const fetched = new Set([...data.mine, ...data.shared].map((b) => b.id))
+    return [...unsent.newBills.filter((b) => !fetched.has(b.id)), ...data.mine, ...data.shared]
+  }
 
   async function executeDeleteBill() {
     if (!userId || !deleteTarget) return
@@ -169,11 +294,11 @@ export function BillsPage() {
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Personal bills</h1>
           <p className="mt-1 text-sm text-stone-600">
-            {(counts?.my ?? 0) + (counts?.shared ?? 0)} bill{((counts?.my ?? 0) + (counts?.shared ?? 0)) !== 1 ? 's' : ''} · Group bills stay in each group
+            {myTotal + sharedTotal} bill{myTotal + sharedTotal !== 1 ? 's' : ''} · Group bills stay in each group
           </p>
         </div>
         <div className="flex items-center gap-2 self-start sm:self-auto">
-          {tab === 'mine' && (billBuckets?.myBills.length ?? 0) > 0 && (
+          {tab === 'mine' && myTotal > 0 && (
             <Button
               variant="outline"
               size="sm"
@@ -196,41 +321,41 @@ export function BillsPage() {
       <div className="flex gap-1 rounded-xl bg-stone-200/70 p-1">
         <button
           type="button"
-          onClick={() => { setTab('mine'); setMyBillsShown(10) }}
+          onClick={() => switchTab('mine')}
           className={cn(
             'flex flex-1 items-center justify-center gap-1.5 rounded-lg py-2 text-sm font-medium transition-all',
             tab === 'mine' ? 'bg-white text-stone-900 shadow-sm' : 'text-stone-500 hover:bg-white/50 hover:text-stone-700',
           )}
         >
           My bills
-          {(counts?.my ?? 0) > 0 && (
+          {myTotal > 0 && (
             <span className={cn('rounded-full px-1.5 py-0.5 text-xs font-semibold tabular-nums', tab === 'mine' ? 'bg-stone-100 text-stone-600' : 'bg-stone-300/70 text-stone-600')}>
-              {counts!.my}
+              {myTotal}
             </span>
           )}
         </button>
         <button
           type="button"
-          onClick={() => { setTab('shared'); setSharedBillsShown(10) }}
+          onClick={() => switchTab('shared')}
           className={cn(
             'flex flex-1 items-center justify-center gap-1.5 rounded-lg py-2 text-sm font-medium transition-all',
             tab === 'shared' ? 'bg-white text-stone-900 shadow-sm' : 'text-stone-500 hover:bg-white/50 hover:text-stone-700',
           )}
         >
           Shared with me
-          {(counts?.shared ?? 0) > 0 && (
+          {sharedTotal > 0 && (
             <span className={cn('rounded-full px-1.5 py-0.5 text-xs font-semibold tabular-nums', tab === 'shared' ? 'bg-stone-100 text-stone-600' : 'bg-stone-300/70 text-stone-600')}>
-              {counts!.shared}
+              {sharedTotal}
             </span>
           )}
         </button>
       </div>
 
-      {tab === 'mine' && billBuckets && billBuckets.myBills.length > 0 && (
+      {tab === 'mine' && myTotal > 0 && (
         <div className="flex flex-wrap items-center justify-end gap-2">
           <div className="flex items-center gap-1.5">
             <span className="text-xs text-stone-500">Filter</span>
-            <Select value={filter} onValueChange={(v) => setFilter(v as BillFilter)}>
+            <Select value={filter} onValueChange={(v) => changeControls({ filter: v as BillFilter })}>
               <SelectTrigger className="h-8 rounded-full px-3 text-xs">
                 <SelectValue />
               </SelectTrigger>
@@ -243,7 +368,7 @@ export function BillsPage() {
           </div>
           <div className="flex items-center gap-1.5">
             <span className="text-xs text-stone-500">Sort</span>
-            <Select value={sort} onValueChange={(v) => setSort(v as BillSort)}>
+            <Select value={sort} onValueChange={(v) => changeControls({ sort: v as BillSort })}>
               <SelectTrigger className="h-8 rounded-full px-3 text-xs">
                 <SelectValue />
               </SelectTrigger>
@@ -262,7 +387,7 @@ export function BillsPage() {
               <button
                 key={cat}
                 type="button"
-                onClick={() => setFilterCategory(active ? null : cat)}
+                onClick={() => changeControls({ category: active ? null : cat })}
                 className={cn(
                   'inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-xs font-medium transition-colors',
                   active
@@ -333,11 +458,11 @@ export function BillsPage() {
         </div>
       ) : tab === 'mine' ? (
         <div className="space-y-3">
-          {(billBuckets?.myBills.length ?? 0) > 0 && bills.length === 0 ? (
+          {myBills.length === 0 && myTotal > 0 ? (
             <div className="rounded-3xl border border-stone-200 bg-white p-5 text-center text-sm text-stone-500 shadow-sm">
               No bills match this filter.
             </div>
-          ) : !billBuckets || billBuckets.myBills.length === 0 ? (
+          ) : myBills.length === 0 ? (
             <div className="rounded-3xl border border-stone-200 bg-white p-5 shadow-sm">
               <div className="flex flex-col items-center py-12 text-center">
                 <div className="rounded-2xl bg-stone-100 p-4">
@@ -357,7 +482,7 @@ export function BillsPage() {
             </div>
           ) : (
             <>
-              {bills.slice(0, resolvedMyBillsShown).map((bill) => (
+              {myBills.map((bill) => (
                 <div
                   key={bill.id}
                   className="rounded-2xl border border-stone-200 bg-white p-4 shadow-sm transition-colors hover:bg-stone-50"
@@ -435,13 +560,14 @@ export function BillsPage() {
                   </div>
                 </div>
               ))}
-              {bills.length > resolvedMyBillsShown && (
+              {remaining > 0 && (
                 <button
                   type="button"
-                  onClick={() => setMyBillsShown((n) => n + 10)}
-                  className="w-full rounded-2xl border border-stone-200 py-3 text-sm font-medium text-stone-500 transition-colors hover:bg-stone-50"
+                  onClick={() => void showMore()}
+                  disabled={loadingMore || reloading}
+                  className="w-full rounded-2xl border border-stone-200 py-3 text-sm font-medium text-stone-500 transition-colors hover:bg-stone-50 disabled:opacity-60"
                 >
-                  Show more ({bills.length - resolvedMyBillsShown} remaining)
+                  Show more ({remaining} remaining)
                 </button>
               )}
             </>
@@ -463,7 +589,7 @@ export function BillsPage() {
             </div>
           ) : (
             <>
-              {sharedBills.slice(0, sharedBillsShown).map((bill) => (
+              {sharedBills.map((bill) => (
                 <Link
                   key={bill.id}
                   to={`/app/bills/${bill.id}`}
@@ -507,13 +633,14 @@ export function BillsPage() {
                   </div>
                 </Link>
               ))}
-              {sharedBills.length > sharedBillsShown && (
+              {remaining > 0 && (
                 <button
                   type="button"
-                  onClick={() => setSharedBillsShown((n) => n + 10)}
-                  className="w-full rounded-2xl border border-stone-200 py-3 text-sm font-medium text-stone-500 transition-colors hover:bg-stone-50"
+                  onClick={() => void showMore()}
+                  disabled={loadingMore || reloading}
+                  className="w-full rounded-2xl border border-stone-200 py-3 text-sm font-medium text-stone-500 transition-colors hover:bg-stone-50 disabled:opacity-60"
                 >
-                  Show more ({sharedBills.length - sharedBillsShown} remaining)
+                  Show more ({remaining} remaining)
                 </button>
               )}
             </>
@@ -542,8 +669,8 @@ export function BillsPage() {
         description="Download all your personal bills as a PDF report or CSV spreadsheet."
         // Both buckets: a bill someone else created and split you into is still part of the
         // user's personal record, and the pre-migration exporter always included it.
-        onExportPDF={() => generateBillsPDF(userId, exportRows)}
-        onExportCSV={() => exportBillsToCSV(userId, exportRows)}
+        onExportPDF={async () => generateBillsPDF(userId, await loadExportRows(userId))}
+        onExportCSV={async () => exportBillsToCSV(userId, await loadExportRows(userId))}
         onClose={() => setExportOpen(false)}
       />
     )}

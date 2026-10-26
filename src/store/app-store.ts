@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import { readLastRefreshAt, writeLastCheckedAt } from '@/lib/kwenta-storage-keys'
+import { endpointFamily } from '@/api/read-scope'
 
 type SyncStatus = 'idle' | 'syncing' | 'error'
 
@@ -39,6 +40,13 @@ interface AppState {
    */
   dataVersion: number
   /**
+   * Per endpoint family, how many bumps named it as unaffected (`bumpDataVersion(skip)`). A screen
+   * watches `dataVersion - skippedBumps[family]` (`relevantDataVersion`): counting rather than
+   * flagging "the last bump skipped me" means a skipped and a full bump coalesced into one render
+   * still move the screen.
+   */
+  skippedBumps: Record<string, number>
+  /**
    * Screen fetches in flight while online: each `useServerData` holds one begin/end pair. Only the
    * header's loading bar and Refresh button subscribe, so moving it re-renders no page.
    */
@@ -57,7 +65,7 @@ interface AppState {
   setRuntimeFlag: (key: RuntimeFlagKey, enabled: boolean) => void
   setInitialCloudHydration: (state: InitialCloudHydration) => void
   setPullStale: (stale: boolean) => void
-  bumpDataVersion: () => void
+  bumpDataVersion: (skipFamilies?: readonly string[]) => void
   beginScreenLoad: () => void
   endScreenLoad: () => void
   /** The server just confirmed this device's copy is current without a full refresh. */
@@ -73,6 +81,7 @@ export const useAppStore = create<AppState>((set) => ({
   initialCloudHydration: initialCloudHydrationFromStorage(),
   pullStale: false,
   dataVersion: 0,
+  skippedBumps: {},
   screenLoadCount: 0,
   lastCheckedAt: null,
   runtimeFlags: {
@@ -93,7 +102,13 @@ export const useAppStore = create<AppState>((set) => ({
     set((state) => ({ runtimeFlags: { ...state.runtimeFlags, [key]: enabled } })),
   setInitialCloudHydration: (initialCloudHydration) => set({ initialCloudHydration }),
   setPullStale: (pullStale) => set({ pullStale }),
-  bumpDataVersion: () => set((state) => ({ dataVersion: state.dataVersion + 1 })),
+  bumpDataVersion: (skipFamilies) =>
+    set((state) => {
+      if (!skipFamilies || skipFamilies.length === 0) return { dataVersion: state.dataVersion + 1 }
+      const skippedBumps = { ...state.skippedBumps }
+      for (const family of new Set(skipFamilies)) skippedBumps[family] = (skippedBumps[family] ?? 0) + 1
+      return { dataVersion: state.dataVersion + 1, skippedBumps }
+    }),
   beginScreenLoad: () => set((state) => ({ screenLoadCount: state.screenLoadCount + 1 })),
   // Floored: a negative balance would swallow the next load and hide the bar for it.
   endScreenLoad: () =>
@@ -104,3 +119,12 @@ export const useAppStore = create<AppState>((set) => ({
     set({ lastCheckedAt: at })
   },
 }))
+
+/** The version a screen refetches on: every bump except the ones that named its family unaffected. */
+export function relevantDataVersion(
+  state: Pick<AppState, 'dataVersion' | 'skippedBumps'>,
+  endpointKey?: string,
+): number {
+  if (!endpointKey) return state.dataVersion
+  return state.dataVersion - (state.skippedBumps[endpointFamily(endpointKey)] ?? 0)
+}
