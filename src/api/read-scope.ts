@@ -1,6 +1,6 @@
 import type { CloudWritePayload } from '@/sync/cloud-write'
 
-/** The cache-key prefix before the first colon: `group-payments:<id>` -> `group-payments`. */
+/** The cache-key prefix before the first colon: `bill-payments:<id>` -> `bill-payments`. */
 export function endpointFamily(key: string): string {
   const i = key.indexOf(':')
   return i === -1 ? key : key.slice(0, i)
@@ -29,7 +29,7 @@ export function readsUnaffectedBy(payload: CloudWritePayload, opts?: { createsBi
   const touched = [...tables].filter((t) => t !== 'activity_log')
   if (touched.length === 0) return []
   if (opts?.createsBill && [...tables].every((t) => NEW_BILL_TABLES.has(t))) {
-    return ['bill-payments', 'group-payments', 'person-payments']
+    return ['bill-payments', 'group-payments-page', 'person-payment-items']
   }
   if ([...tables].every((t) => PAYMENT_TABLES.has(t)) && tables.has('settlements')) {
     return ['group-spending']

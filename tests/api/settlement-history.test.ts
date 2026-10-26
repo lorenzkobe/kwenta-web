@@ -164,7 +164,8 @@ describe('settlement history API', () => {
   })
 
   it('falls back to the cached history when the request fails', async () => {
-    writeCache('group-payments:g1', 'u1', [serverItem({ amount: 5 })], '2026-08-01T00:00:00.000Z')
+    // The whole list lives under group-payments-full since 087; group-payments-page holds the first page.
+    writeCache('group-payments-full:g1', 'u1', [serverItem({ amount: 5 })], '2026-08-01T00:00:00.000Z')
     rpc.mockRejectedValue(new Error('network down'))
 
     const { data, fromCache } = await fetchGroupSettlementHistory('u1', 'g1')

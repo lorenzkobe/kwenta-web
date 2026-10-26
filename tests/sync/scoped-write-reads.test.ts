@@ -51,15 +51,24 @@ function mountScreens() {
   rememberReadSpec({ key: 'overview', fn: 'kwenta_balances_overview' })
   rememberReadSpec({ key: 'group:G', fn: 'kwenta_group_detail', argName: 'p_group_id', id: 'G' })
   rememberReadSpec({ key: 'group-spending:G', fn: 'kwenta_group_spending', argName: 'p_group_id', id: 'G' })
-  rememberReadSpec({ key: 'group-payments:G', fn: 'kwenta_group_settlement_history', argName: 'p_group_id', id: 'G' })
+  rememberReadSpec({
+    key: 'group-payments-page:G',
+    fn: 'kwenta_group_settlement_history_page',
+    argName: 'p_group_id',
+    id: 'G',
+    limit: 20,
+  })
   rememberReadSpec({ key: 'bill-payments:B0', fn: 'kwenta_bill_settlement_history', argName: 'p_bill_id', id: 'B0' })
-  rememberReadSpec({ key: 'person-payments:FR', fn: 'kwenta_person_settlement_history', argName: 'p_person_id', id: 'FR' })
-  for (const k of ['overview', 'group:G', 'group-spending:G', 'group-payments:G', 'bill-payments:B0', 'person-payments:FR']) {
+  // The Person page's payment lookup has no read spec (it rides no `kwenta_read`) and the app never
+  // marks its key mounted; it is marked here only so the version checks can follow its family, and
+  // it never appears in p_reads.
+  for (const k of ['overview', 'group:G', 'group-spending:G', 'group-payments-page:G', 'bill-payments:B0', LOOKUP_KEY]) {
     markReadMounted(k)
   }
 }
 
-const ALL_KEYS = ['bill-payments:B0', 'group-payments:G', 'group-spending:G', 'group:G', 'overview', 'person-payments:FR']
+const LOOKUP_KEY = 'person-payment-items:FR'
+const ALL_KEYS = ['bill-payments:B0', 'group-payments-page:G', 'group-spending:G', 'group:G', 'overview']
 
 function lastReadKeys(): string[] {
   const last = cloud.readSpecs[cloud.readSpecs.length - 1] ?? []
@@ -68,7 +77,7 @@ function lastReadKeys(): string[] {
 
 function versions() {
   const s = useAppStore.getState()
-  return Object.fromEntries([...ALL_KEYS, PAGE_KEY].map((k) => [k, relevantDataVersion(s, k)]))
+  return Object.fromEntries([...ALL_KEYS, LOOKUP_KEY, PAGE_KEY].map((k) => [k, relevantDataVersion(s, k)]))
 }
 
 const BILL_INPUT = {
@@ -137,8 +146,8 @@ describe('creating a bill', () => {
     const after = versions()
 
     expect(after['bill-payments:B0']).toBe(before['bill-payments:B0'])
-    expect(after['group-payments:G']).toBe(before['group-payments:G'])
-    expect(after['person-payments:FR']).toBe(before['person-payments:FR'])
+    expect(after['group-payments-page:G']).toBe(before['group-payments-page:G'])
+    expect(after[LOOKUP_KEY]).toBe(before[LOOKUP_KEY])
     expect(after['group:G']).toBe(before['group:G'] + 1)
     expect(after['group-spending:G']).toBe(before['group-spending:G'] + 1)
     expect(after.overview).toBe(before.overview + 1)
@@ -159,9 +168,9 @@ describe('recording a payment', () => {
     })
     const after = versions()
 
-    expect(lastReadKeys()).toEqual(['bill-payments:B0', 'group-payments:G', 'group:G', 'overview', 'person-payments:FR'])
+    expect(lastReadKeys()).toEqual(['bill-payments:B0', 'group-payments-page:G', 'group:G', 'overview'])
     expect(after['group-spending:G']).toBe(before['group-spending:G'])
-    for (const k of ['bill-payments:B0', 'group-payments:G', 'group:G', 'overview', 'person-payments:FR']) {
+    for (const k of ['bill-payments:B0', 'group-payments-page:G', 'group:G', 'overview', LOOKUP_KEY]) {
       expect(after[k]).toBe(before[k] + 1)
     }
   })
@@ -173,7 +182,7 @@ describe('creating a single settlement', () => {
     await createSettlement(null, 'FR', 'ME', 25, 'PHP', 'ME')
     const after = versions()
 
-    expect(lastReadKeys()).toEqual(['bill-payments:B0', 'group-payments:G', 'group:G', 'overview', 'person-payments:FR'])
+    expect(lastReadKeys()).toEqual(['bill-payments:B0', 'group-payments-page:G', 'group:G', 'overview'])
     expect(after['group-spending:G']).toBe(before['group-spending:G'])
     expect(after['group:G']).toBe(before['group:G'] + 1)
   })
@@ -215,14 +224,14 @@ describe('commitCloudFirstWrite with unaffectedReads', () => {
       actorUserId: 'ME',
       payload: { bills: [makeBill({ id: 'B9', group_id: null, created_by: 'ME', paid_by: 'ME' })] },
       pending: PENDING,
-      unaffectedReads: ['bill-payments', 'group-payments'],
+      unaffectedReads: ['bill-payments', 'group-payments-page'],
     })
     expect(mode).toBe('cloud')
-    expect(lastReadKeys()).toEqual(['group-spending:G', 'group:G', 'overview', 'person-payments:FR'])
+    expect(lastReadKeys()).toEqual(['group-spending:G', 'group:G', 'overview'])
     const after = versions()
     expect(after['bill-payments:B0']).toBe(before['bill-payments:B0'])
-    expect(after['group-payments:G']).toBe(before['group-payments:G'])
-    expect(after['person-payments:FR']).toBe(before['person-payments:FR'] + 1)
+    expect(after['group-payments-page:G']).toBe(before['group-payments-page:G'])
+    expect(after[LOOKUP_KEY]).toBe(before[LOOKUP_KEY] + 1)
   })
 
   it('C28: a queued (offline) write invalidates every screen, skip list or not', async () => {
@@ -232,7 +241,7 @@ describe('commitCloudFirstWrite with unaffectedReads', () => {
       actorUserId: 'ME',
       payload: { bills: [makeBill({ id: 'B9', group_id: null, created_by: 'ME', paid_by: 'ME' })] },
       pending: PENDING,
-      unaffectedReads: ['bill-payments', 'group-payments', 'person-payments'],
+      unaffectedReads: ['bill-payments', 'group-payments-page', 'person-payment-items'],
     })
     setOnline(true)
     expect(mode).toBe('queued')
@@ -261,7 +270,7 @@ describe('submitCloudWrite with unaffectedReads', () => {
       payload: { bills: [makeBill({ id: 'B9', group_id: null, created_by: 'ME', paid_by: 'ME' })] },
       unaffectedReads: ['group-spending'],
     })
-    expect(lastReadKeys()).toEqual(['bill-payments:B0', 'group-payments:G', 'group:G', 'overview', 'person-payments:FR'])
+    expect(lastReadKeys()).toEqual(['bill-payments:B0', 'group-payments-page:G', 'group:G', 'overview'])
   })
 
   it('C29: without the field, p_reads is every mounted screen', async () => {

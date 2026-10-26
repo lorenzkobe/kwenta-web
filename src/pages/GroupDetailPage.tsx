@@ -25,10 +25,13 @@ import {
   fetchGroupDetail,
   fetchGroupDetailPaged,
   fetchGroupSettlementHistory,
+  fetchGroupSettlementHistoryPage,
+  fetchGroupSettlementHistoryPageMore,
   fetchGroupSpending,
   MAX_BILLS_PAGE_ROWS,
   type GroupBillRow,
   type GroupDetail,
+  type GroupPaymentTotal,
   type SettlementHistoryItem,
 } from '@/api/balances'
 import { useServerData } from '@/hooks/useServerData'
@@ -100,11 +103,22 @@ const BILLS_PAGE_SIZE = 20
 
 const billCursor = (b: GroupBillRow) => ({ id: b.id, createdAt: b.createdAt })
 
+const PAYMENTS_PAGE_SIZE = 20
+/** `kwenta_group_settlement_history_page` clamps `p_limit` to 1..500. */
+const MAX_PAYMENTS_PAGE_ITEMS = 500
+// The server pages payments by the item's primary leg, which is not the item id for a bundle.
+const paymentCursor = (p: SettlementHistoryItem) => ({ createdAt: p.createdAt, id: p.settlementIds[0] ?? p.id })
+
 const FULL_LIST_FAILED = "Couldn't load this group's bills. Check your connection and try again."
 const FULL_LIST_STALE = "Couldn't load every bill. Check your connection and try again."
 
+const FULL_PAYMENTS_FAILED = "Couldn't load this group's payments. Check your connection and try again."
+const FULL_PAYMENTS_STALE = "Couldn't load every payment. Check your connection and try again."
+
 const fullListMessage = (error: unknown) =>
-  error instanceof Error && error.message === FULL_LIST_STALE ? FULL_LIST_STALE : FULL_LIST_FAILED
+  error instanceof Error && [FULL_LIST_STALE, FULL_PAYMENTS_FAILED, FULL_PAYMENTS_STALE].includes(error.message)
+    ? error.message
+    : FULL_LIST_FAILED
 
 /**
  * Every bill of the group, fetched on tap: the page holds one screenful. Only `bills` is taken
@@ -117,6 +131,30 @@ async function loadFullBills(userId: string, groupId: string, screenIsCopy: bool
   if (!data) throw new Error('This group is no longer available.')
   if (fromCache && !screenIsCopy) throw new Error(FULL_LIST_STALE)
   return data.bills
+}
+
+/**
+ * Every payment of the group, fetched on tap: the page holds the newest few. Refused when the
+ * server declined (an empty export would read as "nobody ever paid"), and when a saved copy would
+ * disagree with a fresh screen; when the screen itself is a saved copy, the saved list matches it.
+ */
+async function loadFullPayments(userId: string, groupId: string, screenIsCopy: boolean): Promise<SettlementHistoryItem[]> {
+  const answer = await fetchGroupSettlementHistory(userId, groupId).catch(() => {
+    throw new Error(FULL_PAYMENTS_FAILED)
+  })
+  if (!answer.data) throw new Error(FULL_PAYMENTS_FAILED)
+  if (answer.fromCache && !screenIsCopy) throw new Error(FULL_PAYMENTS_STALE)
+  return answer.data
+}
+
+type FullGroupExport = { bills: GroupBillRow[]; payments: SettlementHistoryItem[] }
+
+async function loadFullExport(userId: string, groupId: string, screenIsCopy: boolean): Promise<FullGroupExport> {
+  const [bills, payments] = await Promise.all([
+    loadFullBills(userId, groupId, screenIsCopy),
+    loadFullPayments(userId, groupId, screenIsCopy),
+  ])
+  return { bills, payments }
 }
 
 function sheetBackdrop(onClose: () => void) {
@@ -411,30 +449,13 @@ function EditGroupDialog({
 }
 
 function PaymentHistoryTotals({
-  items,
+  totals,
   currentUserId,
 }: {
-  items: SettlementHistoryItem[]
+  totals: GroupPaymentTotal[]
   currentUserId: string | null | undefined
 }) {
-  // Sum total amount paid by each payer, keyed by user + currency.
-  const totals = new Map<string, { userId: string; name: string; currency: string; amount: number }>()
-  for (const item of items) {
-    const key = `${item.fromUserId}::${item.currency}`
-    const existing = totals.get(key)
-    if (existing) {
-      existing.amount += item.amount
-    } else {
-      totals.set(key, {
-        userId: item.fromUserId,
-        name: item.fromName,
-        currency: item.currency,
-        amount: item.amount,
-      })
-    }
-  }
-  const rows = Array.from(totals.values()).sort((a, b) => b.amount - a.amount)
-  if (rows.length === 0) return null
+  if (totals.length === 0) return null
 
   return (
     <div className="mb-4 rounded-2xl border border-stone-200 bg-stone-100/60 px-4 py-3">
@@ -442,7 +463,7 @@ function PaymentHistoryTotals({
         Total paid
       </p>
       <ul className="space-y-1.5">
-        {rows.map((row) => (
+        {totals.map((row) => (
           <li
             key={`${row.userId}::${row.currency}`}
             className="flex items-center justify-between text-sm"
@@ -462,13 +483,24 @@ function PaymentHistoryTotals({
 
 function PaymentHistoryDialog({
   items,
+  totals,
   loading = false,
+  error = null,
+  remaining,
+  loadingMore,
+  onShowOlder,
   currentUserId,
   onClose,
   onEdit,
 }: {
   items: SettlementHistoryItem[]
+  /** Per payer and currency over the WHOLE history, from the server: the loaded items are only a page. */
+  totals: GroupPaymentTotal[]
   loading?: boolean
+  error?: string | null
+  remaining: number
+  loadingMore: boolean
+  onShowOlder: () => void
   currentUserId: string | null | undefined
   onClose: () => void
   onEdit?: (item: SettlementHistoryItem) => void
@@ -491,11 +523,13 @@ function PaymentHistoryDialog({
             <div className="flex items-center justify-center py-8">
               <Loader2 className="size-4 animate-spin text-teal-800" />
             </div>
+          ) : error && items.length === 0 ? (
+            <p role="alert" className="py-8 text-center text-sm text-stone-500">{error}</p>
           ) : items.length === 0 ? (
             <p className="py-8 text-center text-sm text-stone-400">No recorded payments yet</p>
           ) : (
             <>
-              <PaymentHistoryTotals items={items} currentUserId={currentUserId} />
+              <PaymentHistoryTotals totals={totals} currentUserId={currentUserId} />
               <p className="mb-3 text-xs text-stone-500">
                 Payments recorded with Pay are already reflected in member balances.
               </p>
@@ -504,6 +538,16 @@ function PaymentHistoryDialog({
                 currentUserId={currentUserId}
                 onEdit={onEdit}
               />
+              {remaining > 0 && (
+                <button
+                  type="button"
+                  onClick={onShowOlder}
+                  disabled={loadingMore}
+                  className="mt-3 w-full rounded-xl border border-stone-200 py-2.5 text-sm font-medium text-stone-500 transition-colors hover:bg-stone-50 disabled:opacity-60"
+                >
+                  Show older ({remaining} remaining)
+                </button>
+              )}
             </>
           )}
         </div>
@@ -716,13 +760,14 @@ export function GroupDetailPage() {
   const [deleteGroupConfirmOpen, setDeleteGroupConfirmOpen] = useState(false)
   const [showTotalSpending, setShowTotalSpending] = useState(false)
   const [exportOpen, setExportOpen] = useState(false)
-  // The summary image lists every bill, but the page holds one screenful: opening the dialog asks
-  // for the full list once, and the card is built only from that answer, never from the partial one.
-  const [exportBills, setExportBills] = useState<
-    { status: 'loading' } | { status: 'failed'; message: string } | { status: 'ready'; bills: GroupBillRow[] }
+  // The summary image lists every bill and payment, but the page holds one screenful of each:
+  // opening the dialog asks for the full lists once, and the card is built only from that answer,
+  // never from the partial one.
+  const [fullExport, setFullExport] = useState<
+    { status: 'loading' } | { status: 'failed'; message: string } | ({ status: 'ready' } & FullGroupExport)
   >({ status: 'loading' })
   const [exportRetry, setExportRetry] = useState(0)
-  const exportFetch = useRef<Promise<GroupBillRow[]> | null>(null)
+  const exportFetch = useRef<Promise<FullGroupExport> | null>(null)
   const screenIsCopy = useRef(false)
   const [billPayorFilter, setBillPayorFilter] = useState<string | null>(null)
   // This component is reused when a search or a notification opens another group in place; nothing
@@ -742,28 +787,30 @@ export function GroupDetailPage() {
     bills: GroupMemberBillEntry[]
   } | null>(null)
 
-  // An export taps the list the open dialog already asked for (or is still asking for), so one
-  // open costs one request; the money in the file is the screen's own, with only `bills` replaced.
-  async function exportPayload(): Promise<GroupDetail> {
+  // An export taps the lists the open dialog already asked for (or is still asking for), so one
+  // open costs one request per list; the balances in the file are the screen's own, while `bills` and
+  // the payments come from the full lists (the screen holds only a page of each).
+  async function exportPayload(): Promise<{ detail: GroupDetail; payments: SettlementHistoryItem[] }> {
     if (!userId || !groupId || !detail.data) throw new Error('no group')
-    let bills: Promise<GroupBillRow[]>
-    if (exportBills.status === 'ready') bills = Promise.resolve(exportBills.bills)
-    else if (exportBills.status === 'loading' && exportFetch.current) bills = exportFetch.current
-    else bills = loadFullBills(userId, groupId, detail.fromCache)
-    return { ...detail.data, bills: await bills }
+    let full: Promise<FullGroupExport>
+    if (fullExport.status === 'ready') full = Promise.resolve(fullExport)
+    else if (fullExport.status === 'loading' && exportFetch.current) full = exportFetch.current
+    else full = loadFullExport(userId, groupId, detail.fromCache)
+    const { bills, payments } = await full
+    return { detail: { ...detail.data, bills }, payments }
   }
 
   useEffect(() => {
     if (!exportOpen || !userId || !groupId) return
     let cancelled = false
-    const request = loadFullBills(userId, groupId, screenIsCopy.current)
+    const request = loadFullExport(userId, groupId, screenIsCopy.current)
     exportFetch.current = request
     request.then(
-      (bills) => {
-        if (!cancelled) setExportBills({ status: 'ready', bills })
+      ({ bills, payments }) => {
+        if (!cancelled) setFullExport({ status: 'ready', bills, payments })
       },
       (error: unknown) => {
-        if (!cancelled) setExportBills({ status: 'failed', message: fullListMessage(error) })
+        if (!cancelled) setFullExport({ status: 'failed', message: fullListMessage(error) })
       },
     )
     return () => {
@@ -809,19 +856,37 @@ export function GroupDetailPage() {
     setExportMember({ userId: member.userId, profileName: member.profileName, netBalance: net, bills: memberBills })
   }
 
+  // The newest payments, a "Show older" step at a time (useKeysetMore); an export fetches them all on tap.
   const loadPayments = useCallback(
     () =>
       userId && groupId
-        ? fetchGroupSettlementHistory(userId, groupId)
+        ? fetchGroupSettlementHistoryPage(userId, groupId, { limit: PAYMENTS_PAGE_SIZE })
         : Promise.reject(new Error('no user')),
     [userId, groupId],
   )
   const payments = useServerData(
     userId && groupId ? loadPayments : null,
     [userId, groupId],
-    groupId ? `group-payments:${groupId}` : undefined,
+    groupId ? `group-payments-page:${groupId}` : undefined,
   )
-  const settlementHistory = payments.loading && !payments.data ? undefined : (payments.data ?? [])
+  const paymentsFirstPage = useMemo(
+    () => (payments.data ? { rows: payments.data.items, matching: payments.data.matching } : undefined),
+    [payments.data],
+  )
+  const paymentsKeyset = useKeysetMore({
+    userId,
+    listKey: groupId ?? '',
+    page: paymentsFirstPage,
+    pageFromCache: payments.fromCache,
+    pageSize: PAYMENTS_PAGE_SIZE,
+    maxPerCall: MAX_PAYMENTS_PAGE_ITEMS,
+    cursorOf: paymentCursor,
+    fetchAfter: async (before, limit) => {
+      const { data } = await fetchGroupSettlementHistoryPageMore(userId!, groupId!, { limit, before })
+      return { rows: data.items, matching: data.matching }
+    },
+    errorMessage: 'Could not load older payments.',
+  })
 
   // The whole screen in one call: group, roster, the newest bills with payer names, the viewer's
   // pairwise standing, every member's net against the POOL, and the directed debt graph. This
@@ -1103,7 +1168,7 @@ export function GroupDetailPage() {
               className="rounded-full"
               aria-label="Share group summary"
               onClick={() => {
-                setExportBills({ status: 'loading' })
+                setFullExport({ status: 'loading' })
                 exportFetch.current = null
                 setExportOpen(true)
               }}
@@ -1593,8 +1658,13 @@ export function GroupDetailPage() {
 
       {showPaymentHistory && (
         <PaymentHistoryDialog
-          items={settlementHistory ?? []}
-          loading={settlementHistory === undefined}
+          items={paymentsKeyset.rows}
+          totals={payments.data?.totals ?? []}
+          loading={payments.loading && !payments.data}
+          error={payments.error}
+          remaining={paymentsKeyset.remaining}
+          loadingMore={paymentsKeyset.loadingMore || paymentsKeyset.reloading}
+          onShowOlder={paymentsKeyset.showMore}
           currentUserId={userId}
           onClose={() => setShowPaymentHistory(false)}
           onEdit={(item) => setEditingSettlement(item)}
@@ -1719,23 +1789,29 @@ export function GroupDetailPage() {
       {exportOpen && exportBalanceSummary && balanceSummary && (
         <ExportImageDialog
           filename={makeExportFilename(group.name, 'png').replace('.png', '')}
-          // Gated on the payment history having actually loaded, not just on the group. `?? []`
-          // would emit a file whose Payments section is empty because the fetch had not finished
-          // — indistinguishable from a group where nobody has ever settled up.
+          // The payments come from the full list fetched for this dialog and are never defaulted to
+          // `[]`: a file whose Payments section is empty because the fetch failed is
+          // indistinguishable from a group where nobody has ever settled up.
           onExportPDF={
-            userId && detail.data && settlementHistory
-              ? async () => generateGroupPDF(await exportPayload(), settlementHistory)
+            userId && detail.data
+              ? async () => {
+                  const { detail: full, payments: history } = await exportPayload()
+                  return generateGroupPDF(full, history)
+                }
               : undefined
           }
           onExportCSV={
-            userId && detail.data && settlementHistory
-              ? async () => exportGroupToCSV(await exportPayload(), settlementHistory)
+            userId && detail.data
+              ? async () => {
+                  const { detail: full, payments: history } = await exportPayload()
+                  return exportGroupToCSV(full, history)
+                }
               : undefined
           }
-          imageDisabled={exportBills.status !== 'ready'}
+          imageDisabled={fullExport.status !== 'ready'}
           onClose={() => setExportOpen(false)}
         >
-          {exportBills.status === 'ready' ? (
+          {fullExport.status === 'ready' ? (
           <GroupExportCard
             groupName={group.name}
             currency={group.currency}
@@ -1745,7 +1821,7 @@ export function GroupDetailPage() {
             }))}
             balanceSummary={exportBalanceSummary}
             pairwiseSummary={balanceSummary}
-            bills={exportBills.bills.map((b) => ({
+            bills={fullExport.bills.map((b) => ({
               id: b.id,
               title: b.title,
               note: b.note || null,
@@ -1754,18 +1830,18 @@ export function GroupDetailPage() {
               created_at: b.createdAt,
               payorName: b.payorName,
             }))}
-            payments={settlementHistory ?? []}
+            payments={fullExport.payments}
           />
-          ) : exportBills.status === 'loading' ? (
+          ) : fullExport.status === 'loading' ? (
             <div className="flex items-center justify-center gap-2 py-12 text-sm text-stone-500">
               <Loader2 className="size-4 animate-spin" />
-              Loading every bill…
+              Loading every bill and payment…
             </div>
           ) : (
             <div role="alert" className="space-y-3 rounded-2xl bg-white p-5 text-center text-sm text-stone-600">
-              <p>{exportBills.message}</p>
+              <p>{fullExport.message}</p>
               <Button size="sm" variant="outline" className="rounded-full" onClick={() => {
-                setExportBills({ status: 'loading' })
+                setFullExport({ status: 'loading' })
                 setExportRetry((n) => n + 1)
               }}>
                 Try again

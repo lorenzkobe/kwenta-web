@@ -166,8 +166,13 @@ vi.mock('@/api/balances', async (importOriginal) => {
         fetchedAt,
       })),
     ),
+    // Since 087 the page asks for the full history only when an export opens, and for the items
+    // behind the loaded payment rows through the lookup (tests/pages/PersonDetailPage.payments.test.tsx).
     fetchPersonSettlementHistory: vi.fn(async () =>
       tracked('payments', undefined, () => ({ data: [], fromCache: false, fetchedAt })),
+    ),
+    fetchPersonPaymentItems: vi.fn(async () =>
+      tracked('items', undefined, () => ({ data: [], fromCache: false, fetchedAt })),
     ),
   }
 })

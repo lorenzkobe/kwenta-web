@@ -131,7 +131,8 @@ const ENDPOINT_LABELS: Record<string, string> = {
   group: 'this group',
   'group-full': 'this group',
   'group-bills': "this group's bills",
-  'group-payments': "this group's payments",
+  'group-payments-page': "this group's payments",
+  'group-payments-full': "this group's payments",
   'group-breakdown': "this member's balances",
   'group-spending': "this group's spending",
   groups: 'your groups',
@@ -142,7 +143,8 @@ const ENDPOINT_LABELS: Record<string, string> = {
   'personal-bills-page': 'your bills',
   'recent-bills': 'your recent bills',
   person: 'this person',
-  'person-payments': "this person's payments",
+  'person-payments-full': "this person's payments",
+  'person-payment-items': "this person's payments",
 }
 
 function describeEndpoint(endpoint: string): string {
@@ -1086,23 +1088,174 @@ export async function fetchBillSettlementHistory(userId: string, billId: string)
   )
 }
 
-/** Resolves to null when the caller is not an active member of the group. */
+/** Items per `kwenta_person_payment_items` call: the server refuses more than this many ids. */
+const PERSON_PAYMENT_ITEMS_CHUNK = 500
+
+export type GroupPaymentTotal = { userId: string; name: string; currency: string; amount: number }
+
+/** The newest payments of a group, with the payer totals the server computed over ALL of them. */
+export type GroupPaymentsPage = {
+  items: SettlementHistoryItem[]
+  matching: number
+  totals: GroupPaymentTotal[]
+}
+
+function toGroupPaymentsPage(data: unknown): GroupPaymentsPage {
+  // NULL is the server declining (not an active member), not a group without payments: mapping it
+  // to no items would read as "No recorded payments yet" and be cached so.
+  if (data === null || data === undefined) {
+    throw Object.assign(new Error("permission denied for this group's payments"), { code: '42501' })
+  }
+  const o = data as Record<string, unknown>
+  const matching = Number(o.matching)
+  return {
+    items: toHistoryList(o.items),
+    matching: Number.isFinite(matching) ? matching : 0,
+    totals: asRecords(o.totals).map((t) => ({
+      userId: String(t.userId ?? ''),
+      name: String(t.name ?? 'Someone'),
+      currency: String(t.currency ?? ''),
+      amount: Number(t.amount ?? 0),
+    })),
+  }
+}
+
+/**
+ * The group's payment history, newest `limit` items. An ordinary cached read keyed
+ * `group-payments-page:<id>`, so a write recomputes it through `kwenta_read` and the re-read costs
+ * no request. Older items come from `fetchGroupSettlementHistoryPageMore`; an export takes the
+ * whole list from `fetchGroupSettlementHistory`.
+ */
+export async function fetchGroupSettlementHistoryPage(userId: string, groupId: string, opts: { limit?: number } = {}) {
+  const limit = opts.limit ?? 20
+  return fetchEndpoint<GroupPaymentsPage>(
+    `group-payments-page:${groupId}`,
+    userId,
+    { fn: 'kwenta_group_settlement_history_page', argName: 'p_group_id', id: groupId, limit },
+    toGroupPaymentsPage,
+  )
+}
+
+/** The cursor of a "Show older" step: the last held item's date and PRIMARY leg (`settlementIds[0]`). */
+export type PaymentHistoryCursor = { createdAt: string; id: string }
+
+/**
+ * A page of items strictly older than `before`: live only, never cached and never primed. The
+ * user id keeps the call shape of the cached readers; a live page is not stored per user.
+ */
+export async function fetchGroupSettlementHistoryPageMore(
+  _userId: string,
+  groupId: string,
+  query: { limit: number; before: PaymentHistoryCursor },
+) {
+  return fetchCursorPage(
+    'kwenta_group_settlement_history_page',
+    { p_group_id: groupId, p_limit: query.limit, p_before: query.before },
+    'group-payments-page',
+    toGroupPaymentsPage,
+  )
+}
+
+/**
+ * The group's WHOLE payment history, for exports. It owns `group-payments-full:<id>`, so a full
+ * fetch never replaces the page's mounted read spec. Resolves to null when the caller is not an
+ * active member of the group.
+ */
 export async function fetchGroupSettlementHistory(userId: string, groupId: string) {
   return fetchEndpoint<SettlementHistoryItem[] | null>(
-    `group-payments:${groupId}`,
+    `group-payments-full:${groupId}`,
     userId,
     { fn: 'kwenta_group_settlement_history', argName: 'p_group_id', id: groupId },
     (data) => (data === null ? null : toHistoryList(data)),
   )
 }
 
+/** The person's WHOLE payment history, for exports (`person-payments-full:<id>`). */
 export async function fetchPersonSettlementHistory(userId: string, personId: string) {
   return fetchEndpoint<SettlementHistoryItem[]>(
-    `person-payments:${personId}`,
+    `person-payments-full:${personId}`,
     userId,
     { fn: 'kwenta_person_settlement_history', argName: 'p_person_id', id: personId },
     toHistoryList,
   )
+}
+
+function toPersonPaymentItems(data: unknown): SettlementHistoryItem[] {
+  if (data === null || data === undefined) {
+    throw Object.assign(new Error("permission denied for this person's payments"), { code: '42501' })
+  }
+  return toHistoryList(data)
+}
+
+/** The most items kept per person for offline: older ones are dropped first. */
+const MAX_SAVED_PAYMENT_ITEMS = 500
+
+/**
+ * The history items (edit, note, method) behind the given statement payment legs. Never primed:
+ * a write that changed a payment already refetches the statement and this lookup follows it.
+ * More than 500 ids go in parallel chunks; a bundle whose legs fall in two chunks comes back once.
+ *
+ * Every successful answer is merged into a per-person saved set (`person-payment-items:<id>`,
+ * newest 500 items), which answers offline or after a transport failure for the requested legs,
+ * flagged `fromCache`, so statement rows stay editable offline. A refusal is never served from it
+ * and empties it: losing access must not read as staleness.
+ */
+export async function fetchPersonPaymentItems(userId: string, personId: string, settlementIds: string[]) {
+  const ids = [...new Set(settlementIds)]
+  if (ids.length === 0) return { data: [] as SettlementHistoryItem[], fromCache: false, fetchedAt: now() }
+
+  const endpoint = `person-payment-items:${personId}`
+  const epoch = currentSessionEpoch()
+  const wanted = new Set(ids)
+  const saved = () => {
+    const cached = readCache<SettlementHistoryItem[]>(endpoint, userId)
+    if (!cached) return null
+    const data = cached.data.filter((item) => item.settlementIds.some((id) => wanted.has(id)))
+    return { data, fromCache: true, fetchedAt: cached.fetchedAt }
+  }
+
+  if (typeof navigator !== 'undefined' && !navigator.onLine) {
+    const copy = saved()
+    if (copy) return copy
+    throw new ApiError(`You're offline and ${describeEndpoint(endpoint)} has not been loaded yet.`)
+  }
+
+  try {
+    const calls: Promise<SettlementHistoryItem[]>[] = []
+    for (let i = 0; i < ids.length; i += PERSON_PAYMENT_ITEMS_CHUNK) {
+      const chunk = ids.slice(i, i + PERSON_PAYMENT_ITEMS_CHUNK)
+      calls.push(
+        (async () => {
+          const { data: raw, error } = await supabase.rpc('kwenta_person_payment_items', {
+            p_person_id: personId,
+            p_settlement_ids: chunk,
+          })
+          if (error) throw error
+          return toPersonPaymentItems(raw)
+        })(),
+      )
+    }
+    const byId = new Map<string, SettlementHistoryItem>()
+    for (const chunk of await Promise.all(calls)) {
+      for (const item of chunk) if (!byId.has(item.id)) byId.set(item.id, item)
+    }
+    const data = [...byId.values()]
+    const at = now()
+    const kept = new Map((readCache<SettlementHistoryItem[]>(endpoint, userId)?.data ?? []).map((item) => [item.id, item]))
+    for (const item of data) kept.set(item.id, item)
+    const newestFirst = [...kept.values()].sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+    writeCache(endpoint, userId, newestFirst.slice(0, MAX_SAVED_PAYMENT_ITEMS), at, epoch)
+    refreshOnlineStatus()
+    return { data, fromCache: false, fetchedAt: at }
+  } catch (err) {
+    if (isAccessError(err)) {
+      writeCache(endpoint, userId, [], now(), epoch)
+      throw new ApiError(`You no longer have access to ${describeEndpoint(endpoint)}.`, err)
+    }
+    const copy = saved()
+    if (copy) return copy
+    throw new ApiError(`Could not load ${describeEndpoint(endpoint)}.`, err)
+  }
 }
 
 export type GroupSpending = {

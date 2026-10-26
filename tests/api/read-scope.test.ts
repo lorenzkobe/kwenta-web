@@ -22,6 +22,10 @@ import {
  * cannot move group spending (064:27 reads only groups/bills/items/splits). Anything else skips
  * nothing.
  *
+ * 087 (C16) adds two families a new bill cannot change either: `group-payments-page:<id>` (the
+ * group's first 20 payments) and `person-payment-items:...` (the Person statement's payment-row
+ * lookup). Both are built from the same history items, so the same reasoning holds.
+ *
  * Hand-made rows: none — every row comes from the tests/helpers/db.ts factories.
  */
 
@@ -39,21 +43,41 @@ const newBill: CloudWritePayload = {
 }
 
 describe('readsUnaffectedBy', () => {
-  it('C24: a new bill skips the three payment-history families', () => {
+  // group-payments / person-payments are gone from the skip list: 087 renamed those keys to the
+  // *-full and *-page families, so nothing mounted carries them any more.
+  it('C24/C16: a new bill skips every payment-history family, the 087 page and item lookups included', () => {
     expect([...readsUnaffectedBy(newBill, { createsBill: true })].sort()).toEqual([
       'bill-payments',
-      'group-payments',
-      'person-payments',
+      'group-payments-page',
+      'person-payment-items',
     ])
   })
 
-  it('C24: a new bill without an activity line skips the same families', () => {
+  it('C24/C16: a new bill without an activity line skips the same families', () => {
     const payload: CloudWritePayload = { bills: [bill], bill_items: [item], item_splits: [split] }
     expect([...readsUnaffectedBy(payload, { createsBill: true })].sort()).toEqual([
       'bill-payments',
-      'group-payments',
-      'person-payments',
+      'group-payments-page',
+      'person-payment-items',
     ])
+  })
+
+  it('C16: a new bill on a group screen skips the payments first page and the person item lookup', () => {
+    const skipped = readsUnaffectedBy(newBill, { createsBill: true })
+    expect(skipped).toContain('group-payments-page')
+    expect(skipped).toContain('person-payment-items')
+  })
+
+  it('C16 refused side: a payment never skips the payments page or the person item lookup', () => {
+    const skipped = readsUnaffectedBy({ settlements: [settlement], activity_log: [activity] })
+    expect(skipped).not.toContain('group-payments-page')
+    expect(skipped).not.toContain('person-payment-items')
+  })
+
+  it('C16 refused side: an edited bill (createsBill falsy) skips neither new family', () => {
+    const skipped = readsUnaffectedBy({ bills: [bill], bill_items: [item], item_splits: [split] })
+    expect(skipped).not.toContain('group-payments-page')
+    expect(skipped).not.toContain('person-payment-items')
   })
 
   it('C24: a new bill never skips group detail or group spending', () => {

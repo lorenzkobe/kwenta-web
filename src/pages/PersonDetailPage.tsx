@@ -24,6 +24,8 @@ import {
 import { buildMoneyFlowRows } from '@/lib/money-flow'
 import { loadBillExportItems } from '@/lib/export-splits'
 import {
+  ApiError,
+  fetchPersonPaymentItems,
   fetchPersonSettlementHistory,
   fetchPersonStatement,
   fetchPersonStatementPage,
@@ -36,6 +38,7 @@ import {
   type StatementPageEvent,
 } from '@/api/balances'
 import { useServerData } from '@/hooks/useServerData'
+import { relevantDataVersion, useAppStore } from '@/store/app-store'
 import { useKeysetMore } from '@/hooks/useKeysetMore'
 import {
   addProfilePeerLink,
@@ -339,30 +342,40 @@ const statementCursor = (e: StatementPageEvent): StatementCursor => ({ createdAt
 
 const FULL_STATEMENT_FAILED = "Couldn't load the full statement. Check your connection and try again."
 const FULL_STATEMENT_STALE = "Couldn't load every bill. Check your connection and try again."
+const FULL_PAYMENTS_STALE = "Couldn't load every payment. Check your connection and try again."
 
 // Losing access must not read as a connection problem, so a refusal keeps its own wording.
 const fullStatementMessage = (error: unknown) =>
-  error instanceof Error && (error.message === FULL_STATEMENT_STALE || error.message.startsWith('You no longer have access'))
+  error instanceof Error &&
+  (error.message === FULL_STATEMENT_STALE ||
+    error.message === FULL_PAYMENTS_STALE ||
+    error.message.startsWith('You no longer have access'))
     ? error.message
     : FULL_STATEMENT_FAILED
 
+type FullExportData = { events: StatementEvent[]; payments: SettlementHistoryItem[] }
+
 /**
- * Every event of the statement, fetched on tap: the page holds one screenful. Only the events are
- * taken from this answer; money on screen and in a file always comes from the screen's own
- * payloads. A saved copy of the full list is refused while the screen shows fresh data, since its
- * bills would disagree with the balances beside them; when the screen itself is a saved copy, the
- * saved list matches it.
+ * Every event of the statement and every payment between the two, fetched on tap: the page holds
+ * one screenful of each. Only the events and payment items are taken from these answers; money on
+ * screen and in a file always comes from the screen's own payloads. A saved copy of either full
+ * list is refused while the screen shows fresh data, since it would disagree with the balances
+ * beside it; when the screen itself is a saved copy, the saved lists match it.
  */
-async function loadFullStatement(userId: string, personId: string, screenIsCopy: boolean): Promise<StatementEvent[]> {
-  const { data, fromCache } = await fetchPersonStatement(userId, personId)
-  if (fromCache && !screenIsCopy) throw new Error(FULL_STATEMENT_STALE)
-  return data
+async function loadFullExport(userId: string, personId: string, screenIsCopy: boolean): Promise<FullExportData> {
+  const [statement, history] = await Promise.all([
+    fetchPersonStatement(userId, personId),
+    fetchPersonSettlementHistory(userId, personId),
+  ])
+  if (statement.fromCache && !screenIsCopy) throw new Error(FULL_STATEMENT_STALE)
+  if (history.fromCache && !screenIsCopy) throw new Error(FULL_PAYMENTS_STALE)
+  return { events: statement.data, payments: history.data }
 }
 
 type ExportStatement =
   | { status: 'loading' }
   | { status: 'failed'; message: string }
-  | { status: 'ready'; events: StatementEvent[] }
+  | ({ status: 'ready' } & FullExportData)
 
 export function PersonDetailPage() {
   const { personId } = useParams<{ personId: string }>()
@@ -387,7 +400,7 @@ export function PersonDetailPage() {
   // dialog asks for the full statement once and the personal-bill list is built only from that.
   const [exportStatement, setExportStatement] = useState<ExportStatement>({ status: 'loading' })
   const [exportRetry, setExportRetry] = useState(0)
-  const exportFetch = useRef<Promise<StatementEvent[]> | null>(null)
+  const exportFetch = useRef<Promise<FullExportData> | null>(null)
   const screenIsCopy = useRef(false)
   const [statementFilter, setStatementFilter] = useState<StatementFilter>('all')
   // This component is reused when a search or a notification opens another person in place;
@@ -559,26 +572,71 @@ export function PersonDetailPage() {
     [breakdown],
   )
 
-  // Every payment between the two of you, across personal and each shared group (migration 064).
-  // Deliberately per-row rather than bundled: a settle-up spanning several people is not one
-  // payment *to this person*, and its total would credit them money that went elsewhere.
-  const loadPayments = useCallback(
+  // The payments behind the statement rows loaded so far (edit, note, method), asked for in ONE
+  // call over the whole loaded set, whatever the number of pages. It runs once the statement
+  // answer has settled (first page, any reload of the rows held past it, any Show older), so a
+  // write costs one lookup instead of one per intermediate leg set; a new bill's write skips the
+  // `person-payment-items` bump and costs none. Rows are replaced only when the answer lands, so
+  // Show older never blanks the edit buttons already on screen, and a failed lookup keeps them.
+  // The lookup is saved per person (see `fetchPersonPaymentItems`), so offline rows stay editable.
+  const paymentLegKey = useMemo(
     () =>
-      userId && personId
-        ? fetchPersonSettlementHistory(userId, personId)
-        : Promise.reject(new Error('no user')),
-    [userId, personId],
+      statementKeyset.rows
+        .filter((e) => e.type === 'payment')
+        .map((e) => e.id)
+        .sort()
+        .join(','),
+    [statementKeyset.rows],
   )
-  const paymentsQuery = useServerData(
-    userId && personId ? loadPayments : null,
-    [userId, personId],
-    personId ? `person-payments:${personId}` : undefined,
+  const paymentItemsVersion = useAppStore((s) =>
+    relevantDataVersion(s, personId ? `person-payment-items:${personId}` : undefined),
   )
-  const settlements = useMemo(
-    () =>
-      paymentsQuery.loading && !paymentsQuery.data ? undefined : (paymentsQuery.data ?? []),
-    [paymentsQuery.loading, paymentsQuery.data],
+  const statementSettled = !shownStatement.loading && !statementKeyset.reloading && !statementKeyset.loadingMore
+  // The gate opens for a statement ANSWER (the first page's object identity), not on a loading
+  // edge: a primed answer after an online write lands in the same render that would show
+  // `loading`, so no edge is ever seen. It is opened from an effect and bound to that answer, which
+  // keeps the lookup out of two gaps: the render where a new first page sits beside the rows still
+  // held past the old one (the hook flags its reload one render later), and the render where the
+  // version bump has arrived but the statement has not been refetched. The version is read when
+  // the gate opens, so the lookup is keyed on the write that produced this answer.
+  const paymentItemsVersionNow = useRef(paymentItemsVersion)
+  paymentItemsVersionNow.current = paymentItemsVersion
+  const [lookupGate, setLookupGate] = useState<{ open: boolean; answer: unknown; version: number }>({
+    open: false,
+    answer: undefined,
+    version: paymentItemsVersion,
+  })
+  useEffect(
+    () => setLookupGate({ open: statementSettled, answer: shownStatement.data, version: paymentItemsVersionNow.current }),
+    [statementSettled, shownStatement.data],
   )
+  const lookupReady = statementSettled && lookupGate.open && lookupGate.answer === shownStatement.data
+  const [paymentItems, setPaymentItems] = useState<{ personId: string; items: SettlementHistoryItem[] } | null>(null)
+  const askedLookup = useRef<string | null>(null)
+  useEffect(() => {
+    if (!userId || !personId || paymentLegKey === '' || !lookupReady) return
+    const asked = `${userId}|${personId}|${paymentLegKey}|${lookupGate.version}`
+    if (askedLookup.current === asked) return
+    askedLookup.current = asked
+    let cancelled = false
+    let answered = false
+    fetchPersonPaymentItems(userId, personId, paymentLegKey.split(',')).then(
+      ({ data }) => {
+        answered = true
+        if (!cancelled) setPaymentItems({ personId, items: data })
+      },
+      (error: unknown) => {
+        answered = true
+        if (cancelled) return
+        askedLookup.current = null
+        if (error instanceof ApiError && error.message.startsWith('You no longer have access')) setPaymentItems(null)
+      },
+    )
+    return () => {
+      cancelled = true
+      if (!answered && askedLookup.current === asked) askedLookup.current = null
+    }
+  }, [userId, personId, paymentLegKey, lookupGate.version, lookupReady])
 
   const linkableRemotes = useLiveQuery(async () => {
     if (!userId || !personId) return []
@@ -736,10 +794,8 @@ export function PersonDetailPage() {
     // No personal bill at all: the newest event's currency (a page is newest first).
     const anyEventCurrency = page?.events[0]?.currency
     if (anyEventCurrency) return anyEventCurrency
-    const settlementCurrency = settlements?.[0]?.currency
-    if (settlementCurrency) return settlementCurrency
     return sharedGroups[0]?.currency ?? 'PHP'
-  }, [statementQuery.data, settlements, sharedGroups])
+  }, [statementQuery.data, sharedGroups])
 
   const meName = meProfile?.display_name?.trim() || 'You'
 
@@ -758,9 +814,11 @@ export function PersonDetailPage() {
   // Any settlement leg id → its (possibly bundled) history item, so statement rows can edit.
   const settlementByLegId = useMemo(() => {
     const map = new Map<string, SettlementHistoryItem>()
-    for (const item of settlements ?? []) for (const id of item.settlementIds) map.set(id, item)
+    if (paymentItems && paymentItems.personId === personId) {
+      for (const item of paymentItems.items) for (const id of item.settlementIds) map.set(id, item)
+    }
     return map
-  }, [settlements])
+  }, [paymentItems, personId])
 
   useEffect(() => {
     if (personId && userId && personId === userId) {
@@ -777,11 +835,11 @@ export function PersonDetailPage() {
 
   // An export taps the list the open dialog already asked for (or is still asking for), so one
   // open costs one request; the money in a file is the screen's own, with only the events replaced.
-  async function fullStatementEvents(): Promise<StatementEvent[]> {
+  async function fullExportData(): Promise<FullExportData> {
     if (!userId || !personId) throw new Error('no person')
-    if (exportStatement.status === 'ready') return exportStatement.events
+    if (exportStatement.status === 'ready') return exportStatement
     if (exportStatement.status === 'loading' && exportFetch.current) return exportFetch.current
-    return loadFullStatement(userId, personId, screenIsCopy.current)
+    return loadFullExport(userId, personId, screenIsCopy.current)
   }
 
   function openExport() {
@@ -792,11 +850,11 @@ export function PersonDetailPage() {
   useEffect(() => {
     if (!exportOpen || !userId || !personId) return
     let cancelled = false
-    const request = loadFullStatement(userId, personId, screenIsCopy.current)
+    const request = loadFullExport(userId, personId, screenIsCopy.current)
     exportFetch.current = request
     request.then(
-      (events) => {
-        if (!cancelled) setExportStatement({ status: 'ready', events })
+      ({ events, payments }) => {
+        if (!cancelled) setExportStatement({ status: 'ready', events, payments })
       },
       (error: unknown) => {
         if (!cancelled) setExportStatement({ status: 'failed', message: fullStatementMessage(error) })
@@ -1326,18 +1384,24 @@ export function PersonDetailPage() {
           // never shared an expense with this person" and understates the tab to zero.
           onExportPDF={
             statementQuery.data
-              ? async () => generatePersonPDF(personId, await fullStatementEvents(), settlements ?? [])
+              ? async () => {
+                  const { events, payments } = await fullExportData()
+                  return generatePersonPDF(personId, events, payments)
+                }
               : undefined
           }
           onExportCSV={
             statementQuery.data
-              ? async () => exportPersonToCSV(personId, userId, await fullStatementEvents(), settlements ?? [])
+              ? async () => {
+                  const { events, payments } = await fullExportData()
+                  return exportPersonToCSV(personId, userId, events, payments)
+                }
               : undefined
           }
           imageDisabled={exportCardBills === null}
           onClose={() => setExportOpen(false)}
         >
-          {exportCardBills ? (
+          {exportCardBills && exportStatement.status === 'ready' ? (
             <PersonExportCard
               displayName={resolvedDisplayName}
               netByCurrency={netByCurrency ?? new Map()}
@@ -1347,7 +1411,7 @@ export function PersonDetailPage() {
                 currency: g.currency,
                 theirNet: g.theirNet,
               }))}
-              payments={settlements ?? []}
+              payments={exportStatement.payments}
             />
           ) : exportStatement.status === 'failed' ? (
             <div role="alert" className="space-y-3 rounded-2xl bg-white p-5 text-center text-sm text-stone-600">

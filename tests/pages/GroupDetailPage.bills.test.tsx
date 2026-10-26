@@ -146,6 +146,14 @@ vi.mock('@/api/balances', async (importOriginal) => {
         }
       }),
     ),
+    // Payment history is paged since 087 (tests/pages/GroupDetailPage.payments.test.tsx): the screen
+    // reads an empty first page here, and the full list is only fetched for an export.
+    fetchGroupSettlementHistoryPage: vi.fn(async () =>
+      tracked(async () => ({ data: { items: [], matching: 0, totals: [] }, fromCache: false, fetchedAt })),
+    ),
+    fetchGroupSettlementHistoryPageMore: vi.fn(async () =>
+      tracked(async () => ({ data: { items: [], matching: 0, totals: [] }, fromCache: false, fetchedAt })),
+    ),
     fetchGroupSettlementHistory: vi.fn(async () => tracked(async () => ({ data: [], fromCache: false, fetchedAt }))),
     fetchGroupSpending: vi.fn(async () => tracked(async () => ({ data: { rows: [] }, fromCache: false, fetchedAt }))),
   }
