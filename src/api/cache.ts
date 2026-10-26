@@ -37,7 +37,7 @@ export function readCache<T>(endpoint: string, userId: string): CachedResponse<T
 /**
  * How many cached responses to keep.
  *
- * Per-entity endpoints (`bill:<id>`, `group:<id>`, `person:<id>`, `statement:<id>`) mint a new
+ * Per-entity endpoints (`bill:<id>`, `group:<id>`, `person:<id>`, `statement-page:<id>`) mint a new
  * key for every row the user opens, so without a cap the cache grows for the life of the install
  * and eventually fills the origin's storage. The failure that causes is quiet and bad: writes
  * start throwing, the catch below swallows them, and the offline copy silently stops updating —

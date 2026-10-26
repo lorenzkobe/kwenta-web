@@ -3,7 +3,6 @@ import {
   eventRowVersion,
   latestEventCreatedAt,
   planRealtimeBatch,
-  sameInstant,
   type UserEventRow,
 } from '@/sync/realtime-batch'
 import * as batchModule from '@/sync/realtime-batch'
@@ -121,30 +120,10 @@ describe('latestEventCreatedAt', () => {
 
 /**
  * 072: an event carries the version of the row that fired it. The client skips the reconcile when
- * it already mirrors EXACTLY that version, so both helpers below must fail closed: anything they
- * cannot read with certainty means "not mirrored", which falls back to today's reconcile.
+ * it already mirrors EXACTLY that version, so eventRowVersion and `sameInstant` (tests/lib/instant.test.ts)
+ * must fail closed: anything they cannot read with certainty means "not mirrored", which falls back
+ * to today's reconcile.
  */
-describe('sameInstant', () => {
-  it('matches the same instant across the formats Postgres and JS produce', () => {
-    expect(sameInstant('2026-09-24T01:02:03.123456+00:00', '2026-09-24T01:02:03.123456Z')).toBe(true)
-    expect(sameInstant('2026-09-24T01:02:03.123+00:00', '2026-09-24T01:02:03.123Z')).toBe(true)
-    expect(sameInstant('2026-09-24T01:02:03.120+00:00', '2026-09-24T01:02:03.12Z')).toBe(true)
-    expect(sameInstant('2026-09-24T09:02:03.5+08:00', '2026-09-24T01:02:03.500Z')).toBe(true)
-    expect(sameInstant('2026-09-24T01:02:03+00:00', '2026-09-24T01:02:03.000Z')).toBe(true)
-  })
-
-  it('tells apart two versions one microsecond apart (Date.parse would not)', () => {
-    expect(sameInstant('2026-09-24T01:02:03.123456+00:00', '2026-09-24T01:02:03.123457+00:00')).toBe(false)
-    expect(sameInstant('2026-09-24T01:02:03.123+00:00', '2026-09-24T01:02:03.123001+00:00')).toBe(false)
-  })
-
-  it('is false for anything unparseable or missing', () => {
-    expect(sameInstant('not a date', 'not a date')).toBe(false)
-    expect(sameInstant('', '')).toBe(false)
-    expect(sameInstant(undefined as unknown as string, '2026-09-24T01:02:03Z')).toBe(false)
-  })
-})
-
 describe('eventRowVersion', () => {
   const base = {
     id: 'e',

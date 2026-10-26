@@ -786,7 +786,8 @@ BEGIN
     'kwenta_group_member_breakdown',
     'kwenta_group_settlement_history', 'kwenta_group_spending', 'kwenta_groups_with_balances',
     'kwenta_lookup_profile_id_by_email', 'kwenta_my_account_status', 'kwenta_owed_in_group',
-    'kwenta_person_settlement_history', 'kwenta_person_statement', 'kwenta_person_summary',
+    'kwenta_person_settlement_history', 'kwenta_person_statement', 'kwenta_person_statement_page',
+    'kwenta_person_summary',
     'kwenta_personal_bills', 'kwenta_personal_bills_page', 'kwenta_pre_request', 'kwenta_read',
     'kwenta_read_is_allowed', 'kwenta_recent_bills', 'kwenta_reconcile_user_event',
     'kwenta_repair_settlements', 'kwenta_round_money',
@@ -797,6 +798,6 @@ BEGIN
     'is_admin', 'kwenta_pre_request'
   ]::text[], 'C16: anon executes only the RLS helpers and the pre-request hook');
 
-  PERFORM test.note('079 C16: validators server-only, endpoints keep their grant, allowlist gained kwenta_personal_bills_page in 083');
+  PERFORM test.note('079 C16: validators server-only, endpoints keep their grant, allowlist gained kwenta_personal_bills_page in 083 and kwenta_person_statement_page in 086');
 END;
 $$;

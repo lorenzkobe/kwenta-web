@@ -1,3 +1,4 @@
+import { compareInstants } from '@/lib/instant'
 import { roundMoney } from '@/lib/utils'
 
 /**
@@ -10,10 +11,10 @@ import { roundMoney } from '@/lib/utils'
  * Sign convention (matches the rest of the codebase): positive = they owe me / I receive,
  * negative = I owe them / I pay.
  *
- * Reconciliation invariant: per currency, the final `runningNet` equals the total reported by
- * `kwenta_person_summary`. The matching rules that make it hold now live in migration 062 (and
- * are pinned by its SQL suite) — personal events take one split per side per item under expanded
- * ids, group events sum every matching split under exact roster ids.
+ * The running balance is computed by the server (migration 086, `kwenta_person_statement_page`):
+ * the statement is paged, so the client holds a window of the events and cannot walk them. Which
+ * events belong to a pair is migration 062's matching rules, and per currency the newest
+ * `runningNet` equals the total reported by `kwenta_person_summary`; the SQL suites pin both.
  */
 
 export type MoneyFlowRowType = 'personal_bill' | 'group_bill' | 'payment'
@@ -52,12 +53,11 @@ export interface MoneyFlowRow {
 export interface MoneyFlowResult {
   /** Chronological ASCENDING. The UI reverses for a newest-first display. */
   rows: MoneyFlowRow[]
-  currentNet: Map<string, number>
 }
 
 /**
- * One event from `kwenta_person_statement` (migration 062): a bill or payment between the two
- * people, with its signed effect on the tab.
+ * One event of `kwenta_person_statement_page` (migration 086): a bill or payment between the two
+ * people, with its signed effect on the tab and the tab on either side of it.
  */
 export interface MoneyFlowEvent {
   id: string
@@ -71,55 +71,49 @@ export interface MoneyFlowEvent {
   rawAmount: number
   /** Signed change to the tab: + they owe me, - I owe them. */
   delta: number
+  /** The tab in this event's currency AFTER it, over every event of the history, not this page. */
+  runningNet: number
+  /** The tab in this event's currency BEFORE it. */
+  prevRunning: number
 }
 
 /**
- * Walk the events in order, carrying a per-currency running net.
+ * Map server events to statement rows, oldest first.
  *
- * This is the half of the statement that stayed in TypeScript: a pure transform of a bounded
- * list (CLAUDE.md rule 8). Deciding WHICH bills and payments involve this pair, and what each
- * did to the tab, is aggregation over unbounded data and now lives in migration 062.
- *
- * The events must arrive in ascending chronological order — the server orders them by
- * `createdAt` then `id` so the walk is deterministic across devices — but this re-sorts anyway
- * rather than trusting the caller, because a mis-ordered walk silently produces wrong running
- * balances instead of failing.
+ * Nothing is summed here: `runningNet` is the server's, so a page from the middle of the history,
+ * or a payments-only page whose bills sit between the rows, shows the balance it really had. The
+ * events are re-sorted (instant, then id) because `collapsePaymentLegs` needs a bundle's legs
+ * adjacent and a page arrives newest first. The order is the server's (timestamptz, then uuid):
+ * strings are not compared with `localeCompare`, which puts '.' before '+' and so misorders
+ * `10:00:00+00:00` and `10:00:00.0001+00:00`.
  */
 export function buildMoneyFlowRows(events: MoneyFlowEvent[]): MoneyFlowResult {
   const ordered = [...events].sort(
-    (a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id),
+    (a, b) => compareInstants(a.createdAt, b.createdAt) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
   )
 
-  const net = new Map<string, number>()
-  const prevRunning = new Map<string, number>()
-  const rows: MoneyFlowRow[] = []
-
-  for (const ev of ordered) {
-    const cur = ev.currency
-    const runningNet = roundMoney((net.get(cur) ?? 0) + ev.delta)
-    net.set(cur, runningNet)
+  const rows = ordered.map((ev): MoneyFlowRow => {
     const signedAmount = roundMoney(ev.delta)
-    const balanceDelta = roundMoney(runningNet - (prevRunning.get(cur) ?? 0))
-
-    rows.push({
+    return {
       id: ev.id,
       type: ev.type,
       createdAt: ev.createdAt,
-      currency: cur,
+      currency: ev.currency,
       groupId: ev.groupId,
       bundleId: ev.bundleId,
       contextLabel: ev.contextLabel,
       title: ev.title,
       rawAmount: ev.rawAmount,
       signedAmount,
-      runningNet,
-      explanation: { balanceDelta, note: describeNote(ev.type, signedAmount) },
-    })
+      runningNet: ev.runningNet,
+      explanation: {
+        balanceDelta: roundMoney(ev.runningNet - ev.prevRunning),
+        note: describeNote(ev.type, signedAmount),
+      },
+    }
+  })
 
-    prevRunning.set(cur, runningNet)
-  }
-
-  return { rows, currentNet: net }
+  return { rows }
 }
 
 function describeNote(type: MoneyFlowRowType, signedAmount: number): MoneyFlowNote {
@@ -168,8 +162,8 @@ export interface StatementDisplayRow {
  *
  * The legs of a multi-context payment are one real transfer, so the statement shows one row —
  * but it must still say where each slice went, which is what `parts` carries. Bill rows are never
- * merged. Adjacency is enough because `buildMoneyFlowRows` orders by `createdAt` then `id`, and a
- * bundle's legs are written in one transaction.
+ * merged. Adjacency is enough because `buildMoneyFlowRows` orders by `createdAt` then `id`, and the
+ * server never ends a page inside a bundle (086), so all of a bundle's legs are on the page.
  */
 export function collapsePaymentLegs(rows: MoneyFlowRow[]): StatementDisplayRow[] {
   const out: StatementDisplayRow[] = []

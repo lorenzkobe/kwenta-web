@@ -126,7 +126,8 @@ const GROUP_MEMBERSHIP_DECLINED =
 const ENDPOINT_LABELS: Record<string, string> = {
   contacts: 'your contacts',
   overview: 'your balances',
-  statement: 'this statement',
+  'statement-page': 'this statement',
+  'statement-full': 'this statement',
   group: 'this group',
   'group-full': 'this group',
   'group-bills': "this group's bills",
@@ -383,29 +384,124 @@ export type StatementEvent = {
   category: string | null
 }
 
-/** The statement's raw events; the running-balance walk stays in `buildMoneyFlowRows`. */
+function toStatementEvent(e: Record<string, unknown>): StatementEvent {
+  return {
+    id: String(e.id ?? ''),
+    type: (e.type === 'group_bill' || e.type === 'payment' ? e.type : 'personal_bill') as StatementEvent['type'],
+    createdAt: String(e.createdAt ?? ''),
+    currency: String(e.currency ?? ''),
+    groupId: typeof e.groupId === 'string' ? e.groupId : null,
+    bundleId: typeof e.bundleId === 'string' ? e.bundleId : null,
+    contextLabel: String(e.contextLabel ?? ''),
+    title: String(e.title ?? ''),
+    category: typeof e.category === 'string' && e.category ? e.category : null,
+    rawAmount: Number(e.rawAmount ?? 0),
+    delta: Number(e.delta ?? 0),
+  }
+}
+
+/**
+ * The FULL statement, oldest first and without running numbers, for an export fetched on tap.
+ *
+ * It has its own key: it is never mounted, so a write never recomputes it, and it can neither
+ * replace the page's read spec nor consume the page's primed answer. `statement:<id>` is retired
+ * rather than reused, because devices hold a saved copy of this array under it that the paged view
+ * must never read.
+ */
 export async function fetchPersonStatement(userId: string, personId: string) {
   return fetchEndpoint<StatementEvent[]>(
-    `statement:${personId}`,
+    `statement-full:${personId}`,
     userId,
     { fn: 'kwenta_person_statement', argName: 'p_person_id', id: personId },
     (data) => {
-    if (!Array.isArray(data)) throw new Error('unexpected response shape')
-    return (data as Record<string, unknown>[]).map((e) => ({
-      id: String(e.id ?? ''),
-      type: (e.type === 'group_bill' || e.type === 'payment' ? e.type : 'personal_bill') as
-        StatementEvent['type'],
-      createdAt: String(e.createdAt ?? ''),
-      currency: String(e.currency ?? ''),
-      groupId: typeof e.groupId === 'string' ? e.groupId : null,
-      bundleId: typeof e.bundleId === 'string' ? e.bundleId : null,
-      contextLabel: String(e.contextLabel ?? ''),
-      title: String(e.title ?? ''),
-      category: typeof e.category === 'string' && e.category ? e.category : null,
-      rawAmount: Number(e.rawAmount ?? 0),
-      delta: Number(e.delta ?? 0),
-    }))
+      if (!Array.isArray(data)) throw new Error('unexpected response shape')
+      return (data as Record<string, unknown>[]).map(toStatementEvent)
     },
+  )
+}
+
+/** The most events one `kwenta_person_statement_page` call returns: 086 clamps `p_limit` to 1..500. */
+export const MAX_STATEMENT_PAGE_EVENTS = 500
+
+/** A statement event with the tab on either side of it, per currency, over ALL events (086). */
+export type StatementPageEvent = StatementEvent & { runningNet: number; prevRunning: number }
+
+/** `matching` counts the events of the requested kind; the page itself is newest first. */
+export type PersonStatementPage = {
+  events: StatementPageEvent[]
+  matching: number
+  /** Currency of the newest personal bill over the whole history; null when there is none. */
+  latestPersonalCurrency: string | null
+}
+
+/** The last event a reader holds: the next page starts strictly before it (created_at, id). */
+export type StatementCursor = { createdAt: string; id: string }
+
+export type PersonStatementPageQuery = {
+  limit: number
+  kind: 'all' | 'payments'
+  before?: StatementCursor
+}
+
+function toPersonStatementPage(data: unknown): PersonStatementPage {
+  // NULL is the server declining (the person is not yours to read), not an empty statement:
+  // mapping it to no events would read as "No bills or payments between you yet" and be cached so.
+  if (data === null || data === undefined) {
+    throw Object.assign(new Error('permission denied for this statement'), { code: '42501' })
+  }
+  const o = data as Record<string, unknown>
+  const matching = Number(o.matching)
+  return {
+    events: asRecords(o.events).map((e) => ({
+      ...toStatementEvent(e),
+      runningNet: Number(e.runningNet ?? 0),
+      prevRunning: Number(e.prevRunning ?? 0),
+    })),
+    matching: Number.isFinite(matching) ? matching : 0,
+    latestPersonalCurrency: typeof o.latestPersonalCurrency === 'string' && o.latestPersonalCurrency
+      ? o.latestPersonalCurrency
+      : null,
+  }
+}
+
+/**
+ * The Person screen's statement: the newest `limit` events of every kind, each with the running
+ * balance the server computed over the WHOLE history (the walk is SQL, since the client no longer
+ * holds the whole list).
+ *
+ * It owns the `statement-page:<id>` key, so a write recomputes it through `kwenta_read` with the
+ * limit and the re-read costs no request.
+ */
+export async function fetchPersonStatementPage(userId: string, personId: string, opts: { limit?: number } = {}) {
+  const limit = opts.limit ?? 20
+  return fetchEndpoint<PersonStatementPage>(
+    `statement-page:${personId}`,
+    userId,
+    { fn: 'kwenta_person_statement_page', argName: 'p_person_id', id: personId, limit },
+    toPersonStatementPage,
+  )
+}
+
+/**
+ * The statement's other pages. The first Payments page is an ordinary cached read (its arguments
+ * ride `extraArgs`, so a write never asks `kwenta_read` to recompute it, and the next write costs
+ * that filter one refetch); a page `before` an event is a "Show older" step, live only.
+ */
+export async function fetchPersonStatementPageMore(userId: string, personId: string, query: PersonStatementPageQuery) {
+  const args: Record<string, unknown> = { p_person_id: personId, p_limit: query.limit, p_kind: query.kind }
+  if (query.before) {
+    return fetchCursorPage(
+      'kwenta_person_statement_page',
+      { ...args, p_before: query.before },
+      'statement-page',
+      toPersonStatementPage,
+    )
+  }
+  return fetchEndpoint<PersonStatementPage>(
+    `statement-page:${personId}:${query.kind}`,
+    userId,
+    { fn: 'kwenta_person_statement_page', extraArgs: args },
+    toPersonStatementPage,
   )
 }
 

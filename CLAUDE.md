@@ -380,15 +380,16 @@ was the saved copy).
 An access-lost `ApiError` or `ServerDeclinedError` clears the seeded copy. The seed is chosen
 during render, so a subject change never paints the previous subject for a frame.
 
-**Payloads are kept small (083, 085).** Four rules, detail in migrations `083`'s and `085`'s headers:
+**Payloads are kept small (083, 085, 086).** Five rules, detail in migrations `083`'s, `085`'s and `086`'s headers:
 - `kwenta_group_detail.rawDebts` is already **netted**: one `{from, to, amount}` per unordered pair of literal ids, in integer cents, zero nets dropped, ordered by from, to — never one edge per split. `buildDebtGraph` over it is a no-op (same pair nets); the order is what keeps the greedy `buildSuggestedPayers` stable across loads. Do not add a per-split list back.
 - The **Bills page pages on the server**: `kwenta_personal_bills_page` (shares `kwenta_personal_bills()`'s one row builder, `kwenta_personal_bill_rows`, which 084 runs only for the returned page's bills) returns 20 rows per tab with server-side filter, category, sort and counts (`{rows, matching, mine, shared, categories}`); Paging is keyset: `p_after` = the last loaded row's `{id, createdAt, title}` returns the next 20 after that position (compared on key values, so a deleted cursor row still works), with no 500-row ceiling on the walk. Export fetches the full list (`fetchPersonalBills`) on tap. The page endpoint is never primed by a write: `kwenta_read` dispatches only `fn`/`id`/`limit`, so the page refetches the pages it holds after a write. The full endpoint stays for Export and installed older builds.
 - The **group bill list pages on the server** (085): the group screen reads `kwenta_group_detail_paged(p_group_id, p_limit)` (key `group:<id>`, 20 newest bills plus `billCount` and `billPayers` over every live bill, primed by writes because `kwenta_read` dispatches it with the spec's limit) and walks the rest, or one payer's bills, through `kwenta_group_bills_page(p_group_id, p_limit, p_payer, p_after)` (`{rows, matching}`, keyset on `{id, createdAt}`, never primed). Both share one bill-row builder and one membership gate with `kwenta_group_detail(uuid)`, which stays untouched, with no new key, for installed builds and for any `kwenta_read` spec without a `limit`. CSV/PDF export and the member share card fetch the full list on tap under their own key `group-full:<id>`, so a full fetch never replaces the page's mounted read spec.
+- The **Person statement pages on the server** (086): the screen reads `kwenta_person_statement_page(p_person_id, p_limit, p_kind, p_before)` (key `statement-page:<id>`, 20 newest events as `{events, matching, latestPersonalCurrency}`, primed by writes because `kwenta_read` dispatches it with the spec's limit and kind `all`) and walks older events, or the Payments filter, with a `{createdAt, id}` keyset cursor (never primed, never cached past the first page). Each event carries `runningNet` and `prevRunning`, the per-currency cumulative sum over ALL the pair's events in (created_at, id) order, computed BEFORE the kind filter and the cursor, so a row deep in history or under Payments shows the number the full history implies. A page whose oldest row is a payment leg extends down to its bundle's oldest leg (taking every event of the kind in between), because `collapsePaymentLegs` merges only adjacent legs. `latestPersonalCurrency` (newest live personal bill, whole history) is what the payment dialog defaults to. `kwenta_person_statement(uuid)` stays byte-identical for installed builds; PDF/CSV, the export's personal-bill list and card fetch it whole on tap under `statement-full:<id>`, so a full fetch never replaces the page's mounted read spec.
 - **Scoped refresh.** A write skips refreshing screens it provably cannot change: a new bill skips the three payment-history families (`group-payments`, `bill-payments`, `person-payments`), a payment-only write skips `group-spending`; `updateBill`/`deleteBill` and every mixed payload skip nothing. `readsUnaffectedBy` (`src/api/read-scope.ts`) decides; `commitCloudFirstWrite` drops those families from `p_reads` and the store records per-family skipped-bump counts, which `useServerData` subtracts (`relevantDataVersion`) so coalesced bumps never lose a real invalidation. Queued/offline writes and every non-write bump (realtime, sync, Refresh) invalidate everything.
 
 What is left in TypeScript is pure transforms of bounded input, each with its Vitest coverage:
 `computeSplits`, `buildSuggestedPayers` (`settlement-suggestions.ts`), `buildMovementChains`
-(`settlement.ts`), `buildMoneyFlowRows` + `collapsePaymentLegs` (`money-flow.ts`),
+(`settlement.ts`), `collapsePaymentLegs` + the `buildMoneyFlowRows` mapper (`money-flow.ts`),
 `allocatePersonPayment` (`payment-allocation.ts`), `roundMoney`/`isEffectivelyZero`.
 
 ### Reads are always fresh (no pull cursor)
@@ -544,10 +545,9 @@ An export that recomputed its own money could disagree with the screen it was ex
 and did, once reads became server-side. Descriptive rows (item names, per-member share matrices)
 still come from the local mirror: those are records, not derived money.
 
-**Statement:** the Person page timeline is server events (`062`) walked by `buildMoneyFlowRows`
-(`src/lib/money-flow.ts`). Its last running number must equal the hero — pinned in SQL, not TS.
+**Statement:** the Person page timeline is server events (`062`, paged by `086`) with the running balance computed in SQL: `runningNet` and `prevRunning` per event, a per-currency window sum over the pair's whole history. The client holds one page, so it cannot walk the list; `buildMoneyFlowRows` (`src/lib/money-flow.ts`) is a mapper over those numbers (`balanceDelta` = `runningNet - prevRunning`, the note). The newest event's running number must equal the hero — pinned in SQL (`086`'s suite, with the walk's rules), not TS.
 
-**Payments:** `recordPersonPayment` (`operations.ts`) writes one atomic payment; multi-context allocations share a `bundle_id` (partition the total, never duplicate). "Settle up" = a `RecordPaymentDialog` prefilled to the full balance. The Person page statement (`buildMoneyFlowRows` + `collapsePaymentLegs` + `PersonStatement.tsx`) is the running-balance timeline (the standalone `/ledger` route is retired).
+**Payments:** `recordPersonPayment` (`operations.ts`) writes one atomic payment; multi-context allocations share a `bundle_id` (partition the total, never duplicate). "Settle up" = a `RecordPaymentDialog` prefilled to the full balance. The Person page statement (server running numbers via `buildMoneyFlowRows` + `collapsePaymentLegs` + `PersonStatement.tsx`) is the running-balance timeline (the standalone `/ledger` route is retired).
 
 **Splitting one payment across contexts** (`RecordPaymentDialog`, three modes over
 `allocatePersonPayment`): the **typed amount is authoritative** in every mode — the boxes never
@@ -858,7 +858,7 @@ Each of these reflects a real past correction in this repo:
 2. **Deletion is server-authoritative.** A device is sent only its own profile plus its own
    local contacts, so it can never conclude that a person/bill/group does not exist. No
    client-side soft-delete driven by a missing row — ever.
-3. **Migrations are append-only.** Next number: **`086`**. Never edit a past migration.
+3. **Migrations are append-only.** Next number: **`087`**. Never edit a past migration.
    **Every migration carries its own explanatory header** — what broke, why the shape is
    what it is, and whether it must be applied before the code that uses it ships. That
    header is the canonical record; read it rather than trusting any summary. A signature or

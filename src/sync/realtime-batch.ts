@@ -176,31 +176,3 @@ export function eventRowVersion(
   if (typeof id !== 'string' || id === '' || typeof updatedAt !== 'string' || updatedAt === '') return null
   return { table, id, updatedAt }
 }
-
-const TIMESTAMP_RE = /^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})(?:\.(\d{1,9}))?(Z|[+-]\d{2}(?::?\d{2})?)$/
-
-function parseInstant(value: string): { seconds: number; nanos: string } | null {
-  const m = typeof value === 'string' ? TIMESTAMP_RE.exec(value) : null
-  if (!m) return null
-  const [, date, time, fraction = '', zone] = m
-  let offset = zone
-  if (zone !== 'Z') {
-    const digits = zone.slice(1).replace(':', '')
-    offset = `${zone[0]}${digits.slice(0, 2)}:${digits.slice(2, 4) || '00'}`
-  }
-  const ms = Date.parse(`${date}T${time}${offset}`)
-  if (Number.isNaN(ms)) return null
-  return { seconds: ms / 1000, nanos: fraction.padEnd(9, '0') }
-}
-
-/**
- * Whether two timestamps name the same instant, to the microsecond. Postgres stores microseconds
- * and `Date.parse` keeps milliseconds, so two versions of one row written within the same
- * millisecond would compare equal there — and an event for the second would be skipped as if the
- * first were it. False for anything unparseable.
- */
-export function sameInstant(a: string, b: string): boolean {
-  const x = parseInstant(a)
-  const y = parseInstant(b)
-  return x !== null && y !== null && x.seconds === y.seconds && x.nanos === y.nanos
-}

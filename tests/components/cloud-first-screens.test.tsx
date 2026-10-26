@@ -87,6 +87,8 @@ vi.mock('@/api/balances', async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
   fetchPersonSummary: vi.fn(() => new Promise(() => {})),
   fetchPersonStatement: vi.fn(() => new Promise(() => {})),
+  fetchPersonStatementPage: vi.fn(() => new Promise(() => {})),
+  fetchPersonStatementPageMore: vi.fn(() => new Promise(() => {})),
   fetchPersonSettlementHistory: vi.fn(() => new Promise(() => {})),
 }))
 vi.mock('@/hooks/useExchangeRate', () => ({ useExchangeRate: () => ({ live: null, loading: false }) }))

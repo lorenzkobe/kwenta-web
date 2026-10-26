@@ -2,6 +2,7 @@ import { supabase } from '@/lib/supabase'
 import { db } from '@/db/db'
 import { captureMetric, withMetric } from '@/lib/client-metrics'
 import { isRuntimeFlagEnabled } from '@/lib/runtime-flags'
+import { sameInstant } from '@/lib/instant'
 import { advanceRealtimeCursor, readRealtimeCursor, realtimeCursorKey } from '@/lib/kwenta-storage-keys'
 import { markRealtimeProcessingFailed, realtimeProcessingFailed } from '@/sync/realtime-health'
 import type {
@@ -28,7 +29,6 @@ import {
   eventRowVersion,
   groupByEntity,
   planRealtimeBatch,
-  sameInstant,
   type EntityEvents,
   type UserEventRow,
 } from '@/sync/realtime-batch'

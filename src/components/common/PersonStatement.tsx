@@ -1,11 +1,11 @@
-import { useMemo, useState } from 'react'
+import { useMemo } from 'react'
 import { Banknote, ChevronRight, Pencil, Receipt, Split, Users } from 'lucide-react'
 import type { SettlementHistoryItem } from '@/api/balances'
 import { collapsePaymentLegs, type MoneyFlowResult } from '@/lib/money-flow'
 import { Badge } from '@/components/ui/badge'
 import { cn, formatCurrency } from '@/lib/utils'
 
-const PAGE = 20
+export type StatementFilter = 'all' | 'payments'
 
 function fmtDate(iso: string): string {
   return new Date(iso).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })
@@ -13,11 +13,26 @@ function fmtDate(iso: string): string {
 
 export function PersonStatement({
   result,
+  failed = false,
+  filter,
+  onFilterChange,
+  hasOlder,
+  loadingOlder,
+  onShowOlder,
   onEditPayment,
   paymentsByLegId,
   onOpenBill,
 }: {
+  /** The rows the server sent for the chosen filter; undefined while they load. */
   result: MoneyFlowResult | undefined
+  /** The first page could not be read: nothing below the filter says "empty" for that. */
+  failed?: boolean
+  /** Both filters are asked of the server, so the list is never a client-side slice. */
+  filter: StatementFilter
+  onFilterChange: (filter: StatementFilter) => void
+  hasOlder: boolean
+  loadingOlder: boolean
+  onShowOlder: () => void
   /** Given a settlement id in a payment row, open its editor. */
   onEditPayment?: (settlementId: string) => void
   /**
@@ -28,22 +43,8 @@ export function PersonStatement({
   /** Given a bill id in a bill row, open its detail sheet. */
   onOpenBill?: (billId: string) => void
 }) {
-  const [filter, setFilter] = useState<'all' | 'payments'>('all')
-  const [visible, setVisible] = useState(PAGE)
-
   // Newest-first for display; each row keeps its as-of running balance.
-  const rowsDesc = useMemo(() => {
-    if (!result) return []
-    const collapsed = collapsePaymentLegs(result.rows)
-    const filtered = filter === 'payments' ? collapsed.filter((r) => r.kind === 'payment') : collapsed
-    return [...filtered].reverse()
-  }, [result, filter])
-
-  const shown = rowsDesc.slice(0, visible)
-
-  if (!result) {
-    return <p className="mt-3 text-sm text-stone-500">Loading statement…</p>
-  }
+  const rowsDesc = useMemo(() => (result ? [...collapsePaymentLegs(result.rows)].reverse() : []), [result])
 
   return (
     <div className="mt-3">
@@ -52,7 +53,7 @@ export function PersonStatement({
           <button
             key={f}
             type="button"
-            onClick={() => setFilter(f)}
+            onClick={() => onFilterChange(f)}
             className={cn(
               'rounded-full px-3 py-1 font-medium transition-colors',
               filter === f ? 'bg-white text-stone-900 shadow-sm' : 'text-stone-500 hover:text-stone-800',
@@ -63,14 +64,16 @@ export function PersonStatement({
         ))}
       </div>
 
-      {rowsDesc.length === 0 ? (
+      {!result ? (
+        failed ? null : <p className="text-sm text-stone-500">Loading statement…</p>
+      ) : rowsDesc.length === 0 ? (
         <p className="text-sm text-stone-500">
           {filter === 'payments' ? 'No payments recorded yet.' : 'No bills or payments between you yet.'}
         </p>
       ) : (
         <>
           <ul className="space-y-2">
-            {shown.map((row) => {
+            {rowsDesc.map((row) => {
               const isBill = row.kind === 'bill'
               const positive = row.signedAmount >= 0
               const editableId = row.settlementIds.find((id) => paymentsByLegId?.has(id))
@@ -195,13 +198,14 @@ export function PersonStatement({
               )
             })}
           </ul>
-          {rowsDesc.length > visible && (
+          {hasOlder && (
             <button
               type="button"
-              onClick={() => setVisible((n) => n + PAGE)}
-              className="mt-3 w-full rounded-xl border border-stone-200 py-2.5 text-sm font-medium text-stone-500 transition-colors hover:bg-stone-50"
+              disabled={loadingOlder}
+              onClick={onShowOlder}
+              className="mt-3 w-full rounded-xl border border-stone-200 py-2.5 text-sm font-medium text-stone-500 transition-colors hover:bg-stone-50 disabled:opacity-60"
             >
-              Show more ({rowsDesc.length - visible} remaining)
+              Show older
             </button>
           )}
         </>

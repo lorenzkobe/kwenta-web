@@ -457,8 +457,11 @@ describe('balance API wrappers', () => {
     it('caches per person', async () => {
       rpc.mockResolvedValue({ data: [], error: null })
       await fetchPersonStatement('u1', 'alice')
-      expect(readCache('statement:alice', 'u1')).not.toBeNull()
-      expect(readCache('statement:bob', 'u1')).toBeNull()
+      // The full statement (exports) has its own key since 086: `statement:<id>` held an old shape
+      // that the paged view must never read, and the page owns `statement-page:<id>`.
+      expect(readCache('statement-full:alice', 'u1')).not.toBeNull()
+      expect(readCache('statement-full:bob', 'u1')).toBeNull()
+      expect(readCache('statement:alice', 'u1')).toBeNull()
     })
   })
 

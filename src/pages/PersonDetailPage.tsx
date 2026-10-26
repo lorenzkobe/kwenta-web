@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect, useCallback } from 'react'
+import { useState, useMemo, useEffect, useCallback, useRef } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import {
   ArrowLeft,
@@ -26,10 +26,17 @@ import { loadBillExportItems } from '@/lib/export-splits'
 import {
   fetchPersonSettlementHistory,
   fetchPersonStatement,
+  fetchPersonStatementPage,
+  fetchPersonStatementPageMore,
   fetchPersonSummary,
+  MAX_STATEMENT_PAGE_EVENTS,
   totalsToMap,
+  type StatementCursor,
+  type StatementEvent,
+  type StatementPageEvent,
 } from '@/api/balances'
 import { useServerData } from '@/hooks/useServerData'
+import { useKeysetMore } from '@/hooks/useKeysetMore'
 import {
   addProfilePeerLink,
   deletePerson,
@@ -47,7 +54,7 @@ import {
   RecordPaymentDialog,
   type PaymentContext,
 } from '@/components/common/RecordPaymentDialog'
-import { PersonStatement } from '@/components/common/PersonStatement'
+import { PersonStatement, type StatementFilter } from '@/components/common/PersonStatement'
 import { BillDetailModal } from '@/components/common/BillDetailModal'
 import { ExportImageDialog } from '@/components/export/ExportImageDialog'
 import { PersonExportCard, type PersonBillEntry } from '@/components/export/PersonExportCard'
@@ -326,6 +333,37 @@ function LinkAccountSheet({
   )
 }
 
+const STATEMENT_PAGE_SIZE = 20
+
+const statementCursor = (e: StatementPageEvent): StatementCursor => ({ createdAt: e.createdAt, id: e.id })
+
+const FULL_STATEMENT_FAILED = "Couldn't load the full statement. Check your connection and try again."
+const FULL_STATEMENT_STALE = "Couldn't load every bill. Check your connection and try again."
+
+// Losing access must not read as a connection problem, so a refusal keeps its own wording.
+const fullStatementMessage = (error: unknown) =>
+  error instanceof Error && (error.message === FULL_STATEMENT_STALE || error.message.startsWith('You no longer have access'))
+    ? error.message
+    : FULL_STATEMENT_FAILED
+
+/**
+ * Every event of the statement, fetched on tap: the page holds one screenful. Only the events are
+ * taken from this answer; money on screen and in a file always comes from the screen's own
+ * payloads. A saved copy of the full list is refused while the screen shows fresh data, since its
+ * bills would disagree with the balances beside them; when the screen itself is a saved copy, the
+ * saved list matches it.
+ */
+async function loadFullStatement(userId: string, personId: string, screenIsCopy: boolean): Promise<StatementEvent[]> {
+  const { data, fromCache } = await fetchPersonStatement(userId, personId)
+  if (fromCache && !screenIsCopy) throw new Error(FULL_STATEMENT_STALE)
+  return data
+}
+
+type ExportStatement =
+  | { status: 'loading' }
+  | { status: 'failed'; message: string }
+  | { status: 'ready'; events: StatementEvent[] }
+
 export function PersonDetailPage() {
   const { personId } = useParams<{ personId: string }>()
   const navigate = useNavigate()
@@ -345,6 +383,22 @@ export function PersonDetailPage() {
   )
   const [peerLinkToUnlink, setPeerLinkToUnlink] = useState<ProfilePeerLink | null>(null)
   const [exportOpen, setExportOpen] = useState(false)
+  // The share card and the PDF/CSV list every bill, but the page holds one screenful: opening the
+  // dialog asks for the full statement once and the personal-bill list is built only from that.
+  const [exportStatement, setExportStatement] = useState<ExportStatement>({ status: 'loading' })
+  const [exportRetry, setExportRetry] = useState(0)
+  const exportFetch = useRef<Promise<StatementEvent[]> | null>(null)
+  const screenIsCopy = useRef(false)
+  const [statementFilter, setStatementFilter] = useState<StatementFilter>('all')
+  // This component is reused when a search or a notification opens another person in place;
+  // nothing chosen for one person (a filter, an open export) carries over to the next. Reset
+  // during render, so the new person's first render never asks for the old filter's page.
+  const [shownPersonId, setShownPersonId] = useState(personId)
+  if (shownPersonId !== personId) {
+    setShownPersonId(personId)
+    setStatementFilter('all')
+    setExportOpen(false)
+  }
 
   const profile = useLiveQuery(
     async (): Promise<Profile | null | undefined> => {
@@ -426,23 +480,60 @@ export function PersonDetailPage() {
     personId ? `person:${personId}` : undefined,
   )
 
-  // The events come from the server (migration 062); the running-balance walk stays local. The
-  // last running number has to equal the hero above it — the SQL suite pins that invariant.
+  // The newest events come from the server (migration 062), each with the running balance the
+  // server computed over the whole history (086): the page holds a window, so it cannot walk the
+  // list. The newest number has to equal the hero above it — the SQL suite pins that invariant.
   const loadStatement = useCallback(
     () =>
       userId && personId
-        ? fetchPersonStatement(userId, personId)
+        ? fetchPersonStatementPage(userId, personId, { limit: STATEMENT_PAGE_SIZE })
         : Promise.reject(new Error('no user')),
     [userId, personId],
   )
   const statementQuery = useServerData(
     userId && personId ? loadStatement : null,
     [userId, personId, loadStatement],
-    personId ? `statement:${personId}` : undefined,
+    personId ? `statement-page:${personId}` : undefined,
   )
+  screenIsCopy.current = statementQuery.fromCache && !statementQuery.revalidating
+
+  // Payments only is asked of the server: the bills between two payments still count towards each
+  // payment's balance, which a slice of the loaded rows could not know.
+  const paymentsOnly = statementFilter === 'payments'
+  const loadPaymentsStatement = useCallback(
+    () =>
+      userId && personId
+        ? fetchPersonStatementPageMore(userId, personId, { limit: STATEMENT_PAGE_SIZE, kind: 'payments' })
+        : Promise.reject(new Error('no user')),
+    [userId, personId],
+  )
+  const paymentsStatementQuery = useServerData(
+    userId && personId && paymentsOnly ? loadPaymentsStatement : null,
+    [userId, personId, paymentsOnly],
+    personId && paymentsOnly ? `statement-page:${personId}:payments` : undefined,
+  )
+  const shownStatement = paymentsOnly ? paymentsStatementQuery : statementQuery
+  const statementFirstPage = useMemo(
+    () => (shownStatement.data ? { rows: shownStatement.data.events, matching: shownStatement.data.matching } : undefined),
+    [shownStatement.data],
+  )
+  const statementKeyset = useKeysetMore({
+    userId,
+    listKey: `${personId ?? ''}:${statementFilter}`,
+    page: statementFirstPage,
+    pageFromCache: shownStatement.fromCache,
+    pageSize: STATEMENT_PAGE_SIZE,
+    maxPerCall: MAX_STATEMENT_PAGE_EVENTS,
+    cursorOf: statementCursor,
+    fetchAfter: async (before, limit) => {
+      const { data } = await fetchPersonStatementPageMore(userId!, personId!, { limit, kind: statementFilter, before })
+      return { rows: data.events, matching: data.matching }
+    },
+    errorMessage: 'Could not load older activity.',
+  })
   const statement = useMemo(
-    () => (statementQuery.data ? buildMoneyFlowRows(statementQuery.data) : undefined),
-    [statementQuery.data],
+    () => (statementFirstPage ? buildMoneyFlowRows(statementKeyset.rows) : undefined),
+    [statementFirstPage, statementKeyset.rows],
   )
 
   const breakdown = useMemo(() => {
@@ -575,15 +666,16 @@ export function PersonDetailPage() {
     return formatPairwiseSummary(breakdown.overall)
   }, [breakdown])
 
-  // The statement already carries every bill between these two with its signed effect on the
-  // tab, so the personal-bill rows and their directions come from it rather than from a second
-  // pass over the local mirror — which is also what stops the two disagreeing.
+  // The full statement carries every bill between these two with its signed effect on the tab,
+  // so the personal-bill rows and their directions come from it rather than from a second pass
+  // over the local mirror — which is also what stops the two disagreeing.
+  const exportEvents = exportStatement.status === 'ready' ? exportStatement.events : null
   const personalBills = useMemo(
     () =>
-      (statementQuery.data ?? [])
+      (exportEvents ?? [])
         .filter((e) => e.type === 'personal_bill')
         .map((e) => ({ id: e.id, title: e.title, currency: e.currency, net: e.delta })),
-    [statementQuery.data],
+    [exportEvents],
   )
 
   const personalBillDirection = useMemo(
@@ -596,8 +688,11 @@ export function PersonDetailPage() {
     [personSummary.data],
   )
 
+  // Tagged with the bill list it was built from, so the card never shows an answer built from an
+  // earlier list (or none) as if it were this one.
   const exportBillDetails = useLiveQuery(async () => {
-    if (!exportOpen || !userId || !personId) return [] as PersonBillEntry[]
+    const source = personalBills
+    if (!exportOpen || !userId || !personId) return { source, entries: [] as PersonBillEntry[] }
     // A personal bill is "open" only when you're not square in its currency (tab-derived,
     // matching the hero). Untagged settle-ups clear the whole tab, not individual bills, so a
     // per-bill net never reflects a payment on its own — gate on the overall standing so a
@@ -613,7 +708,7 @@ export function PersonDetailPage() {
       userId,
     )
     const bills = await db.bills.bulkGet(unsettled.map((b) => b.id))
-    return unsettled.flatMap((b, i) => {
+    const entries = unsettled.flatMap((b, i) => {
       const row = bills[i]
       if (!row || row.is_deleted) return []
       return [
@@ -626,24 +721,25 @@ export function PersonDetailPage() {
         },
       ]
     })
+    return { source, entries }
   }, [exportOpen, userId, personId, personalBills, personalBillDirection, netByCurrency])
+  const exportCardBills =
+    exportStatement.status === 'ready' && exportBillDetails?.source === personalBills ? exportBillDetails.entries : null
 
   const defaultCurrency = useMemo(() => {
-    // The MOST RECENT personal bill. `personalBills` comes from `kwenta_person_statement`, whose
-    // events are ordered ASCENDING, while the query this replaced sorted descending — so `[0]`
-    // silently became the oldest bill and prefilled the payment dialog with a currency the user
-    // last used years ago. Every balance is currency-scoped, so a payment recorded under the
-    // wrong one does not reduce the tab it was meant to settle.
-    const pb = personalBills[personalBills.length - 1]
-    if (pb) return pb.currency
-    // Also the newest, for the same reason: statement events are ascending.
-    const events = statementQuery.data ?? []
-    const anyEventCurrency = events[events.length - 1]?.currency
+    // The MOST RECENT personal bill, over the whole history: the server answers it
+    // (`latestPersonalCurrency`) because the loaded page may not reach it. Every balance is
+    // currency-scoped, so a payment recorded under the wrong currency does not reduce the tab it
+    // was meant to settle.
+    const page = statementQuery.data
+    if (page?.latestPersonalCurrency) return page.latestPersonalCurrency
+    // No personal bill at all: the newest event's currency (a page is newest first).
+    const anyEventCurrency = page?.events[0]?.currency
     if (anyEventCurrency) return anyEventCurrency
     const settlementCurrency = settlements?.[0]?.currency
     if (settlementCurrency) return settlementCurrency
     return sharedGroups[0]?.currency ?? 'PHP'
-  }, [personalBills, statementQuery.data, settlements, sharedGroups])
+  }, [statementQuery.data, settlements, sharedGroups])
 
   const meName = meProfile?.display_name?.trim() || 'You'
 
@@ -678,6 +774,38 @@ export function PersonDetailPage() {
     setPeerToLinkConfirm(null)
     setPeerLinkToUnlink(null)
   }, [personId])
+
+  // An export taps the list the open dialog already asked for (or is still asking for), so one
+  // open costs one request; the money in a file is the screen's own, with only the events replaced.
+  async function fullStatementEvents(): Promise<StatementEvent[]> {
+    if (!userId || !personId) throw new Error('no person')
+    if (exportStatement.status === 'ready') return exportStatement.events
+    if (exportStatement.status === 'loading' && exportFetch.current) return exportFetch.current
+    return loadFullStatement(userId, personId, screenIsCopy.current)
+  }
+
+  function openExport() {
+    setExportStatement({ status: 'loading' })
+    setExportOpen(true)
+  }
+
+  useEffect(() => {
+    if (!exportOpen || !userId || !personId) return
+    let cancelled = false
+    const request = loadFullStatement(userId, personId, screenIsCopy.current)
+    exportFetch.current = request
+    request.then(
+      (events) => {
+        if (!cancelled) setExportStatement({ status: 'ready', events })
+      },
+      (error: unknown) => {
+        if (!cancelled) setExportStatement({ status: 'failed', message: fullStatementMessage(error) })
+      },
+    )
+    return () => {
+      cancelled = true
+    }
+  }, [exportOpen, exportRetry, userId, personId])
 
   if (!userId || !personId) {
     return (
@@ -871,7 +999,7 @@ export function PersonDetailPage() {
             className="rounded-full"
             aria-label="Share person summary"
             type="button"
-            onClick={() => setExportOpen(true)}
+            onClick={openExport}
           >
             <Share2 className="size-4" />
           </Button>
@@ -1050,7 +1178,7 @@ export function PersonDetailPage() {
         <p className="mt-1 text-xs text-stone-500">
           Every bill and payment between you, in order, with a running balance.
         </p>
-        {statementQuery.error && !statementQuery.data && (
+        {shownStatement.error && !shownStatement.data && (
           // An empty statement reads as "nothing has happened between you"; a failed request is
           // not that, and the running balance below the hero would be missing without saying why.
           <div
@@ -1058,12 +1186,12 @@ export function PersonDetailPage() {
             className="mt-3 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2.5 text-sm text-amber-950"
           >
             <p className="font-medium">Statement unavailable</p>
-            <p className="mt-0.5 text-xs text-amber-900/80">{statementQuery.error}</p>
+            <p className="mt-0.5 text-xs text-amber-900/80">{shownStatement.error}</p>
             <Button
               size="xs"
               variant="ghost"
               className="mt-2 rounded-full text-amber-900"
-              onClick={statementQuery.refresh}
+              onClick={shownStatement.refresh}
             >
               Try again
             </Button>
@@ -1071,6 +1199,12 @@ export function PersonDetailPage() {
         )}
         <PersonStatement
           result={statement}
+          failed={Boolean(shownStatement.error) && !shownStatement.data}
+          filter={statementFilter}
+          onFilterChange={setStatementFilter}
+          hasOlder={statementKeyset.remaining > 0}
+          loadingOlder={statementKeyset.loadingMore || statementKeyset.reloading}
+          onShowOlder={statementKeyset.showMore}
           paymentsByLegId={settlementByLegId}
           onEditPayment={(id) => {
             const item = settlementByLegId.get(id)
@@ -1192,27 +1326,50 @@ export function PersonDetailPage() {
           // never shared an expense with this person" and understates the tab to zero.
           onExportPDF={
             statementQuery.data
-              ? () => generatePersonPDF(personId, statementQuery.data!, settlements ?? [])
+              ? async () => generatePersonPDF(personId, await fullStatementEvents(), settlements ?? [])
               : undefined
           }
           onExportCSV={
             statementQuery.data
-              ? () => exportPersonToCSV(personId, userId, statementQuery.data!, settlements ?? [])
+              ? async () => exportPersonToCSV(personId, userId, await fullStatementEvents(), settlements ?? [])
               : undefined
           }
+          imageDisabled={exportCardBills === null}
           onClose={() => setExportOpen(false)}
         >
-          <PersonExportCard
-            displayName={resolvedDisplayName}
-            netByCurrency={netByCurrency ?? new Map()}
-            unsettledPersonalBills={exportBillDetails ?? []}
-            sharedGroups={sharedGroups.map((g) => ({
-              groupName: g.groupName,
-              currency: g.currency,
-              theirNet: g.theirNet,
-            }))}
-            payments={settlements ?? []}
-          />
+          {exportCardBills ? (
+            <PersonExportCard
+              displayName={resolvedDisplayName}
+              netByCurrency={netByCurrency ?? new Map()}
+              unsettledPersonalBills={exportCardBills}
+              sharedGroups={sharedGroups.map((g) => ({
+                groupName: g.groupName,
+                currency: g.currency,
+                theirNet: g.theirNet,
+              }))}
+              payments={settlements ?? []}
+            />
+          ) : exportStatement.status === 'failed' ? (
+            <div role="alert" className="space-y-3 rounded-2xl bg-white p-5 text-center text-sm text-stone-600">
+              <p>{exportStatement.message}</p>
+              <Button
+                size="sm"
+                variant="outline"
+                className="rounded-full"
+                onClick={() => {
+                  setExportStatement({ status: 'loading' })
+                  setExportRetry((n) => n + 1)
+                }}
+              >
+                Try again
+              </Button>
+            </div>
+          ) : (
+            <div className="flex items-center justify-center gap-2 py-12 text-sm text-stone-500">
+              <Loader2 className="size-4 animate-spin" />
+              Loading every bill…
+            </div>
+          )}
         </ExportImageDialog>
       )}
     </div>
