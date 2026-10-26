@@ -8,6 +8,7 @@ import { deleteBill } from '@/db/operations'
 import {
   fetchPersonalBills,
   fetchPersonalBillsPage,
+  MAX_BILLS_PAGE_ROWS,
   personalBillsPageKey,
   type PersonalBillRow,
 } from '@/api/balances'
@@ -49,9 +50,6 @@ type PageMeta = { mine: number; shared: number; categories: string[] }
 
 /** Rows loaded past the first page by "Show more", for the list identified by `key`. */
 type MoreRows = { key: string; rows: PersonalBillRow[]; matching: number }
-
-/** The largest page the server returns in one call (kwenta_personal_bills_page clamps `p_limit`). */
-const MAX_PAGE_ROWS = 500
 
 const EMPTY_UNSENT = { newBills: [] as PersonalBillRow[], pendingIds: new Set<string>() }
 
@@ -156,7 +154,7 @@ export function BillsPage() {
             settled,
             category,
             sort: sortKey,
-            limit: Math.min(held - rows.length, MAX_PAGE_ROWS),
+            limit: Math.min(held - rows.length, MAX_BILLS_PAGE_ROWS),
             after: cursorOf(last),
           })
           if (cancelled || mine !== generation.current) return

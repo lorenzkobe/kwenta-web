@@ -54,10 +54,26 @@ const buttonNamed = (label: string) =>
     | HTMLButtonElement
     | undefined
 
+// A test settles several times and each settle may take up to 3 s on a loaded machine; the 5 s default
+// timed tests out mid-body, and a timed-out body keeps running into the next test.
+vi.setConfig({ testTimeout: 15_000 })
+
+// Waits for the dialog's work to finish rather than for a fixed time: while it checks for unsent
+// changes it says so, and a busy button reads "…" (or "Resetting…") until the whole sync-then-wipe
+// chain has returned. A fixed 20 ms let assertions run mid-chain under load, and a late wipe from
+// one test then landed in the next.
 async function settle() {
-  await act(async () => {
-    await new Promise((r) => setTimeout(r, 20))
-  })
+  await vi.waitFor(
+    async () => {
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 0))
+      })
+      const checking = (container.textContent ?? '').includes('Checking for unsynced changes')
+      const busy = [...container.querySelectorAll('button')].some((b) => (b.textContent ?? '').trim().endsWith('…'))
+      if (checking || busy) throw new Error('dialog still busy')
+    },
+    { timeout: 3000, interval: 5 },
+  )
 }
 
 async function queueStagedBill(id: string) {

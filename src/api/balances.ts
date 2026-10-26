@@ -313,6 +313,9 @@ export type PersonalBillRow = {
 
 export type PersonalBillBuckets = { mine: PersonalBillRow[]; shared: PersonalBillRow[] }
 
+/** The most rows one `kwenta_personal_bills_page` call returns: 083 clamps `p_limit` to 1..500. */
+export const MAX_BILLS_PAGE_ROWS = 500
+
 /** The last row a reader holds: the next page starts strictly after it in the chosen sort. */
 export type PersonalBillCursor = { id: string; createdAt: string; title: string }
 

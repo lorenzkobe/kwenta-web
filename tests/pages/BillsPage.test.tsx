@@ -35,12 +35,21 @@ const server = vi.hoisted(() => ({
   gate: null as null | { match: (q: { limit: number; after?: { id: string } }) => boolean; release: Array<() => void> },
   /** A Show more step answers with this many rows instead of `limit` (stands in for many earlier taps). */
   stepRows: 0,
+  /** Fake calls not yet answered; a call held by `gate` does not count, so settle() cannot wait on it. */
+  inFlight: 0,
+  /** Bumped per test: a late answer from an earlier test must not move this test's in-flight count. */
+  generation: 0,
+  /** The per-call row cap the page sees (500 in the app); the chunking test lowers it. */
+  pageCap: 500,
 }))
 
 vi.mock('@/api/balances', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/api/balances')>()
   return {
     ...actual,
+    get MAX_BILLS_PAGE_ROWS() {
+      return server.pageCap
+    },
     fetchPersonalBillsPage: vi.fn(
       async (
         _userId: string,
@@ -53,30 +62,41 @@ vi.mock('@/api/balances', async (importOriginal) => {
           after?: { id: string }
         },
       ) => {
-        if (server.fail) throw server.fail
-        let rows = q.bucket === 'mine' ? server.mine : server.shared
-        if (q.settled === 'settled') rows = rows.filter((r) => r.settled)
-        if (q.settled === 'unsettled') rows = rows.filter((r) => !r.settled)
-        if (q.category) rows = rows.filter((r) => r.category === q.category)
-        if (server.noMatch) rows = []
-        const start = q.after ? rows.findIndex((r) => r.id === q.after!.id) + 1 : 0
-        const size = q.after && server.stepRows > 0 && q.limit === 20 ? server.stepRows : q.limit
-        const answer = {
-          data: {
-            rows: rows.slice(start, start + size),
-            matching: rows.length,
-            mine: server.mine.length,
-            shared: server.shared.length,
-            categories: server.categories,
-          },
-          fromCache: server.fromCache,
-          fetchedAt: '2026-10-20T00:00:00.000Z',
+        const gen = server.generation
+        const track = (delta: number) => {
+          if (gen === server.generation) server.inFlight += delta
         }
-        if (server.gate?.match(q)) {
-          const gate = server.gate
-          await new Promise<void>((resolve) => gate.release.push(resolve))
+        track(1)
+        try {
+          if (server.fail) throw server.fail
+          let rows = q.bucket === 'mine' ? server.mine : server.shared
+          if (q.settled === 'settled') rows = rows.filter((r) => r.settled)
+          if (q.settled === 'unsettled') rows = rows.filter((r) => !r.settled)
+          if (q.category) rows = rows.filter((r) => r.category === q.category)
+          if (server.noMatch) rows = []
+          const start = q.after ? rows.findIndex((r) => r.id === q.after!.id) + 1 : 0
+          const size = q.after && server.stepRows > 0 && q.limit === 20 ? server.stepRows : q.limit
+          const answer = {
+            data: {
+              rows: rows.slice(start, start + size),
+              matching: rows.length,
+              mine: server.mine.length,
+              shared: server.shared.length,
+              categories: server.categories,
+            },
+            fromCache: server.fromCache,
+            fetchedAt: '2026-10-20T00:00:00.000Z',
+          }
+          if (server.gate?.match(q)) {
+            const gate = server.gate
+            track(-1)
+            await new Promise<void>((resolve) => gate.release.push(resolve))
+            track(1)
+          }
+          return answer
+        } finally {
+          track(-1)
         }
-        return answer
       },
     ),
     fetchPersonalBills: vi.fn(async () => {
@@ -169,11 +189,37 @@ const STAGED = row('Mine', 0, { id: 'staged-1', title: 'Offline lunch', settled:
 let container: HTMLDivElement
 let root: Root
 
+// A test settles several times and each settle may take up to 3 s on a loaded machine; the 5 s default
+// timed tests out mid-body, and a timed-out body keeps running into the next test.
+vi.setConfig({ testTimeout: 15_000 })
+
+// Waits until no fake call is in flight and the page has stopped changing for three ticks. A fixed
+// number of ticks asserted before answers landed under load; the late answer of a timed-out test
+// then wrote into the next test's container.
 async function settle() {
-  for (let i = 0; i < 6; i++) {
-    await act(async () => {
-      await new Promise((r) => setTimeout(r, 0))
-    })
+  // Counting mutations instead of comparing innerHTML: serialising 540 rows every tick was itself
+  // slow enough to time the chunked-reload test out under load.
+  let mutations = 0
+  const observer = new MutationObserver((records) => {
+    mutations += records.length
+  })
+  observer.observe(container, { childList: true, subtree: true, characterData: true, attributes: true })
+  let seen = -1
+  let stable = 0
+  try {
+    await vi.waitFor(
+      async () => {
+        await act(async () => {
+          await new Promise((r) => setTimeout(r, 0))
+        })
+        stable = server.inFlight === 0 && mutations === seen ? stable + 1 : 0
+        seen = mutations
+        if (stable < 3) throw new Error('page still settling')
+      },
+      { timeout: 3000, interval: 0 },
+    )
+  } finally {
+    observer.disconnect()
   }
 }
 
@@ -233,6 +279,9 @@ beforeEach(async () => {
   server.noMatch = false
   server.gate = null
   server.stepRows = 0
+  server.inFlight = 0
+  server.generation++
+  server.pageCap = 500
   vi.mocked(fetchPersonalBillsPage).mockClear()
   vi.mocked(fetchPersonalBills).mockClear()
   vi.mocked(exportBillsToCSV).mockClear()
@@ -513,23 +562,27 @@ describe('BillsPage, server-paged', () => {
     expect(button(/Show more/)?.textContent).toContain('5')
   })
 
-  it('C23: reloading more than 500 loaded rows is chunked at 500 per call', async () => {
-    server.mine = Array.from({ length: 560 }, (_, i) => row('Mine', i + 1))
-    // One Show more step that answers 520 rows stands in for 26 taps: 540 rows are then held.
-    server.stepRows = 520
+  // The per-call cap is lowered to 15 (it is 500 in the app, 083's clamp), so the same chunking is
+  // exercised with 50 rows: rendering 540 took over 20 s on a loaded machine and timed the test out.
+  // 15, not 20: a cap equal to the page size could not be told apart from a page-size call.
+  it('C23: reloading more loaded rows than one call may return is chunked at the per-call cap', async () => {
+    server.pageCap = 15
+    server.mine = Array.from({ length: 70 }, (_, i) => row('Mine', i + 1))
+    // One Show more step that answers 30 rows stands in for several taps: 50 rows are then held.
+    server.stepRows = 30
     await render()
     await click(button(/Show more/))
-    expect(text()).toContain('Mine #540')
+    expect(text()).toContain('Mine #050')
     const before = calls().length
 
     await act(async () => useAppStore.getState().bumpDataVersion())
     await settle()
 
     const added = calls().slice(before)
-    expect(added.map((q) => q.limit)).toEqual([20, 500, 20])
+    expect(added.map((q) => q.limit)).toEqual([20, 15, 15])
     expect(added[1]).toMatchObject({ after: { id: 'mine-020' } })
-    expect(added[2]).toMatchObject({ after: { id: 'mine-520' } })
-    expect(text()).toContain('Mine #540')
+    expect(added[2]).toMatchObject({ after: { id: 'mine-035' } })
+    expect(text()).toContain('Mine #050')
   })
 
   it('C23 race: a Show more tap during a reload is refused until the reload lands, and no deleted bill returns', async () => {

@@ -862,7 +862,17 @@ describe('what the focus probe relies on', () => {
  */
 describe('sync-realign: per-entity reconcile', () => {
   const NEWER_PG = '2026-09-23T10:00:00+00:00'
-  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
+  // The debounce windows are asserted on a fake clock: real sleeps of 50-100 ms stretched past the
+  // 150 ms debounce on a loaded machine. Only the clock the scheduler reads is faked, and only around
+  // delivery; the flush's own async work then runs on real timers.
+  async function onFakeClock(steps: () => Promise<void>) {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] })
+    try {
+      await steps()
+    } finally {
+      vi.useRealTimers()
+    }
+  }
 
   function billEv(id: string, created_at: string, table: string, rowId: string, billId = 'B1'): Ev {
     return ev({
@@ -907,20 +917,27 @@ describe('sync-realign: per-entity reconcile', () => {
   it('C5: the flush is a trailing debounce — nothing is reconciled 50 ms after the first event', async () => {
     reconcileMovesSplit()
     await started()
-    deliver(billEv('t-1', '2026-09-23T12:00:01.000Z', 'bills', 'B1'))
-    await sleep(50)
-    expect(reconciles()).toHaveLength(0)
+    await onFakeClock(async () => {
+      deliver(billEv('t-1', '2026-09-23T12:00:01.000Z', 'bills', 'B1'))
+      await vi.advanceTimersByTimeAsync(50)
+      expect(reconciles()).toHaveLength(0)
+      await vi.advanceTimersByTimeAsync(100)
+    })
     await vi.waitFor(() => expect(reconciles()).toHaveLength(1))
   })
 
   it('C5: events for one bill spread 60 ms apart still coalesce into one reconcile', async () => {
     reconcileMovesSplit()
     const before = await started()
-    deliver(billEv('sp-1', '2026-09-23T12:00:01.000Z', 'bills', 'B1'))
-    await sleep(60)
-    deliver(billEv('sp-2', '2026-09-23T12:00:02.000Z', 'bill_items', 'I1'))
-    await sleep(60)
-    deliver(billEv('sp-3', '2026-09-23T12:00:03.000Z', 'item_splits', 'S1'))
+    await onFakeClock(async () => {
+      deliver(billEv('sp-1', '2026-09-23T12:00:01.000Z', 'bills', 'B1'))
+      await vi.advanceTimersByTimeAsync(60)
+      deliver(billEv('sp-2', '2026-09-23T12:00:02.000Z', 'bill_items', 'I1'))
+      await vi.advanceTimersByTimeAsync(60)
+      deliver(billEv('sp-3', '2026-09-23T12:00:03.000Z', 'item_splits', 'S1'))
+      expect(reconciles()).toHaveLength(0)
+      await vi.advanceTimersByTimeAsync(150)
+    })
     await vi.waitFor(() => expect(localStorage.getItem(CURSOR_KEY)).toBe('2026-09-23T12:00:03.000Z'))
     await settle()
     expect(reconciles()).toHaveLength(1)
@@ -931,13 +948,15 @@ describe('sync-realign: per-entity reconcile', () => {
   it('C5: a steady stream is still flushed within the 1 s cap', async () => {
     reconcileMovesSplit()
     await started()
-    for (let i = 0; i < 13; i++) {
-      deliver(billEv(`cap-${i}`, `2026-09-23T12:00:${String(i + 10).padStart(2, '0')}.000Z`, 'item_splits', 'S1'))
-      await sleep(100)
-    }
-    // ~1.3 s of events 100 ms apart: a debounce without its cap would not have flushed yet.
-    expect(reconciles().length).toBeGreaterThanOrEqual(1)
-  }, 5_000)
+    await onFakeClock(async () => {
+      for (let i = 0; i < 13; i++) {
+        deliver(billEv(`cap-${i}`, `2026-09-23T12:00:${String(i + 10).padStart(2, '0')}.000Z`, 'item_splits', 'S1'))
+        await vi.advanceTimersByTimeAsync(100)
+      }
+    })
+    // 1.3 s of events 100 ms apart: a debounce without its cap would not have flushed yet.
+    await vi.waitFor(() => expect(reconciles().length).toBeGreaterThanOrEqual(1))
+  })
 
   it('C6: events for two bills in one burst cost two reconciles and ONE bump', async () => {
     reconcileMovesSplit()
