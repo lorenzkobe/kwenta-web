@@ -128,6 +128,8 @@ const ENDPOINT_LABELS: Record<string, string> = {
   overview: 'your balances',
   statement: 'this statement',
   group: 'this group',
+  'group-full': 'this group',
+  'group-bills': "this group's bills",
   'group-payments': "this group's payments",
   'group-breakdown': "this member's balances",
   'group-spending': "this group's spending",
@@ -313,7 +315,7 @@ export type PersonalBillRow = {
 
 export type PersonalBillBuckets = { mine: PersonalBillRow[]; shared: PersonalBillRow[] }
 
-/** The most rows one `kwenta_personal_bills_page` call returns: 083 clamps `p_limit` to 1..500. */
+/** The most rows one `kwenta_personal_bills_page` or `kwenta_group_bills_page` call returns: 083 and 085 clamp `p_limit` to 1..500. */
 export const MAX_BILLS_PAGE_ROWS = 500
 
 /** The last row a reader holds: the next page starts strictly after it in the chosen sort. */
@@ -479,66 +481,191 @@ export type GroupDetail = {
   rawDebts: { from: string; to: string; amount: number }[]
 }
 
-/** Resolves to null when the group is missing, deleted, or the caller is not an active member. */
-export async function fetchGroupDetail(userId: string, groupId: string) {
-  return fetchEndpoint<GroupDetail | null>(
+export type GroupBillRow = GroupDetail['bills'][number]
+
+/** The group screen's first page: the newest bills, plus counts over ALL live bills (085). */
+export type GroupDetailPaged = GroupDetail & {
+  billCount: number
+  /** Who paid how many of the live bills, removed members included; the screen keeps the roster. */
+  billPayers: { userId: string; count: number }[]
+}
+
+/** The last bill a reader holds: the next page starts strictly after it (created_at DESC, id). */
+export type GroupBillsCursor = { id: string; createdAt: string }
+
+export type GroupBillsPageQuery = {
+  limit: number
+  payer: string | null
+  after?: GroupBillsCursor
+}
+
+export type GroupBillsPage = { rows: GroupBillRow[]; matching: number }
+
+const asRecords = (v: unknown) => (Array.isArray(v) ? (v as Record<string, unknown>[]) : [])
+
+function toGroupBill(b: Record<string, unknown>): GroupBillRow {
+  return {
+    id: String(b.id ?? ''),
+    title: String(b.title ?? ''),
+    note: String(b.note ?? ''),
+    currency: String(b.currency ?? ''),
+    totalAmount: Number(b.totalAmount ?? 0),
+    createdAt: String(b.createdAt ?? ''),
+    createdBy: String(b.createdBy ?? ''),
+    paidBy: String(b.paidBy ?? ''),
+    groupId: String(b.groupId ?? ''),
+    category: typeof b.category === 'string' && b.category ? b.category : null,
+    payorName: String(b.payorName ?? 'Unknown'),
+    ...toConversionFields(b),
+  }
+}
+
+function toGroupDetail(data: unknown): GroupDetail | null {
+  if (!data || typeof data !== 'object') return null
+  const o = data as Record<string, unknown>
+  const g = (o.group ?? {}) as Record<string, unknown>
+  return {
+    group: {
+      id: String(g.id ?? ''),
+      name: String(g.name ?? ''),
+      currency: String(g.currency ?? ''),
+      createdBy: String(g.createdBy ?? ''),
+      inviteCode: String(g.inviteCode ?? ''),
+      updatedAt: String(g.updatedAt ?? ''),
+    },
+    members: asRecords(o.members).map((m) => ({
+      id: String(m.id ?? ''),
+      userId: String(m.userId ?? ''),
+      profileName: String(m.profileName ?? 'Unknown'),
+      isCurrentUser: m.isCurrentUser === true,
+    })),
+    bills: asRecords(o.bills).map(toGroupBill),
+    pairwise: asRecords(o.pairwise).map((p) => ({
+      memberUserId: String(p.memberUserId ?? ''),
+      displayName: String(p.displayName ?? 'Unknown'),
+      net: Number(p.net ?? 0),
+    })),
+    totalToReceive: Number(o.totalToReceive ?? 0),
+    totalToPay: Number(o.totalToPay ?? 0),
+    memberBalances: asRecords(o.memberBalances).map((m) => ({
+      userId: String(m.userId ?? ''),
+      displayName: String(m.displayName ?? 'Unknown'),
+      amount: Number(m.amount ?? 0),
+    })),
+    rawDebts: asRecords(o.rawDebts).map((d) => ({
+      from: String(d.from ?? ''),
+      to: String(d.to ?? ''),
+      amount: Number(d.amount ?? 0),
+    })),
+  }
+}
+
+function toGroupDetailPaged(data: unknown): GroupDetailPaged | null {
+  const detail = toGroupDetail(data)
+  if (!detail) return null
+  const o = data as Record<string, unknown>
+  const billCount = Number(o.billCount)
+  return {
+    ...detail,
+    billCount: Number.isFinite(billCount) ? billCount : detail.bills.length,
+    billPayers: asRecords(o.billPayers).map((p) => ({
+      userId: String(p.userId ?? ''),
+      count: Number(p.count ?? 0),
+    })),
+  }
+}
+
+/**
+ * The group screen's read: everything kwenta_group_detail answers, with only the `limit` newest
+ * bills plus `billCount` / `billPayers` over all of them (085). Resolves to null when the group is
+ * missing, deleted, or the caller is not an active member.
+ *
+ * It owns the `group:<id>` key, so a write recomputes it through `kwenta_read` with the limit and
+ * the re-read costs no request.
+ */
+export async function fetchGroupDetailPaged(userId: string, groupId: string, limit = 20) {
+  return fetchEndpoint<GroupDetailPaged | null>(
     `group:${groupId}`,
     userId,
-    { fn: 'kwenta_group_detail', argName: 'p_group_id', id: groupId },
-    (data) => {
-    if (!data || typeof data !== 'object') return null
-    const o = data as Record<string, unknown>
-    const g = (o.group ?? {}) as Record<string, unknown>
-    const arr = (v: unknown) => (Array.isArray(v) ? (v as Record<string, unknown>[]) : [])
-    return {
-      group: {
-        id: String(g.id ?? ''),
-        name: String(g.name ?? ''),
-        currency: String(g.currency ?? ''),
-        createdBy: String(g.createdBy ?? ''),
-        inviteCode: String(g.inviteCode ?? ''),
-        updatedAt: String(g.updatedAt ?? ''),
-      },
-      members: arr(o.members).map((m) => ({
-        id: String(m.id ?? ''),
-        userId: String(m.userId ?? ''),
-        profileName: String(m.profileName ?? 'Unknown'),
-        isCurrentUser: m.isCurrentUser === true,
-      })),
-      bills: arr(o.bills).map((b) => ({
-        id: String(b.id ?? ''),
-        title: String(b.title ?? ''),
-        note: String(b.note ?? ''),
-        currency: String(b.currency ?? ''),
-        totalAmount: Number(b.totalAmount ?? 0),
-        createdAt: String(b.createdAt ?? ''),
-        createdBy: String(b.createdBy ?? ''),
-        paidBy: String(b.paidBy ?? ''),
-        groupId: String(b.groupId ?? ''),
-        category: typeof b.category === 'string' && b.category ? b.category : null,
-        payorName: String(b.payorName ?? 'Unknown'),
-        ...toConversionFields(b),
-      })),
-      pairwise: arr(o.pairwise).map((p) => ({
-        memberUserId: String(p.memberUserId ?? ''),
-        displayName: String(p.displayName ?? 'Unknown'),
-        net: Number(p.net ?? 0),
-      })),
-      totalToReceive: Number(o.totalToReceive ?? 0),
-      totalToPay: Number(o.totalToPay ?? 0),
-      memberBalances: arr(o.memberBalances).map((m) => ({
-        userId: String(m.userId ?? ''),
-        displayName: String(m.displayName ?? 'Unknown'),
-        amount: Number(m.amount ?? 0),
-      })),
-      rawDebts: arr(o.rawDebts).map((d) => ({
-        from: String(d.from ?? ''),
-        to: String(d.to ?? ''),
-        amount: Number(d.amount ?? 0),
-      })),
-    }
-    },
+    { fn: 'kwenta_group_detail_paged', argName: 'p_group_id', id: groupId, limit },
+    toGroupDetailPaged,
   )
+}
+
+/**
+ * The group with EVERY bill, for an export or the member share card, fetched on tap.
+ *
+ * It has its own key: it is never mounted, so a write never recomputes it, and it can neither
+ * replace the page's read spec (which would make every later write prime the full list) nor
+ * consume the page's primed answer. Its saved copy is what an offline export falls back to.
+ * Resolves to null when the group is missing, deleted, or the caller is not an active member.
+ */
+export async function fetchGroupDetail(userId: string, groupId: string) {
+  return fetchEndpoint<GroupDetail | null>(
+    `group-full:${groupId}`,
+    userId,
+    { fn: 'kwenta_group_detail', argName: 'p_group_id', id: groupId },
+    toGroupDetail,
+  )
+}
+
+/**
+ * A live page after a row, never cached and never primed: a saved copy of "the rows after X"
+ * answers nothing once X is gone, and a first-page read must not be handed rows from the middle.
+ */
+async function fetchCursorPage<T>(
+  fn: string,
+  args: Record<string, unknown>,
+  family: string,
+  map: (raw: unknown) => T,
+): Promise<{ data: T; fromCache: false; fetchedAt: string }> {
+  if (typeof navigator !== 'undefined' && !navigator.onLine) {
+    throw new ApiError(`You're offline. Connect to load more of ${describeEndpoint(family)}.`)
+  }
+  try {
+    const { data: raw, error } = await supabase.rpc(fn, args)
+    if (error) throw error
+    const data = map(raw)
+    refreshOnlineStatus()
+    return { data, fromCache: false, fetchedAt: now() }
+  } catch (err) {
+    if (isAccessError(err)) {
+      throw new ApiError(`You no longer have access to ${describeEndpoint(family)}.`, err)
+    }
+    throw new ApiError(`Could not load more of ${describeEndpoint(family)}.`, err)
+  }
+}
+
+function toGroupBillsPage(data: unknown): GroupBillsPage {
+  // NULL is the server declining (not a member any more, or the group is gone), not an empty
+  // list: mapping it to no rows would read as "No bills paid by X" and be cached as such.
+  if (data === null || data === undefined) {
+    throw Object.assign(new Error('permission denied for this group'), { code: '42501' })
+  }
+  const o = data as Record<string, unknown>
+  const matching = Number(o.matching)
+  return {
+    rows: asRecords(o.rows).map(toGroupBill),
+    matching: Number.isFinite(matching) ? matching : 0,
+  }
+}
+
+/**
+ * One page of a group's bill list, optionally only one payer's. The FIRST page is an ordinary
+ * cached read per payer (its arguments ride `extraArgs`, so a write never asks `kwenta_read` to
+ * recompute it); a page `after` a row is a "Show more" step, live only.
+ */
+export async function fetchGroupBillsPage(userId: string, groupId: string, query: GroupBillsPageQuery) {
+  const args = { p_group_id: groupId, p_limit: query.limit, p_payer: query.payer }
+  if (!query.after) {
+    return fetchEndpoint<GroupBillsPage>(
+      `group-bills:${groupId}:${query.payer ?? ''}`,
+      userId,
+      { fn: 'kwenta_group_bills_page', extraArgs: args },
+      toGroupBillsPage,
+    )
+  }
+  return fetchCursorPage('kwenta_group_bills_page', { ...args, p_after: query.after }, 'group-bills', toGroupBillsPage)
 }
 
 export type BillSplitRow = {
@@ -720,25 +847,7 @@ export async function fetchPersonalBillsPage(userId: string, query: PersonalBill
       toBillsPage,
     )
   }
-
-  if (typeof navigator !== 'undefined' && !navigator.onLine) {
-    throw new ApiError("You're offline. Connect to load more of your bills.")
-  }
-  try {
-    const { data: raw, error } = await supabase.rpc('kwenta_personal_bills_page', {
-      ...args,
-      p_after: query.after,
-    })
-    if (error) throw error
-    const data = toBillsPage(raw)
-    refreshOnlineStatus()
-    return { data, fromCache: false, fetchedAt: now() }
-  } catch (err) {
-    if (isAccessError(err)) {
-      throw new ApiError(`You no longer have access to ${describeEndpoint('personal-bills-page')}.`, err)
-    }
-    throw new ApiError(`Could not load more of ${describeEndpoint('personal-bills-page')}.`, err)
-  }
+  return fetchCursorPage('kwenta_personal_bills_page', { ...args, p_after: query.after }, 'personal-bills-page', toBillsPage)
 }
 
 export async function fetchRecentBills(userId: string, limit = 5) {

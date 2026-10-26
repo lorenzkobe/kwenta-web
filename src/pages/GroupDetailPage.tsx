@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from 'react'
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import {
   ArrowLeft,
   Check,
@@ -21,12 +21,18 @@ import {
 import { toast } from 'sonner'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import {
+  fetchGroupBillsPage,
   fetchGroupDetail,
+  fetchGroupDetailPaged,
   fetchGroupSettlementHistory,
   fetchGroupSpending,
+  MAX_BILLS_PAGE_ROWS,
+  type GroupBillRow,
+  type GroupDetail,
   type SettlementHistoryItem,
 } from '@/api/balances'
 import { useServerData } from '@/hooks/useServerData'
+import { useKeysetMore } from '@/hooks/useKeysetMore'
 import { useSelection } from '@/hooks/useSelection'
 import { buildGroupShareRows, groupPoolAmount, selectionShareState } from '@/lib/balance-share'
 import {
@@ -88,6 +94,29 @@ type MemberRow = {
   userId: string
   profileName: string
   isCurrentUser: boolean
+}
+
+const BILLS_PAGE_SIZE = 20
+
+const billCursor = (b: GroupBillRow) => ({ id: b.id, createdAt: b.createdAt })
+
+const FULL_LIST_FAILED = "Couldn't load this group's bills. Check your connection and try again."
+const FULL_LIST_STALE = "Couldn't load every bill. Check your connection and try again."
+
+const fullListMessage = (error: unknown) =>
+  error instanceof Error && error.message === FULL_LIST_STALE ? FULL_LIST_STALE : FULL_LIST_FAILED
+
+/**
+ * Every bill of the group, fetched on tap: the page holds one screenful. Only `bills` is taken
+ * from this answer; money always comes from the screen's own payload. A saved copy of the full
+ * list is refused while the screen shows fresh data, since its bills would disagree with the
+ * balances beside them; when the screen itself is a saved copy, the saved list matches it.
+ */
+async function loadFullBills(userId: string, groupId: string, screenIsCopy: boolean): Promise<GroupBillRow[]> {
+  const { data, fromCache } = await fetchGroupDetail(userId, groupId)
+  if (!data) throw new Error('This group is no longer available.')
+  if (fromCache && !screenIsCopy) throw new Error(FULL_LIST_STALE)
+  return data.bills
 }
 
 function sheetBackdrop(onClose: () => void) {
@@ -687,8 +716,23 @@ export function GroupDetailPage() {
   const [deleteGroupConfirmOpen, setDeleteGroupConfirmOpen] = useState(false)
   const [showTotalSpending, setShowTotalSpending] = useState(false)
   const [exportOpen, setExportOpen] = useState(false)
+  // The summary image lists every bill, but the page holds one screenful: opening the dialog asks
+  // for the full list once, and the card is built only from that answer, never from the partial one.
+  const [exportBills, setExportBills] = useState<
+    { status: 'loading' } | { status: 'failed'; message: string } | { status: 'ready'; bills: GroupBillRow[] }
+  >({ status: 'loading' })
+  const [exportRetry, setExportRetry] = useState(0)
+  const exportFetch = useRef<Promise<GroupBillRow[]> | null>(null)
+  const screenIsCopy = useRef(false)
   const [billPayorFilter, setBillPayorFilter] = useState<string | null>(null)
-  const [billsShown, setBillsShown] = useState(10)
+  // This component is reused when a search or a notification opens another group in place; nothing
+  // chosen for one group (a payer, an open export) carries over to the next.
+  const [shownGroupId, setShownGroupId] = useState(groupId)
+  if (shownGroupId !== groupId) {
+    setShownGroupId(groupId)
+    setBillPayorFilter(null)
+    setExportOpen(false)
+  }
   const selection = useSelection(`${userId ?? ''}:${groupId ?? ''}`)
   const [shareSelectionOpen, setShareSelectionOpen] = useState(false)
   const [exportMember, setExportMember] = useState<{
@@ -698,15 +742,52 @@ export function GroupDetailPage() {
     bills: GroupMemberBillEntry[]
   } | null>(null)
 
+  // An export taps the list the open dialog already asked for (or is still asking for), so one
+  // open costs one request; the money in the file is the screen's own, with only `bills` replaced.
+  async function exportPayload(): Promise<GroupDetail> {
+    if (!userId || !groupId || !detail.data) throw new Error('no group')
+    let bills: Promise<GroupBillRow[]>
+    if (exportBills.status === 'ready') bills = Promise.resolve(exportBills.bills)
+    else if (exportBills.status === 'loading' && exportFetch.current) bills = exportFetch.current
+    else bills = loadFullBills(userId, groupId, detail.fromCache)
+    return { ...detail.data, bills: await bills }
+  }
+
+  useEffect(() => {
+    if (!exportOpen || !userId || !groupId) return
+    let cancelled = false
+    const request = loadFullBills(userId, groupId, screenIsCopy.current)
+    exportFetch.current = request
+    request.then(
+      (bills) => {
+        if (!cancelled) setExportBills({ status: 'ready', bills })
+      },
+      (error: unknown) => {
+        if (!cancelled) setExportBills({ status: 'failed', message: fullListMessage(error) })
+      },
+    )
+    return () => {
+      cancelled = true
+    }
+  }, [exportOpen, exportRetry, userId, groupId])
+
   async function handleMemberShare(member: { userId: string; profileName: string }) {
     if (!group) return
+    if (!userId || !groupId) return
+    let allBills: GroupBillRow[]
+    try {
+      allBills = await loadFullBills(userId, groupId, detail.fromCache)
+    } catch (error) {
+      toast.error(fullListMessage(error))
+      return
+    }
     // balanceByUser is viewer-perspective (positive = they owe you). The member
     // share card is framed from the member's own side (positive = they receive),
     // so flip the sign before handing it to the export card.
     const viewerNet = Math.round((balanceByUser.get(member.userId) ?? 0) * 100) / 100
     const net = memberShareNetFromViewerNet(viewerNet)
     const memberBills: GroupMemberBillEntry[] = []
-    for (const bill of bills ?? []) {
+    for (const bill of allBills) {
       const details = await getBillWithDetails(bill.id)
       if (!details) continue
       let share = 0
@@ -742,11 +823,12 @@ export function GroupDetailPage() {
   )
   const settlementHistory = payments.loading && !payments.data ? undefined : (payments.data ?? [])
 
-  // The whole screen in one call: group, roster, bills with payer names, the viewer's pairwise
-  // standing, every member's net against the POOL, and the directed debt graph. This replaced
-  // four Dexie queries plus a recompute of the entire group ledger three separate ways.
+  // The whole screen in one call: group, roster, the newest bills with payer names, the viewer's
+  // pairwise standing, every member's net against the POOL, and the directed debt graph. This
+  // replaced four Dexie queries plus a recompute of the entire group ledger three separate ways.
+  // Older bills come page by page (useKeysetMore); an export fetches them all on tap.
   const loadDetail = useCallback(
-    () => (userId && groupId ? fetchGroupDetail(userId, groupId) : Promise.reject(new Error('no user'))),
+    () => (userId && groupId ? fetchGroupDetailPaged(userId, groupId, BILLS_PAGE_SIZE) : Promise.reject(new Error('no user'))),
     [userId, groupId],
   )
   const detail = useServerData(
@@ -762,25 +844,57 @@ export function GroupDetailPage() {
   }, [detail.data])
 
   const members = useMemo(() => detail.data?.members, [detail.data])
-  const bills = useMemo(
+  // Chips come from the counts over ALL bills, not from the rows loaded, restricted to the
+  // current roster: a member who left still has bills in the group but nobody to filter by.
+  const payerChips = useMemo(() => {
+    const paid = new Set((detail.data?.billPayers ?? []).filter((p) => p.count > 0).map((p) => p.userId))
+    return (members ?? []).filter((m) => paid.has(m.userId))
+  }, [detail.data, members])
+  const showPayerChips = payerChips.length > 1
+  const payerFilter =
+    showPayerChips && billPayorFilter && payerChips.some((m) => m.userId === billPayorFilter) ? billPayorFilter : null
+  // A filter whose chip is gone is dropped for good: it must not come back with the chip.
+  if (billPayorFilter !== null && detail.data && payerFilter === null) setBillPayorFilter(null)
+  screenIsCopy.current = detail.fromCache
+
+  // A payer's first page is its own cached read; the unfiltered first page is the detail's bills.
+  const loadPayerBills = useCallback(
     () =>
-      detail.data?.bills.map((b) => ({
-        id: b.id,
-        title: b.title,
-        note: b.note,
-        currency: b.currency,
-        total_amount: b.totalAmount,
-        original_currency: b.originalCurrency,
-        original_total: b.originalTotal,
-        created_at: b.createdAt,
-        created_by: b.createdBy,
-        paid_by: b.paidBy,
-        group_id: b.groupId,
-        category: b.category,
-        payorName: b.payorName,
-      })),
-    [detail.data],
+      userId && groupId && payerFilter
+        ? fetchGroupBillsPage(userId, groupId, { limit: BILLS_PAGE_SIZE, payer: payerFilter })
+        : Promise.reject(new Error('no user')),
+    [userId, groupId, payerFilter],
   )
+  const payerBills = useServerData(
+    userId && groupId && payerFilter ? loadPayerBills : null,
+    [userId, groupId, payerFilter],
+    groupId && payerFilter ? `group-bills:${groupId}:${payerFilter}` : undefined,
+  )
+  // An answer saved by a build that paged nothing holds every bill and no count.
+  const billCount = detail.data ? (detail.data.billCount ?? detail.data.bills.length) : 0
+  const detailBills = useMemo(
+    () => (detail.data ? { rows: detail.data.bills, matching: billCount } : undefined),
+    [detail.data, billCount],
+  )
+  const billsKeyset = useKeysetMore({
+    userId,
+    listKey: `${groupId ?? ''}:${payerFilter ?? ''}`,
+    page: payerFilter ? payerBills.data : detailBills,
+    pageFromCache: payerFilter ? payerBills.fromCache : detail.fromCache,
+    pageSize: BILLS_PAGE_SIZE,
+    maxPerCall: MAX_BILLS_PAGE_ROWS,
+    cursorOf: billCursor,
+    fetchAfter: async (after, limit) =>
+      (await fetchGroupBillsPage(userId!, groupId!, { limit, payer: payerFilter, after })).data,
+    errorMessage: 'Could not load more bills.',
+  })
+  const bills = billsKeyset.rows
+
+  function choosePayer(next: string | null) {
+    setBillPayorFilter(next)
+    billsKeyset.reset()
+  }
+
 
   const balanceSummary = useMemo<GroupPairwiseSummary | null>(() => {
     const d = detail.data
@@ -862,7 +976,7 @@ export function GroupDetailPage() {
   const membershipLoaded = Array.isArray(members)
   const groupLoading = !userId || (detail.loading && !detail.data)
   const membersLoading = members === undefined
-  const billsLoading = bills === undefined
+  const billsLoading = payerFilter !== null && payerBills.data === undefined && payerBills.error === null
   const currentUserHasActiveMembership = Boolean(
     userId && (members ?? []).some((m) => m.userId === userId),
   )
@@ -963,12 +1077,11 @@ export function GroupDetailPage() {
     balanceByUser.set(e.memberUserId, e.net)
   }
 
-  const filteredBills = billPayorFilter && bills
-    ? bills.filter((b) => b.paid_by === billPayorFilter)
-    : (bills ?? [])
-  const billFilterName = billPayorFilter
-    ? (members?.find((m) => m.userId === billPayorFilter)?.profileName ?? 'this person')
+  const billFilterName = payerFilter
+    ? (members?.find((m) => m.userId === payerFilter)?.profileName ?? 'this person')
     : null
+  const payerBillsFailed = payerFilter !== null && payerBills.data === undefined && payerBills.error !== null
+  const noBillsAtAll = payerFilter ? payerBills.data?.matching === 0 : billCount === 0
 
   return (
     <>
@@ -989,7 +1102,11 @@ export function GroupDetailPage() {
               size="icon-sm"
               className="rounded-full"
               aria-label="Share group summary"
-              onClick={() => setExportOpen(true)}
+              onClick={() => {
+                setExportBills({ status: 'loading' })
+                exportFetch.current = null
+                setExportOpen(true)
+              }}
             >
               <Share2 className="size-4" />
             </Button>
@@ -1320,42 +1437,41 @@ export function GroupDetailPage() {
             <h2 className="text-lg font-semibold">Group bills</h2>
           </div>
 
-          {!billsLoading && bills && bills.length > 0 && members && members.length > 1 && (() => {
-            const payorIds = new Set(bills.map((b) => b.paid_by))
-            const payorMembers = members.filter((m) => payorIds.has(m.userId))
-            if (payorMembers.length <= 1) return null
-            return (
-              <div className="mt-4 flex flex-wrap gap-1.5">
+          {showPayerChips && (
+            <div className="mt-4 flex flex-wrap gap-1.5">
+              <button
+                type="button"
+                onClick={() => choosePayer(null)}
+                className={cn(
+                  'rounded-full px-3 py-1 text-xs font-medium transition-colors',
+                  payerFilter === null
+                    ? 'bg-teal-800 text-white'
+                    : 'bg-stone-100 text-stone-600 hover:bg-stone-200',
+                )}
+              >
+                All
+              </button>
+              {payerChips.map((m) => (
                 <button
+                  key={m.userId}
                   type="button"
-                  onClick={() => { setBillPayorFilter(null); setBillsShown(10) }}
+                  onClick={() => choosePayer(payerFilter === m.userId ? null : m.userId)}
                   className={cn(
                     'rounded-full px-3 py-1 text-xs font-medium transition-colors',
-                    billPayorFilter === null
+                    payerFilter === m.userId
                       ? 'bg-teal-800 text-white'
                       : 'bg-stone-100 text-stone-600 hover:bg-stone-200',
                   )}
                 >
-                  All
+                  {m.isCurrentUser ? 'You' : m.profileName}
                 </button>
-                {payorMembers.map((m) => (
-                  <button
-                    key={m.userId}
-                    type="button"
-                    onClick={() => { setBillPayorFilter(billPayorFilter === m.userId ? null : m.userId); setBillsShown(10) }}
-                    className={cn(
-                      'rounded-full px-3 py-1 text-xs font-medium transition-colors',
-                      billPayorFilter === m.userId
-                        ? 'bg-teal-800 text-white'
-                        : 'bg-stone-100 text-stone-600 hover:bg-stone-200',
-                    )}
-                  >
-                    {m.isCurrentUser ? 'You' : m.profileName}
-                  </button>
-                ))}
-              </div>
-            )
-          })()}
+              ))}
+            </div>
+          )}
+
+          {payerFilter && payerBills.fromCache && !payerBills.revalidating && payerBills.data && (
+            <SavedCopyNotice fetchedAt={payerBills.fetchedAt} className="mt-3" />
+          )}
 
           {billsLoading ? (
             <div className="mt-4 space-y-2">
@@ -1369,24 +1485,26 @@ export function GroupDetailPage() {
                 </div>
               ))}
             </div>
-          ) : (!bills || bills.length === 0) ? (
-            <div className="mt-4 flex flex-col items-center py-8 text-center">
-              <p className="text-sm text-stone-400">No bills in this group yet</p>
+          ) : payerBillsFailed ? (
+            <div role="alert" className="mt-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-950">
+              {payerBills.error}
             </div>
-          ) : filteredBills.length === 0 ? (
+          ) : noBillsAtAll ? (
             <div className="mt-4 flex flex-col items-center py-8 text-center">
-              <p className="text-sm text-stone-400">No bills paid by {billFilterName}</p>
+              <p className="text-sm text-stone-400">
+                {payerFilter ? `No bills paid by ${billFilterName}` : 'No bills in this group yet'}
+              </p>
             </div>
           ) : (
             <div className="mt-4 space-y-2">
-              {filteredBills.slice(0, billsShown).map((bill) => (
+              {bills.map((bill) => (
                 <button
                   key={bill.id}
                   type="button"
                   onClick={() => setDetailBillId(bill.id)}
-                  className="flex w-full items-center justify-between rounded-xl border border-stone-200 bg-stone-100/60 px-4 py-3 text-left transition-colors hover:bg-stone-100/80"
+                  className="flex w-full items-center justify-between gap-3 rounded-xl border border-stone-200 bg-stone-100/60 px-4 py-3 text-left transition-colors hover:bg-stone-100/80"
                 >
-                  <div>
+                  <div className="min-w-0">
                     <div className="flex flex-wrap items-center gap-1.5">
                       <p className="text-sm font-medium text-stone-800">{bill.title}</p>
                       {bill.category && CATEGORY_LABELS[bill.category as BillCategory] && (
@@ -1402,24 +1520,25 @@ export function GroupDetailPage() {
                       )}
                     </div>
                     <p className="text-xs text-stone-400">
-                      Paid by {bill.payorName} · {new Date(bill.created_at).toLocaleDateString()}
+                      Paid by {bill.payorName} · {new Date(bill.createdAt).toLocaleDateString()}
                     </p>
                   </div>
-                  <div className="text-right">
+                  <div className="shrink-0 text-right">
                     <span className="text-sm font-semibold text-stone-800">
-                      {formatCurrency(bill.total_amount, bill.currency)}
+                      {formatCurrency(bill.totalAmount, bill.currency)}
                     </span>
-                    <OriginalAmountLine currency={bill.original_currency} amount={bill.original_total} />
+                    <OriginalAmountLine currency={bill.originalCurrency} amount={bill.originalTotal} />
                   </div>
                 </button>
               ))}
-              {filteredBills.length > billsShown && (
+              {billsKeyset.remaining > 0 && (
                 <button
                   type="button"
-                  onClick={() => setBillsShown((n) => n + 10)}
-                  className="w-full rounded-xl border border-stone-200 py-2.5 text-sm font-medium text-stone-500 transition-colors hover:bg-stone-50"
+                  onClick={billsKeyset.showMore}
+                  disabled={billsKeyset.loadingMore || billsKeyset.reloading}
+                  className="w-full rounded-xl border border-stone-200 py-2.5 text-sm font-medium text-stone-500 transition-colors hover:bg-stone-50 disabled:opacity-60"
                 >
-                  Show more ({filteredBills.length - billsShown} remaining)
+                  Show more ({billsKeyset.remaining} remaining)
                 </button>
               )}
             </div>
@@ -1605,16 +1724,18 @@ export function GroupDetailPage() {
           // — indistinguishable from a group where nobody has ever settled up.
           onExportPDF={
             userId && detail.data && settlementHistory
-              ? () => generateGroupPDF(detail.data!, settlementHistory)
+              ? async () => generateGroupPDF(await exportPayload(), settlementHistory)
               : undefined
           }
           onExportCSV={
             userId && detail.data && settlementHistory
-              ? () => exportGroupToCSV(detail.data!, settlementHistory)
+              ? async () => exportGroupToCSV(await exportPayload(), settlementHistory)
               : undefined
           }
+          imageDisabled={exportBills.status !== 'ready'}
           onClose={() => setExportOpen(false)}
         >
+          {exportBills.status === 'ready' ? (
           <GroupExportCard
             groupName={group.name}
             currency={group.currency}
@@ -1624,17 +1745,33 @@ export function GroupDetailPage() {
             }))}
             balanceSummary={exportBalanceSummary}
             pairwiseSummary={balanceSummary}
-            bills={(bills ?? []).map((b) => ({
+            bills={exportBills.bills.map((b) => ({
               id: b.id,
               title: b.title,
-              note: (b as { note?: string | null }).note ?? null,
-              total_amount: b.total_amount,
+              note: b.note || null,
+              total_amount: b.totalAmount,
               currency: b.currency,
-              created_at: b.created_at,
+              created_at: b.createdAt,
               payorName: b.payorName,
             }))}
             payments={settlementHistory ?? []}
           />
+          ) : exportBills.status === 'loading' ? (
+            <div className="flex items-center justify-center gap-2 py-12 text-sm text-stone-500">
+              <Loader2 className="size-4 animate-spin" />
+              Loading every bill…
+            </div>
+          ) : (
+            <div role="alert" className="space-y-3 rounded-2xl bg-white p-5 text-center text-sm text-stone-600">
+              <p>{exportBills.message}</p>
+              <Button size="sm" variant="outline" className="rounded-full" onClick={() => {
+                setExportBills({ status: 'loading' })
+                setExportRetry((n) => n + 1)
+              }}>
+                Try again
+              </Button>
+            </div>
+          )}
         </ExportImageDialog>
       )}
 

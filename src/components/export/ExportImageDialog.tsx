@@ -9,6 +9,8 @@ interface Props {
   filename?: string
   onExportPDF?: () => Promise<void>
   onExportCSV?: () => Promise<void>
+  /** True while the card is still a placeholder: saving it would export the placeholder. */
+  imageDisabled?: boolean
   onClose: () => void
 }
 
@@ -17,6 +19,7 @@ export function ExportImageDialog({
   filename = 'kwenta-export',
   onExportPDF,
   onExportCSV,
+  imageDisabled = false,
   onClose,
 }: Props) {
   const { ref: cardRef, busy, capture } = useExportImage()
@@ -101,6 +104,7 @@ export function ExportImageDialog({
   }, [])
 
   const anyBusy = busy || pdfBusy || csvBusy
+  const imageBlocked = anyBusy || imageDisabled
   const hasDataExports = onExportPDF || onExportCSV
 
   return (
@@ -127,18 +131,18 @@ export function ExportImageDialog({
         <div className="shrink-0 border-t border-stone-100 p-4 space-y-2">
           {canShareFiles ? (
             /* Real mobile: native share sheet handles save & copy */
-            <Button className="w-full rounded-xl gap-1.5" onClick={() => void handleShare()} disabled={anyBusy}>
+            <Button className="w-full rounded-xl gap-1.5" onClick={() => void handleShare()} disabled={imageBlocked}>
               {busy ? <Loader2 className="size-3.5 animate-spin" /> : <Share2 className="size-3.5" />}
               Share
             </Button>
           ) : (
             /* Desktop: explicit Save + Copy */
             <div className="flex gap-2">
-              <Button className="flex-1 rounded-xl gap-1.5" onClick={() => void handleSave()} disabled={anyBusy}>
+              <Button className="flex-1 rounded-xl gap-1.5" onClick={() => void handleSave()} disabled={imageBlocked}>
                 {busy ? <Loader2 className="size-3.5 animate-spin" /> : <Download className="size-3.5" />}
                 Save PNG
               </Button>
-              <Button variant="outline" className="flex-1 rounded-xl gap-1.5" onClick={() => void handleCopy()} disabled={anyBusy}>
+              <Button variant="outline" className="flex-1 rounded-xl gap-1.5" onClick={() => void handleCopy()} disabled={imageBlocked}>
                 {busy ? <Loader2 className="size-3.5 animate-spin" /> : <Copy className="size-3.5" />}
                 Copy
               </Button>

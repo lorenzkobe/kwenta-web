@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 const rpc = vi.hoisted(() => vi.fn())
 vi.mock('@/lib/supabase', () => ({ supabase: { rpc } }))
 
-import { fetchBalancesOverview, fetchGroupDetail } from '@/api/balances'
+import { fetchBalancesOverview, fetchGroupDetailPaged } from '@/api/balances'
 import { readCache } from '@/api/cache'
 import {
   clearPrimedReads,
@@ -111,9 +111,9 @@ describe('primed reads', () => {
     primeReads({ overview: RAW_OVERVIEW })
 
     rpc.mockResolvedValue({ data: null, error: null })
-    const group = await fetchGroupDetail('u1', 'g1')
+    const group = await fetchGroupDetailPaged('u1', 'g1')
 
-    expect(rpc).toHaveBeenCalledWith('kwenta_group_detail', { p_group_id: 'g1' })
+    expect(rpc).toHaveBeenCalledWith('kwenta_group_detail_paged', { p_group_id: 'g1', p_limit: 20 })
     expect(group.data).toBeNull()
   })
 
@@ -123,7 +123,7 @@ describe('primed reads', () => {
     primeReads({ 'group:g1': null })
 
     rpc.mockResolvedValue({ data: { group: { id: 'g1', name: 'Trip' } }, error: null })
-    const result = await fetchGroupDetail('u1', 'g1')
+    const result = await fetchGroupDetailPaged('u1', 'g1')
 
     expect(rpc).toHaveBeenCalledTimes(1)
     expect(result.data?.group.name).toBe('Trip')
@@ -192,14 +192,15 @@ describe('mounted read registry', () => {
 
   it('carries the id for a per-entity endpoint', async () => {
     rpc.mockResolvedValue({ data: null, error: null })
-    await fetchGroupDetail('u1', 'g1')
+    await fetchGroupDetailPaged('u1', 'g1')
     markReadMounted('group:g1')
 
     expect(mountedReadSpecs()).toContainEqual({
       key: 'group:g1',
-      fn: 'kwenta_group_detail',
+      fn: 'kwenta_group_detail_paged',
       argName: 'p_group_id',
       id: 'g1',
+      limit: 20,
     })
   })
 
@@ -231,7 +232,7 @@ describe('spec registry bounds', () => {
     // Per-entity keys mint a new spec for every bill/group/person opened, so an unbounded map
     // would grow for the life of the tab.
     rpc.mockResolvedValue({ data: null, error: null })
-    for (let i = 0; i < 200; i++) await fetchGroupDetail('u1', `g${i}`)
+    for (let i = 0; i < 200; i++) await fetchGroupDetailPaged('u1', `g${i}`)
 
     markReadMounted('group:g199')
     expect(mountedReadSpecs()).toHaveLength(1)
@@ -245,10 +246,10 @@ describe('spec registry bounds', () => {
     // The mounted set is the only thing a write asks for; evicting it would silently cost a round
     // trip after every save on a long-lived screen.
     rpc.mockResolvedValue({ data: null, error: null })
-    await fetchGroupDetail('u1', 'pinned')
+    await fetchGroupDetailPaged('u1', 'pinned')
     markReadMounted('group:pinned')
 
-    for (let i = 0; i < 200; i++) await fetchGroupDetail('u1', `g${i}`)
+    for (let i = 0; i < 200; i++) await fetchGroupDetailPaged('u1', `g${i}`)
 
     expect(mountedReadSpecs().map((s) => s.key)).toEqual(['group:pinned'])
   })

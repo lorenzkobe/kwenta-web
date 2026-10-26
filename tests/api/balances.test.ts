@@ -410,8 +410,8 @@ describe('balance API wrappers', () => {
     it('caches per group', async () => {
       rpc.mockResolvedValue({ data: { group: { id: 'g1' } }, error: null })
       await fetchGroupDetail('u1', 'g1')
-      expect(readCache('group:g1', 'u1')).not.toBeNull()
-      expect(readCache('group:g2', 'u1')).toBeNull()
+      expect(readCache('group-full:g1', 'u1')).not.toBeNull()
+      expect(readCache('group-full:g2', 'u1')).toBeNull()
     })
   })
 
